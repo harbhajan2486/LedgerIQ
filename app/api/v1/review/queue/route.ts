@@ -17,7 +17,7 @@ export async function GET(request: NextRequest) {
   const { data: documents, error } = await supabase
     .from("documents")
     .select(`
-      id, file_name, type, status, uploaded_at,
+      id, original_filename, document_type, status, uploaded_at,
       extractions(id, field_name, extracted_value, confidence, status)
     `)
     .eq("tenant_id", profile.tenant_id)
@@ -39,8 +39,8 @@ export async function GET(request: NextRequest) {
 
     return {
       id: doc.id,
-      fileName: doc.file_name,
-      type: doc.type,
+      fileName: doc.original_filename,
+      type: doc.document_type,
       uploadedAt: doc.uploaded_at,
       totalFields: extractions.length,
       lowConfidenceFields: lowConfidence,

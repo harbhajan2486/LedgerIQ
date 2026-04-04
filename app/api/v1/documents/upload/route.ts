@@ -90,9 +90,9 @@ export async function POST(request: NextRequest) {
     .insert({
       tenant_id: profile.tenant_id,
       client_id: clientId || null,
-      type: documentType,
-      file_s3_key: storagePath,
-      file_name: file.name,
+      document_type: documentType,
+      storage_path: storagePath,
+      original_filename: file.name,
       file_size_bytes: file.size,
       mime_type: file.type,
       status,

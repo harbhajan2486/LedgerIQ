@@ -21,7 +21,7 @@ export async function GET(
   // RLS ensures tenant isolation
   const { data: doc, error: docError } = await supabase
     .from("documents")
-    .select("id, file_name, type, status, file_s3_key, doc_fingerprint")
+    .select("id, original_filename, document_type, status, storage_path, doc_fingerprint")
     .eq("id", documentId)
     .eq("tenant_id", profile?.tenant_id)
     .single();
@@ -37,7 +37,7 @@ export async function GET(
   // Generate signed URL for the original document (15-minute expiry)
   const { data: signedUrl } = await supabase.storage
     .from("documents")
-    .createSignedUrl(doc.file_s3_key, 900);
+    .createSignedUrl(doc.storage_path, 900);
 
   return NextResponse.json({
     document: { ...doc, signedUrl: signedUrl?.signedUrl },
