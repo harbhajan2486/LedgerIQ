@@ -9,7 +9,7 @@ import {
   Plug, RefreshCw, FileText, Building2
 } from "lucide-react";
 import Link from "next/link";
-import { buttonVariants } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button-variants";
 
 interface TallyDoc {
   id: string;

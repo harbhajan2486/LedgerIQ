@@ -6,7 +6,7 @@ import { Progress } from "@/components/ui/progress";
 import { Upload, FileText, CheckCircle2, AlertCircle, X, Loader2, AlertTriangle } from "lucide-react";
 import { validateFileSize, validateFileMagicBytes, DOCUMENT_TYPES } from "@/lib/file-validation";
 import Link from "next/link";
-import { buttonVariants } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button-variants";
 
 type FileStatus = "pending" | "validating" | "uploading" | "processing" | "done" | "error" | "queued";
 

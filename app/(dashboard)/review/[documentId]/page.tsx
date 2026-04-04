@@ -8,7 +8,7 @@ import {
   CheckCircle2, AlertTriangle, Loader2, ChevronLeft,
   RotateCcw, Check, AlertCircle
 } from "lucide-react";
-import { buttonVariants } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button-variants";
 import Link from "next/link";
 import { toast } from "sonner";
 

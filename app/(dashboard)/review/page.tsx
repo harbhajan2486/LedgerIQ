@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { ClipboardCheck, FileText, ChevronRight, Loader2, AlertTriangle, Upload } from "lucide-react";
 import Link from "next/link";
-import { buttonVariants } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button-variants";
 
 interface QueueItem {
   id: string;

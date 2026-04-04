@@ -12,7 +12,7 @@ import {
   Upload,
 } from "lucide-react";
 import Link from "next/link";
-import { buttonVariants } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button-variants";
 
 async function getDashboardStats(tenantId: string) {
   try {
