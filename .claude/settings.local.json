@@ -6,7 +6,11 @@
       "Bash(npx shadcn@latest add card badge input label separator avatar dropdown-menu dialog alert-dialog toast sonner)",
       "Bash(npm install:*)",
       "Bash(npm run:*)",
-      "Bash(npx shadcn@latest add card badge input label sonner --overwrite)"
+      "Bash(npx shadcn@latest add card badge input label sonner --overwrite)",
+      "Bash(npx shadcn@latest add progress select)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ]
   }
 }
