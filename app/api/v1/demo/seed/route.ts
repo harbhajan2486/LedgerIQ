@@ -68,7 +68,7 @@ export async function POST() {
       storage_path: "demo/placeholder.pdf",
       file_size_bytes: 98000,
       mime_type: "application/pdf",
-      status: "approved",
+      status: "reviewed",
       uploaded_by: session.user.id,
       doc_fingerprint: "DEMO",
     },
@@ -112,11 +112,13 @@ export async function POST() {
   }
 
   // --- INSERT BANK TRANSACTIONS ---
-  const { data: txns } = await sb.from("bank_transactions").insert([
+  const { data: txns, error: txnsError } = await sb.from("bank_transactions").insert([
     {
       tenant_id: tenantId,
       transaction_date: "2026-03-17",
-      description: "NEFT-TATA STEEL LTD-INV4821",
+      narration: "NEFT-TATA STEEL LTD-INV4821",
+      amount: 495600,
+      type: "debit",
       debit_amount: 495600,
       ref_number: "DEMO-NEFT20260317001",
       bank_name: "HDFC Bank",
@@ -125,7 +127,9 @@ export async function POST() {
     {
       tenant_id: tenantId,
       transaction_date: "2026-03-24",
-      description: "IMPS-RELIANCE IND-RIL8834",
+      narration: "IMPS-RELIANCE IND-RIL8834",
+      amount: 218300,
+      type: "debit",
       debit_amount: 218300,
       ref_number: "DEMO-IMPS20260324002",
       bank_name: "HDFC Bank",
@@ -134,7 +138,9 @@ export async function POST() {
     {
       tenant_id: tenantId,
       transaction_date: "2026-03-28",
-      description: "UPI-OFFICE RENT-MAR26",
+      narration: "UPI-OFFICE RENT-MAR26",
+      amount: 85000,
+      type: "debit",
       debit_amount: 85000,
       ref_number: "DEMO-UPI20260328003",
       bank_name: "HDFC Bank",
@@ -143,13 +149,20 @@ export async function POST() {
     {
       tenant_id: tenantId,
       transaction_date: "2026-03-29",
-      description: "NEFT-UNKNOWN VENDOR-INV9921",
+      narration: "NEFT-UNKNOWN VENDOR-INV9921",
+      amount: 72500,
+      type: "debit",
       debit_amount: 72500,
       ref_number: "DEMO-NEFT20260329004",
       bank_name: "HDFC Bank",
       status: "unmatched",
     },
   ]).select("id");
+
+  if (txnsError) {
+    console.error("[demo/seed] bank_transactions insert error:", txnsError);
+    return NextResponse.json({ error: "Failed to insert transactions", detail: txnsError.message }, { status: 500 });
+  }
 
   const [txn1, txn2] = txns ?? [];
 
