@@ -1,28 +1,45 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 
+async function getTenantId(supabase: Awaited<ReturnType<typeof createClient>>, userId: string) {
+  const { data: profile } = await supabase
+    .from("users")
+    .select("tenant_id")
+    .eq("id", userId)
+    .single();
+  return profile?.tenant_id ?? null;
+}
+
+export async function GET() {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+
+  const tenantId = await getTenantId(supabase, user.id);
+  if (!tenantId) return NextResponse.json({ error: "Tenant not found" }, { status: 400 });
+
+  const { data: mappings } = await supabase
+    .from("tally_ledger_mappings")
+    .select("standard_account, tally_ledger_name")
+    .eq("tenant_id", tenantId);
+
+  return NextResponse.json({ mappings: mappings ?? [] });
+}
+
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
 
+  const tenantId = await getTenantId(supabase, user.id);
+  if (!tenantId) return NextResponse.json({ error: "Tenant not found" }, { status: 400 });
+
   const { mappings } = await request.json();
 
-  const { data: profile } = await supabase
-    .from("users")
-    .select("tenant_id")
-    .eq("id", user.id)
-    .single();
-
-  if (!profile?.tenant_id) {
-    return NextResponse.json({ error: "Tenant not found" }, { status: 400 });
-  }
-
-  // Upsert each ledger mapping
   const rows = Object.entries(mappings)
     .filter(([, v]) => v && (v as string).trim() !== "")
     .map(([standard_account, tally_ledger_name]) => ({
-      tenant_id: profile.tenant_id,
+      tenant_id: tenantId,
       standard_account,
       tally_ledger_name,
     }));
@@ -36,11 +53,11 @@ export async function POST(request: NextRequest) {
   }
 
   await supabase.from("audit_log").insert({
-    tenant_id: profile.tenant_id,
+    tenant_id: tenantId,
     user_id: user.id,
     action: "update_ledger_mappings",
     entity_type: "tenant",
-    entity_id: profile.tenant_id,
+    entity_id: tenantId,
     new_value: { mappings_saved: rows.length },
   });
 
