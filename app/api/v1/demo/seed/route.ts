@@ -23,11 +23,18 @@ export async function POST() {
   const tenantId = profile.tenant_id;
 
   // Clean up any previous demo data
-  await sb.from("reconciliations").delete().eq("tenant_id", tenantId);
-  await sb.from("extractions").delete().in("document_id",
-    (await sb.from("documents").select("id").eq("tenant_id", tenantId).eq("doc_fingerprint", "DEMO")).data?.map((d: { id: string }) => d.id) ?? []
-  );
-  await sb.from("documents").delete().eq("tenant_id", tenantId).eq("doc_fingerprint", "DEMO");
+  const { data: existingDemoDocs } = await sb
+    .from("documents")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("doc_fingerprint", "DEMO");
+
+  if (existingDemoDocs && existingDemoDocs.length > 0) {
+    const demoDocIds = existingDemoDocs.map((d: { id: string }) => d.id);
+    await sb.from("reconciliations").delete().in("document_id", demoDocIds);
+    await sb.from("extractions").delete().in("document_id", demoDocIds);
+    await sb.from("documents").delete().in("id", demoDocIds);
+  }
   await sb.from("bank_transactions").delete().eq("tenant_id", tenantId).like("ref_number", "DEMO-%");
 
   // --- INSERT 3 DEMO DOCUMENTS ---
