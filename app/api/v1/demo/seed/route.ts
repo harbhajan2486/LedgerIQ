@@ -2,6 +2,59 @@ import { NextResponse } from "next/server";
 import { createClient as createServiceClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 
+export async function DELETE() {
+  const supabase = await createClient();
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+
+  const sb = createServiceClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
+
+  const { data: profile } = await sb
+    .from("users")
+    .select("tenant_id")
+    .eq("id", session.user.id)
+    .single();
+
+  if (!profile?.tenant_id) return NextResponse.json({ error: "No tenant" }, { status: 400 });
+
+  const tenantId = profile.tenant_id;
+
+  const { data: demoDocs } = await sb
+    .from("documents")
+    .select("id")
+    .eq("tenant_id", tenantId)
+    .eq("doc_fingerprint", "DEMO");   // ONLY rows with exactly this fingerprint
+
+  // Safety hard-stop: demo seed creates exactly 3 docs.
+  // If somehow more than 10 rows match, something is wrong — abort.
+  if (demoDocs && demoDocs.length > 10) {
+    console.error("[demo/clear] Unexpectedly large demo doc count:", demoDocs.length);
+    return NextResponse.json({ error: "Unexpected state — aborting to protect real data" }, { status: 500 });
+  }
+
+  if (demoDocs && demoDocs.length > 0) {
+    const demoDocIds = demoDocs.map((d: { id: string }) => d.id);
+    // Delete child rows first (foreign key order), then documents
+    await sb.from("reconciliations").delete().in("document_id", demoDocIds);
+    await sb.from("extractions").delete().in("document_id", demoDocIds);
+    await sb.from("documents").delete().in("id", demoDocIds);
+    // ^^ .in() only matches the exact IDs from the DEMO fingerprint query above —
+    //    real documents are never in this list
+  }
+
+  // Only deletes transactions whose ref_number starts with "DEMO-"
+  // Real bank imports never use this prefix
+  await sb.from("bank_transactions")
+    .delete()
+    .eq("tenant_id", tenantId)
+    .like("ref_number", "DEMO-%");
+
+  return NextResponse.json({ success: true });
+}
+
 export async function POST() {
   const supabase = await createClient();
   const { data: { session } } = await supabase.auth.getSession();

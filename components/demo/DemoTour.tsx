@@ -4,12 +4,13 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { driver } from "driver.js";
 import "driver.js/dist/driver.css";
-import { Play, Sparkles, Loader2 } from "lucide-react";
+import { Play, Sparkles, Loader2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 export function DemoTour() {
   const [mounted, setMounted] = useState(false);
   const [seeding, setSeeding] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [seeded, setSeeded] = useState(false);
   const router = useRouter();
 
@@ -26,6 +27,19 @@ export function DemoTour() {
       }
     } finally {
       setSeeding(false);
+    }
+  }
+
+  async function clearDemoData() {
+    setClearing(true);
+    try {
+      const res = await fetch("/api/v1/demo/seed", { method: "DELETE" });
+      if (res.ok) {
+        setSeeded(false);
+        router.refresh();
+      }
+    } finally {
+      setClearing(false);
     }
   }
 
@@ -129,13 +143,22 @@ export function DemoTour() {
 
   return (
     <div className="flex items-center gap-2">
-      <Button variant="outline" onClick={loadDemoData} disabled={seeding} className="gap-2">
-        {seeding
-          ? <Loader2 size={14} className="animate-spin" />
-          : <Sparkles size={14} />
-        }
-        {seeded ? "Demo data loaded ✓" : "Load demo data"}
-      </Button>
+      {seeded ? (
+        <Button
+          variant="outline"
+          onClick={clearDemoData}
+          disabled={clearing}
+          className="gap-2 text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
+        >
+          {clearing ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+          {clearing ? "Clearing…" : "Clear demo data"}
+        </Button>
+      ) : (
+        <Button variant="outline" onClick={loadDemoData} disabled={seeding} className="gap-2">
+          {seeding ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+          {seeding ? "Loading…" : "Load demo data"}
+        </Button>
+      )}
       <Button variant="outline" onClick={startTour} className="gap-2">
         <Play size={14} />
         Watch tour
