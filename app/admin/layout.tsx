@@ -14,14 +14,14 @@ const navItems = [
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { data: { session } } = await supabase.auth.getSession();
 
-  if (!user) redirect("/login");
+  if (!session) redirect("/login");
 
   const { data: profile } = await supabase
     .from("users")
     .select("role")
-    .eq("id", user.id)
+    .eq("id", session.user.id)
     .single();
 
   if (profile?.role !== "super_admin") redirect("/dashboard");

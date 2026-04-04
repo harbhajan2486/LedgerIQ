@@ -75,19 +75,16 @@ export default async function DashboardPage() {
 
   try {
     const supabase = await createClient();
-    const { data: authData } = await supabase.auth.getUser();
-    user = authData.user;
-    console.log("[dashboard] user:", user?.id ?? "null");
+    const { data: { session } } = await supabase.auth.getSession();
+    user = session?.user ?? null;
 
     if (user) {
-      const { data, error } = await supabase
+      const { data } = await supabase
         .from("users")
         .select("tenant_id, role")
         .eq("id", user.id)
         .single();
-      if (error) console.error("[dashboard] profile error:", error.message);
       userProfile = data;
-      console.log("[dashboard] profile:", userProfile?.tenant_id ?? "null");
     }
   } catch (e) {
     console.error("[dashboard] auth/profile error:", e);
