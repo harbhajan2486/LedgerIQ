@@ -1,15 +1,33 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { driver } from "driver.js";
 import "driver.js/dist/driver.css";
-import { Play } from "lucide-react";
+import { Play, Sparkles, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 export function DemoTour() {
   const [mounted, setMounted] = useState(false);
+  const [seeding, setSeeding] = useState(false);
+  const [seeded, setSeeded] = useState(false);
+  const router = useRouter();
+
   useEffect(() => setMounted(true), []);
   if (!mounted) return null;
+
+  async function loadDemoData() {
+    setSeeding(true);
+    try {
+      const res = await fetch("/api/v1/demo/seed", { method: "POST" });
+      if (res.ok) {
+        setSeeded(true);
+        router.refresh();
+      }
+    } finally {
+      setSeeding(false);
+    }
+  }
 
   function startTour() {
     const driverObj = driver({
@@ -110,9 +128,18 @@ export function DemoTour() {
   }
 
   return (
-    <Button variant="outline" onClick={startTour} className="gap-2">
-      <Play size={14} />
-      Watch demo tour
-    </Button>
+    <div className="flex items-center gap-2">
+      <Button variant="outline" onClick={loadDemoData} disabled={seeding} className="gap-2">
+        {seeding
+          ? <Loader2 size={14} className="animate-spin" />
+          : <Sparkles size={14} />
+        }
+        {seeded ? "Demo data loaded ✓" : "Load demo data"}
+      </Button>
+      <Button variant="outline" onClick={startTour} className="gap-2">
+        <Play size={14} />
+        Watch tour
+      </Button>
+    </div>
   );
 }
