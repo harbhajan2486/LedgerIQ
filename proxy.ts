@@ -31,6 +31,9 @@ export default async function proxy(request: NextRequest) {
 
   const { pathname } = request.nextUrl;
 
+  // API routes handle their own auth — never redirect them
+  if (pathname.startsWith("/api/")) return supabaseResponse;
+
   // Public routes — allow without auth
   const publicPaths = ["/login", "/signup", "/auth/callback", "/auth/reset-password"];
   const isPublic = publicPaths.some((p) => pathname.startsWith(p));
