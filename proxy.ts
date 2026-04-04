@@ -32,7 +32,7 @@ export default async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // Public routes — allow without auth
-  const publicPaths = ["/login", "/auth/callback", "/auth/reset-password"];
+  const publicPaths = ["/login", "/signup", "/auth/callback", "/auth/reset-password"];
   const isPublic = publicPaths.some((p) => pathname.startsWith(p));
 
   // Admin routes — require super_admin role
