@@ -1,7 +1,4 @@
-export const dynamic = "force-dynamic";
-
-import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import AdminGuard from "./AdminGuard";
 import Link from "next/link";
 import { LayoutDashboard, Building2, BarChart3, Brain, DollarSign, LogOut } from "lucide-react";
 
@@ -12,21 +9,10 @@ const navItems = [
   { href: "/admin/knowledge", label: "Knowledge",     icon: Brain },
 ];
 
-export default async function AdminLayout({ children }: { children: React.ReactNode }) {
-  const supabase = await createClient();
-  const { data: { session } } = await supabase.auth.getSession();
-
-  if (!session) redirect("/login");
-
-  const { data: profile } = await supabase
-    .from("users")
-    .select("role")
-    .eq("id", session.user.id)
-    .single();
-
-  if (profile?.role !== "super_admin") redirect("/dashboard");
+export default function AdminLayout({ children }: { children: React.ReactNode }) {
 
   return (
+    <AdminGuard>
     <div className="flex h-screen bg-gray-50">
       {/* Sidebar */}
       <aside className="w-56 bg-gray-900 flex flex-col flex-shrink-0">
@@ -65,5 +51,6 @@ export default async function AdminLayout({ children }: { children: React.ReactN
         {children}
       </main>
     </div>
+    </AdminGuard>
   );
 }
