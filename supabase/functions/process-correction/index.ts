@@ -78,15 +78,23 @@ Deno.serve(async (req) => {
     // If 3+ corrections for the same vendor + field name → update profile
     // ----------------------------------------------------------------
     if (docFingerprint) {
-      const { data: similarCorrections } = await supabase
-        .from("corrections")
-        .select("correct_value, extraction_id")
+      // Fetch extraction IDs for this field first — avoids raw SQL interpolation
+      const { data: fieldExtractions } = await supabase
+        .from("extractions")
+        .select("id")
         .eq("tenant_id", tenantId)
-        .eq("doc_fingerprint", docFingerprint)
-        .filter("extraction_id", "in",
-          // Get all extraction IDs for this field name in this tenant
-          `(SELECT id FROM extractions WHERE tenant_id = '${tenantId}' AND field_name = '${fieldName}')`
-        );
+        .eq("field_name", fieldName);
+
+      const fieldExtractionIds = (fieldExtractions ?? []).map((e: { id: string }) => e.id);
+
+      const { data: similarCorrections } = fieldExtractionIds.length > 0
+        ? await supabase
+            .from("corrections")
+            .select("correct_value, extraction_id")
+            .eq("tenant_id", tenantId)
+            .eq("doc_fingerprint", docFingerprint)
+            .in("extraction_id", fieldExtractionIds)
+        : { data: [] };
 
       const correctionCount = (similarCorrections ?? []).length;
 
@@ -145,14 +153,22 @@ Deno.serve(async (req) => {
     // doc fingerprint + field → add to super-admin's promotion queue
     // ----------------------------------------------------------------
     if (docFingerprint) {
-      const { data: crossTenantCorrections } = await supabase
-        .from("corrections")
-        .select("tenant_id")
-        .eq("doc_fingerprint", docFingerprint)
-        .filter("extraction_id", "in",
-          `(SELECT id FROM extractions WHERE field_name = '${fieldName}')`
-        )
-        .eq("correct_value", correctValue);
+      // Fetch extraction IDs for this field across all tenants — avoids raw SQL interpolation
+      const { data: allFieldExtractions } = await supabase
+        .from("extractions")
+        .select("id")
+        .eq("field_name", fieldName);
+
+      const allFieldExtractionIds = (allFieldExtractions ?? []).map((e: { id: string }) => e.id);
+
+      const { data: crossTenantCorrections } = allFieldExtractionIds.length > 0
+        ? await supabase
+            .from("corrections")
+            .select("tenant_id")
+            .eq("doc_fingerprint", docFingerprint)
+            .in("extraction_id", allFieldExtractionIds)
+            .eq("correct_value", correctValue)
+        : { data: [] };
 
       const uniqueTenants = new Set(
         (crossTenantCorrections ?? []).map((c) => c.tenant_id)
