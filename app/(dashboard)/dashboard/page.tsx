@@ -78,9 +78,14 @@ export default async function DashboardPage() {
     .eq("id", user.id)
     .single();
 
-  const stats = userProfile?.tenant_id
-    ? await getDashboardStats(userProfile.tenant_id)
-    : null;
+  let stats = null;
+  try {
+    stats = userProfile?.tenant_id
+      ? await getDashboardStats(userProfile.tenant_id)
+      : null;
+  } catch (e) {
+    console.error("[dashboard] stats error:", e);
+  }
 
   const isEmpty = !stats || (stats.todayDocs === 0 && stats.pendingReview === 0);
 
