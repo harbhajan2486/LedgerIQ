@@ -66,7 +66,14 @@ export default function LoginPage() {
       }
     }
 
-    router.push("/dashboard");
+    // Super admins go to admin portal, everyone else to dashboard
+    const { data: profile } = await supabase
+      .from("users")
+      .select("role")
+      .eq("id", data.session!.user.id)
+      .single();
+
+    router.push(profile?.role === "super_admin" ? "/admin/tenants" : "/dashboard");
     router.refresh();
   }
 
