@@ -56,14 +56,13 @@ export default function SignupPage() {
             <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center mx-auto">
               <CheckCircle2 size={24} className="text-green-600" />
             </div>
-            <h2 className="text-lg font-semibold text-gray-900">Check your email</h2>
+            <h2 className="text-lg font-semibold text-gray-900">Account created!</h2>
             <p className="text-sm text-gray-500">
-              We sent a confirmation link to <strong>{email}</strong>.
-              Click it to activate your account and get started.
+              Your firm is set up. Sign in with the email and password you just used.
             </p>
-            <p className="text-xs text-gray-400">
-              Didn't receive it? Check your spam folder.
-            </p>
+            <Link href="/login" className="block">
+              <Button className="w-full">Go to sign in</Button>
+            </Link>
           </CardContent>
         </Card>
       </div>
@@ -165,7 +164,7 @@ export default function SignupPage() {
               <Button
                 type="submit"
                 className="w-full"
-                disabled={loading || checks.some((c) => !c.pass)}
+                disabled={loading || password.length < 8}
               >
                 {loading && <Loader2 size={16} className="mr-2 animate-spin" />}
                 Create account
