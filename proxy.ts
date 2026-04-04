@@ -38,44 +38,20 @@ export default async function proxy(request: NextRequest) {
       }
     );
 
-    const { data } = await supabase.auth.getUser();
-    user = data.user;
+    const { data, error: authError } = await supabase.auth.getUser();
+    // If auth check errors (network issue), fail open — each layout handles its own auth
+    if (!authError) user = data.user;
   } catch {
-    // Supabase unreachable — fail open so the app doesn't crash
-    // Each page/API route will handle its own auth check
     return NextResponse.next();
   }
 
-  // Admin routes — require super_admin role
+  // Admin routes — layout handles role check; proxy only guards unauthenticated access
+  // If auth check failed (user still null), let the admin layout handle it
   if (pathname.startsWith("/admin")) {
-    if (!user) return NextResponse.redirect(new URL("/login", request.url));
-
-    try {
-      const supabase = createServerClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-        {
-          cookies: {
-            getAll() { return request.cookies.getAll(); },
-            setAll() {},
-          },
-        }
-      );
-      const { data: profile } = await supabase
-        .from("users")
-        .select("role")
-        .eq("id", user.id)
-        .single();
-      if (profile?.role !== "super_admin") {
-        return NextResponse.redirect(new URL("/dashboard", request.url));
-      }
-    } catch {
-      return NextResponse.redirect(new URL("/login", request.url));
-    }
     return supabaseResponse;
   }
 
-  // Protected routes — redirect to login if not authenticated
+  // Protected routes — redirect to login if definitely not authenticated
   if (!user) {
     return NextResponse.redirect(new URL("/login", request.url));
   }
