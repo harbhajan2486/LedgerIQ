@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createClient as createServiceClient } from "@supabase/supabase-js";
-import { isPasswordBreached } from "@/lib/hibp";
 
 export async function POST(request: NextRequest) {
   try {
@@ -17,14 +16,6 @@ export async function POST(request: NextRequest) {
     if (password.length < 8) {
       return NextResponse.json(
         { error: "Password must be at least 8 characters." },
-        { status: 400 }
-      );
-    }
-
-    const breached = await isPasswordBreached(password);
-    if (breached) {
-      return NextResponse.json(
-        { error: "This password has appeared in a data breach. Please choose a different password." },
         { status: 400 }
       );
     }
