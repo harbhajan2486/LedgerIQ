@@ -38,7 +38,7 @@ export async function POST() {
   await sb.from("bank_transactions").delete().eq("tenant_id", tenantId).like("ref_number", "DEMO-%");
 
   // --- INSERT 3 DEMO DOCUMENTS ---
-  const { data: docs } = await sb.from("documents").insert([
+  const { data: docs, error: docsError } = await sb.from("documents").insert([
     {
       tenant_id: tenantId,
       document_type: "purchase_invoice",
@@ -74,35 +74,40 @@ export async function POST() {
     },
   ]).select("id");
 
+  if (docsError) {
+    console.error("[demo/seed] documents insert error:", docsError);
+    return NextResponse.json({ error: "Failed to insert documents", detail: docsError.message }, { status: 500 });
+  }
+
   const [doc1, doc2, doc3] = docs ?? [];
 
   // --- INSERT EXTRACTIONS FOR DOC 1 (Tata Steel — some low confidence) ---
   if (doc1) {
     await sb.from("extractions").insert([
-      { document_id: doc1.id, field_name: "vendor_name",    extracted_value: "Tata Steel Ltd",        confidence: 0.97, status: "accepted" },
-      { document_id: doc1.id, field_name: "gstin",          extracted_value: "21AABCT3518Q1ZS",       confidence: 0.94, status: "accepted" },
-      { document_id: doc1.id, field_name: "invoice_number", extracted_value: "TSL/2026/03/4821",      confidence: 0.99, status: "accepted" },
-      { document_id: doc1.id, field_name: "invoice_date",   extracted_value: "2026-03-15",             confidence: 0.98, status: "accepted" },
-      { document_id: doc1.id, field_name: "taxable_amount", extracted_value: "₹4,20,000",             confidence: 0.91, status: "accepted" },
-      { document_id: doc1.id, field_name: "cgst",           extracted_value: "₹37,800",               confidence: 0.88, status: "accepted" },
-      { document_id: doc1.id, field_name: "sgst",           extracted_value: "₹37,800",               confidence: 0.88, status: "accepted" },
-      { document_id: doc1.id, field_name: "total_amount",   extracted_value: "₹4,95,600",             confidence: 0.95, status: "accepted" },
-      { document_id: doc1.id, field_name: "hsn_code",       extracted_value: "7208",                  confidence: 0.62, status: "pending" },
-      { document_id: doc1.id, field_name: "tds_section",    extracted_value: "194C",                  confidence: 0.54, status: "pending" },
+      { document_id: doc1.id, tenant_id: tenantId, field_name: "vendor_name",    extracted_value: "Tata Steel Ltd",        confidence: 0.97, status: "accepted" },
+      { document_id: doc1.id, tenant_id: tenantId, field_name: "gstin",          extracted_value: "21AABCT3518Q1ZS",       confidence: 0.94, status: "accepted" },
+      { document_id: doc1.id, tenant_id: tenantId, field_name: "invoice_number", extracted_value: "TSL/2026/03/4821",      confidence: 0.99, status: "accepted" },
+      { document_id: doc1.id, tenant_id: tenantId, field_name: "invoice_date",   extracted_value: "2026-03-15",             confidence: 0.98, status: "accepted" },
+      { document_id: doc1.id, tenant_id: tenantId, field_name: "taxable_amount", extracted_value: "₹4,20,000",             confidence: 0.91, status: "accepted" },
+      { document_id: doc1.id, tenant_id: tenantId, field_name: "cgst",           extracted_value: "₹37,800",               confidence: 0.88, status: "accepted" },
+      { document_id: doc1.id, tenant_id: tenantId, field_name: "sgst",           extracted_value: "₹37,800",               confidence: 0.88, status: "accepted" },
+      { document_id: doc1.id, tenant_id: tenantId, field_name: "total_amount",   extracted_value: "₹4,95,600",             confidence: 0.95, status: "accepted" },
+      { document_id: doc1.id, tenant_id: tenantId, field_name: "hsn_code",       extracted_value: "7208",                  confidence: 0.62, status: "pending" },
+      { document_id: doc1.id, tenant_id: tenantId, field_name: "tds_section",    extracted_value: "194C",                  confidence: 0.54, status: "pending" },
     ]);
   }
 
   // --- INSERT EXTRACTIONS FOR DOC 2 (Reliance — good confidence) ---
   if (doc2) {
     await sb.from("extractions").insert([
-      { document_id: doc2.id, field_name: "vendor_name",    extracted_value: "Reliance Industries Ltd", confidence: 0.98, status: "accepted" },
-      { document_id: doc2.id, field_name: "gstin",          extracted_value: "27AAACR5055K1ZG",         confidence: 0.96, status: "accepted" },
-      { document_id: doc2.id, field_name: "invoice_number", extracted_value: "RIL/MUM/2026/8834",       confidence: 0.99, status: "accepted" },
-      { document_id: doc2.id, field_name: "invoice_date",   extracted_value: "2026-03-22",               confidence: 0.97, status: "accepted" },
-      { document_id: doc2.id, field_name: "taxable_amount", extracted_value: "₹1,85,000",               confidence: 0.93, status: "accepted" },
-      { document_id: doc2.id, field_name: "igst",           extracted_value: "₹33,300",                 confidence: 0.91, status: "accepted" },
-      { document_id: doc2.id, field_name: "total_amount",   extracted_value: "₹2,18,300",               confidence: 0.96, status: "accepted" },
-      { document_id: doc2.id, field_name: "hsn_code",       extracted_value: "2710",                    confidence: 0.89, status: "accepted" },
+      { document_id: doc2.id, tenant_id: tenantId, field_name: "vendor_name",    extracted_value: "Reliance Industries Ltd", confidence: 0.98, status: "accepted" },
+      { document_id: doc2.id, tenant_id: tenantId, field_name: "gstin",          extracted_value: "27AAACR5055K1ZG",         confidence: 0.96, status: "accepted" },
+      { document_id: doc2.id, tenant_id: tenantId, field_name: "invoice_number", extracted_value: "RIL/MUM/2026/8834",       confidence: 0.99, status: "accepted" },
+      { document_id: doc2.id, tenant_id: tenantId, field_name: "invoice_date",   extracted_value: "2026-03-22",               confidence: 0.97, status: "accepted" },
+      { document_id: doc2.id, tenant_id: tenantId, field_name: "taxable_amount", extracted_value: "₹1,85,000",               confidence: 0.93, status: "accepted" },
+      { document_id: doc2.id, tenant_id: tenantId, field_name: "igst",           extracted_value: "₹33,300",                 confidence: 0.91, status: "accepted" },
+      { document_id: doc2.id, tenant_id: tenantId, field_name: "total_amount",   extracted_value: "₹2,18,300",               confidence: 0.96, status: "accepted" },
+      { document_id: doc2.id, tenant_id: tenantId, field_name: "hsn_code",       extracted_value: "2710",                    confidence: 0.89, status: "accepted" },
     ]);
   }
 
