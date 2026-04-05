@@ -42,7 +42,7 @@ Deno.serve(async (req) => {
   try {
     const body = await req.json();
     documentId = body.documentId;
-    const { tenantId, storagePath, documentType, monthlySpend } = body;
+    const { tenantId, storagePath, documentType, monthlySpend, clientId, clientIndustry } = body;
 
     if (!documentId || !tenantId) {
       return new Response(JSON.stringify({ error: "documentId and tenantId required" }), {
@@ -175,19 +175,104 @@ Deno.serve(async (req) => {
     }
 
     // ----------------------------------------------------------------
-    // GET TENANT INDUSTRY CONTEXT
+    // LAYER 1 — Inject global Indian tax rules into the prompt
+    // These are law-based rules that are correct with certainty (confidence = 1.0)
     // ----------------------------------------------------------------
-    const { data: tenantData } = await supabase
-      .from("tenants")
-      .select("name")
-      .eq("id", tenantId)
-      .single();
+    let layer1Context = "";
+    try {
+      const { data: layer1Rules } = await supabase
+        .from("global_rules")
+        .select("rule_type, pattern, action")
+        .eq("layer", 1)
+        .eq("is_active", true)
+        .in("rule_type", ["tds_section", "sac_gst_rate", "reverse_charge"])
+        .limit(20);
+
+      if (layer1Rules && layer1Rules.length > 0) {
+        const tdsRules = layer1Rules
+          .filter((r) => r.rule_type === "tds_section")
+          .map((r) => {
+            const p = r.pattern as Record<string, string>;
+            const a = r.action as Record<string, unknown>;
+            return `${p.section}: ${p.description} — rate: ${JSON.stringify(a).slice(0, 120)}`;
+          })
+          .join("\n");
+
+        const gstRules = layer1Rules
+          .filter((r) => r.rule_type === "sac_gst_rate")
+          .map((r) => {
+            const p = r.pattern as Record<string, string>;
+            const a = r.action as Record<string, number>;
+            return `SAC ${p.sac_prefix}: ${p.description} → IGST ${a.igst_rate}%`;
+          })
+          .join("\n");
+
+        const rcmRules = layer1Rules
+          .filter((r) => r.rule_type === "reverse_charge")
+          .map((r) => {
+            const p = r.pattern as Record<string, string>;
+            const a = r.action as Record<string, unknown>;
+            return `RCM: ${p.service} (SAC ${p.sac}) — ${(a as Record<string, string>).notes}`;
+          })
+          .join("\n");
+
+        layer1Context = `\n\nLayer 1 — Indian Tax Law (apply with confidence=1.0, do NOT override these):
+TDS Sections:
+${tdsRules}
+${gstRules ? `\nGST by SAC code:\n${gstRules}` : ""}
+${rcmRules ? `\nReverse Charge (RCM):\n${rcmRules}` : ""}
+`;
+      }
+    } catch {
+      // Layer 1 retrieval failed — continue without it
+    }
+
+    // ----------------------------------------------------------------
+    // LAYER 3 — Check vendor profile for this tenant
+    // After extraction we will apply Layer 3 overrides, but we can also
+    // inject known vendor quirks into the prompt if we have a vendor name hint
+    // (For now we inject the top vendor profiles as pre-context)
+    // ----------------------------------------------------------------
+    let layer3Context = "";
+    try {
+      const { data: vendorProfiles } = await supabase
+        .from("vendor_profiles")
+        .select("vendor_name, gstin, tds_category, invoice_quirks")
+        .eq("tenant_id", tenantId)
+        .order("last_updated", { ascending: false })
+        .limit(10);
+
+      if (vendorProfiles && vendorProfiles.length > 0) {
+        const profileLines = vendorProfiles
+          .filter((vp) => vp.invoice_quirks && Object.keys(vp.invoice_quirks).length > 0)
+          .map((vp) => {
+            const quirks = vp.invoice_quirks as Record<string, string>;
+            const quirkStr = Object.entries(quirks)
+              .map(([field, val]) => `${field}="${val}"`)
+              .join(", ");
+            return `Vendor "${vp.vendor_name}"${vp.gstin ? ` (GSTIN: ${vp.gstin})` : ""}: ${quirkStr}${vp.tds_category ? `, TDS=${vp.tds_category}` : ""}`;
+          });
+
+        if (profileLines.length > 0) {
+          layer3Context = `\n\nLayer 3 — Your firm's learned vendor patterns (apply with high confidence for matching vendors):
+${profileLines.join("\n")}
+`;
+        }
+      }
+    } catch {
+      // Layer 3 retrieval failed — continue without it
+    }
+
+    // Industry context (from client, if set)
+    const industryContext = clientIndustry
+      ? `\nClient industry: ${clientIndustry}. Apply industry-specific defaults where relevant.\n`
+      : "";
 
     // ----------------------------------------------------------------
     // BUILD EXTRACTION PROMPT
     // ----------------------------------------------------------------
     const systemPrompt = `You are an expert Indian accounting document analyser. Extract structured data from the provided document.
-${fewShotExamples}
+${fewShotExamples}${layer1Context}${layer3Context}${industryContext}
 RULES:
 - Return ONLY valid JSON, no markdown, no explanation
 - For each field, provide "value" and "confidence" (0.0 to 1.0)
@@ -324,6 +409,43 @@ Return JSON in this exact format:
           data: { currentSpend: newSpend, limit: BUDGET_LIMIT },
         }),
       }).catch(() => {});
+    }
+
+    // ----------------------------------------------------------------
+    // LAYER 3 POST-PROCESSING — Apply vendor profile overrides
+    // If a vendor profile exists for the extracted vendor_name,
+    // override fields defined in invoice_quirks with confidence=0.99
+    // ----------------------------------------------------------------
+    const extractedVendorName = parsed["vendor_name"]?.value;
+    if (extractedVendorName) {
+      try {
+        const { data: vendorProfile } = await supabase
+          .from("vendor_profiles")
+          .select("invoice_quirks, tds_category, gstin")
+          .eq("tenant_id", tenantId)
+          .ilike("vendor_name", `%${extractedVendorName.split(" ").slice(0, 2).join("%")}%`)
+          .maybeSingle();
+
+        if (vendorProfile) {
+          const quirks = vendorProfile.invoice_quirks as Record<string, string>;
+          // Apply learned field values with boosted confidence
+          for (const [field, value] of Object.entries(quirks)) {
+            if (EXTRACTION_FIELDS.includes(field)) {
+              parsed[field] = { value, confidence: 0.99 };
+            }
+          }
+          // Apply learned TDS category
+          if (vendorProfile.tds_category && !parsed["tds_section"]?.value) {
+            parsed["tds_section"] = { value: vendorProfile.tds_category, confidence: 0.95 };
+          }
+          // Apply known GSTIN
+          if (vendorProfile.gstin && (!parsed["vendor_gstin"]?.value || parsed["vendor_gstin"].confidence < 0.9)) {
+            parsed["vendor_gstin"] = { value: vendorProfile.gstin, confidence: 0.99 };
+          }
+        }
+      } catch {
+        // Layer 3 post-processing failed — continue with unmodified extraction
+      }
     }
 
     // ----------------------------------------------------------------

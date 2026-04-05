@@ -128,6 +128,18 @@ export async function POST(request: NextRequest) {
     const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
     if (serviceKey) {
+      // Look up client industry for Layer 1/3 injection in extraction prompt
+      let clientIndustry: string | null = null;
+      if (clientId) {
+        const { data: clientData } = await supabase
+          .from("clients")
+          .select("industry_name")
+          .eq("id", clientId)
+          .eq("tenant_id", profile.tenant_id)
+          .single();
+        clientIndustry = clientData?.industry_name ?? null;
+      }
+
       fetch(`${supabaseUrl}/functions/v1/extract-document`, {
         method: "POST",
         headers: {
@@ -141,6 +153,8 @@ export async function POST(request: NextRequest) {
           documentType,
           monthlySpend,
           budgetLimit,
+          clientId: clientId || null,
+          clientIndustry,
         }),
       }).catch(() => {
         // Edge Function call failed — document stays in 'queued' state, will be retried

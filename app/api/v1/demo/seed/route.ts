@@ -2,6 +2,33 @@ import { NextResponse } from "next/server";
 import { createClient as createServiceClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 
+// GET — check if demo data exists (so the UI can show "Clear demo" even after page refresh)
+export async function GET() {
+  try {
+    const supabase = await createClient();
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) return NextResponse.json({ hasDemo: false });
+
+    const sb = createServiceClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    );
+    const { data: profile } = await sb
+      .from("users").select("tenant_id").eq("id", session.user.id).single();
+    if (!profile?.tenant_id) return NextResponse.json({ hasDemo: false });
+
+    const { count } = await sb
+      .from("documents")
+      .select("*", { count: "exact", head: true })
+      .eq("tenant_id", profile.tenant_id)
+      .eq("doc_fingerprint", "DEMO");
+
+    return NextResponse.json({ hasDemo: (count ?? 0) > 0 });
+  } catch {
+    return NextResponse.json({ hasDemo: false });
+  }
+}
+
 export async function DELETE() {
   try {
   const supabase = await createClient();

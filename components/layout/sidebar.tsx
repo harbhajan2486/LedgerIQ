@@ -13,6 +13,7 @@ import {
   Settings,
   LogOut,
   Loader2,
+  Building2,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
@@ -20,6 +21,7 @@ import { useState } from "react";
 
 const navItems = [
   { label: "Dashboard",      href: "/dashboard",       icon: LayoutDashboard },
+  { label: "Clients",        href: "/clients",         icon: Building2 },
   { label: "Upload",         href: "/upload",          icon: Upload },
   { label: "Review Queue",   href: "/review",          icon: ClipboardCheck },
   { label: "Reconciliation", href: "/reconciliation",  icon: GitMerge },

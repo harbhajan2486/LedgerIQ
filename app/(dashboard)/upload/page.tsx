@@ -1,12 +1,19 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
+import { useSearchParams } from "next/navigation";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import { Upload, FileText, CheckCircle2, AlertCircle, X, Loader2, AlertTriangle } from "lucide-react";
+import { Upload, FileText, CheckCircle2, AlertCircle, X, Loader2, AlertTriangle, Building2 } from "lucide-react";
 import { validateFileSize, validateFileMagicBytes, DOCUMENT_TYPES } from "@/lib/file-validation";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
+
+interface ClientOption {
+  id: string;
+  client_name: string;
+  industry_name: string | null;
+}
 
 type FileStatus = "pending" | "validating" | "uploading" | "processing" | "done" | "error" | "queued";
 
@@ -21,11 +28,23 @@ interface FileItem {
 }
 
 export default function UploadPage() {
+  const searchParams = useSearchParams();
+  const preselectedClientId = searchParams.get("client");
+
   const [files, setFiles] = useState<FileItem[]>([]);
   const [dragging, setDragging] = useState(false);
   const [budgetWarning, setBudgetWarning] = useState<string | null>(null);
   const [aiDown, setAiDown] = useState(false);
+  const [clients, setClients] = useState<ClientOption[]>([]);
+  const [selectedClientId, setSelectedClientId] = useState<string>(preselectedClientId ?? "");
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    fetch("/api/v1/clients")
+      .then((r) => r.json())
+      .then((d) => setClients(d.clients ?? []))
+      .catch(() => {});
+  }, []);
 
   function addFiles(newFiles: File[]) {
     const items: FileItem[] = newFiles.map((f) => ({
@@ -70,6 +89,7 @@ export default function UploadPage() {
     const formData = new FormData();
     formData.append("file", item.file);
     formData.append("documentType", item.documentType);
+    if (selectedClientId) formData.append("clientId", selectedClientId);
 
     try {
       const res = await fetch("/api/v1/documents/upload", { method: "POST", body: formData });
@@ -128,6 +148,31 @@ export default function UploadPage() {
         <p className="text-sm text-gray-500 mt-1">
           Upload invoices, expense bills, or bank statements. AI reads them automatically.
         </p>
+      </div>
+
+      {/* Client selector */}
+      <div className="flex items-center gap-3 p-3 bg-gray-50 border border-gray-200 rounded-lg">
+        <Building2 size={16} className="text-gray-400 flex-shrink-0" />
+        <div className="flex-1">
+          <label className="text-xs font-medium text-gray-600 block mb-1">Client (optional)</label>
+          <select
+            value={selectedClientId}
+            onChange={(e) => setSelectedClientId(e.target.value)}
+            className="w-full text-sm border border-gray-200 rounded px-2 py-1 bg-white text-gray-700 outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="">— No client / unassigned —</option>
+            {clients.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.client_name}{c.industry_name ? ` (${c.industry_name})` : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+        {clients.length === 0 && (
+          <Link href="/clients" className="text-xs text-blue-600 hover:underline flex-shrink-0">
+            Add clients →
+          </Link>
+        )}
       </div>
 
       {/* Banners */}

@@ -53,7 +53,7 @@ export async function POST(
 
   const { data: doc } = await supabase
     .from("documents")
-    .select("doc_fingerprint, type")
+    .select("doc_fingerprint, document_type")
     .eq("id", documentId)
     .single();
 

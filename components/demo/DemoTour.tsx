@@ -15,7 +15,14 @@ export function DemoTour() {
   const [seeded, setSeeded] = useState(false);
   const router = useRouter();
 
-  useEffect(() => setMounted(true), []);
+  useEffect(() => {
+    setMounted(true);
+    // Check if demo data already exists (survives page refresh)
+    fetch("/api/v1/demo/seed")
+      .then((r) => r.json())
+      .then((d) => { if (d.hasDemo) setSeeded(true); })
+      .catch(() => {});
+  }, []);
   if (!mounted) return null;
 
   async function loadDemoData() {
