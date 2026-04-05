@@ -66,7 +66,7 @@ export default function ReviewDetailPage() {
   const [loading, setLoading] = useState(true);
   const [completing, setCompleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [fileDataUrl, setFileDataUrl] = useState<string | null>(null);
   const fieldRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   useEffect(() => {
@@ -83,20 +83,23 @@ export default function ReviewDetailPage() {
           }))
         );
         setLoading(false);
-        // Fetch file as blob so iframe loads from same-origin blob URL (bypasses CSP)
+        // Fetch file and convert to data URL — works in all browsers, no CSP issues
         if (d.document?.id) {
           fetch(`/api/v1/documents/${d.document.id}/file`)
             .then((r) => r.blob())
-            .then((blob) => setBlobUrl(URL.createObjectURL(blob)))
+            .then((blob) => new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result as string);
+              reader.onerror = reject;
+              reader.readAsDataURL(blob);
+            }))
+            .then((dataUrl) => setFileDataUrl(dataUrl))
             .catch(() => {});
         }
       })
       .catch(() => { setError("Failed to load document."); setLoading(false); });
   }, [documentId]);
 
-  useEffect(() => {
-    return () => { if (blobUrl) URL.revokeObjectURL(blobUrl); };
-  }, [blobUrl]);
 
   // Keyboard navigation: Tab moves to next field, Enter accepts current field
   const handleKeyDown = useCallback((e: React.KeyboardEvent, extractionId: string, index: number) => {
@@ -248,12 +251,18 @@ export default function ReviewDetailPage() {
             <CardTitle className="text-sm text-gray-600">Original Document</CardTitle>
           </CardHeader>
           <CardContent className="p-0 h-full">
-            {blobUrl ? (
+            {fileDataUrl ? (
               document?.file_name?.match(/\.(jpe?g|png|gif|webp)$/i) ? (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={blobUrl} alt="Document" className="w-full h-full object-contain p-4" />
+                <img src={fileDataUrl} alt="Document" className="w-full h-full object-contain p-4" />
               ) : (
-                <iframe src={blobUrl} className="w-full h-full border-0" title="Document preview" />
+                <object
+                  data={fileDataUrl}
+                  type="application/pdf"
+                  className="w-full h-full"
+                >
+                  <embed src={fileDataUrl} type="application/pdf" className="w-full h-full" />
+                </object>
               )
             ) : (
               <div className="flex items-center justify-center h-full text-gray-400 text-sm">

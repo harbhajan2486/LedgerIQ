@@ -7,7 +7,7 @@ const ContentSecurityPolicy = [
   "img-src 'self' data: blob: https://*.supabase.co",
   "font-src 'self'",
   "connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.anthropic.com",
-  "frame-src 'self' https://*.supabase.co",
+  "frame-src 'self' blob: https://*.supabase.co",
   "frame-ancestors 'none'",
   "object-src 'none'",
   "base-uri 'self'",
