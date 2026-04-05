@@ -256,13 +256,11 @@ export default function ReviewDetailPage() {
                 // eslint-disable-next-line @next/next/no-img-element
                 <img src={fileDataUrl} alt="Document" className="w-full h-full object-contain p-4" />
               ) : (
-                <object
-                  data={fileDataUrl}
-                  type="application/pdf"
-                  className="w-full h-full"
-                >
-                  <embed src={fileDataUrl} type="application/pdf" className="w-full h-full" />
-                </object>
+                <iframe
+                  src={fileDataUrl}
+                  className="w-full h-full border-0"
+                  title="Document preview"
+                />
               )
             ) : (
               <div className="flex items-center justify-center h-full text-gray-400 text-sm">
