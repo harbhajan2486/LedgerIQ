@@ -1,19 +1,32 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { checkRateLimit, rateLimitResponse } from "@/lib/rate-limit";
+import { z } from "zod";
+
+const matchSchema = z.object({
+  transactionId: z.string().uuid(),
+  documentId: z.string().uuid(),
+});
 
 export async function POST(request: NextRequest) {
+  try {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+
+  const rl = await checkRateLimit(user.id);
+  if (!rl.allowed) return rateLimitResponse(rl.resetAt);
 
   const { data: profile } = await supabase
     .from("users").select("tenant_id").eq("id", user.id).single();
   if (!profile?.tenant_id) return NextResponse.json({ error: "Tenant not found" }, { status: 400 });
 
-  const { transactionId, documentId } = await request.json();
-  if (!transactionId || !documentId) {
-    return NextResponse.json({ error: "transactionId and documentId required" }, { status: 400 });
+  const body = await request.json();
+  const parsed = matchSchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid request", details: parsed.error.flatten().fieldErrors }, { status: 400 });
   }
+  const { transactionId, documentId } = parsed.data;
 
   const tenantId = profile.tenant_id;
 
@@ -51,4 +64,8 @@ export async function POST(request: NextRequest) {
   });
 
   return NextResponse.json({ success: true });
+  } catch (err) {
+    console.error("[reconciliation/match] Unhandled error:", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
 }

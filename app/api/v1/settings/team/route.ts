@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createClient as createServiceClient } from "@supabase/supabase-js";
+import { checkRateLimit, rateLimitResponse } from "@/lib/rate-limit";
+import { z } from "zod";
+
+const inviteSchema = z.object({
+  email: z.string().email(),
+  role: z.enum(["reviewer", "senior_reviewer", "admin"]),
+});
 
 async function getCallerInfo(supabase: Awaited<ReturnType<typeof createClient>>, userId: string) {
   const { data } = await supabase
@@ -12,26 +19,35 @@ async function getCallerInfo(supabase: Awaited<ReturnType<typeof createClient>>,
 }
 
 export async function GET() {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
 
-  const caller = await getCallerInfo(supabase, user.id);
-  if (!caller?.tenant_id) return NextResponse.json({ error: "Tenant not found" }, { status: 400 });
+    const caller = await getCallerInfo(supabase, user.id);
+    if (!caller?.tenant_id) return NextResponse.json({ error: "Tenant not found" }, { status: 400 });
 
-  const { data: members } = await supabase
-    .from("users")
-    .select("id, email, full_name, role, created_at")
-    .eq("tenant_id", caller.tenant_id)
-    .order("created_at", { ascending: true });
+    const { data: members } = await supabase
+      .from("users")
+      .select("id, email, full_name, role, created_at")
+      .eq("tenant_id", caller.tenant_id)
+      .order("created_at", { ascending: true });
 
-  return NextResponse.json({ members: members ?? [] });
+    return NextResponse.json({ members: members ?? [] });
+  } catch (err) {
+    console.error("[settings/team GET] Unhandled error:", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
 }
 
 export async function POST(request: NextRequest) {
+  try {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+
+  const rl = await checkRateLimit(user.id);
+  if (!rl.allowed) return rateLimitResponse(rl.resetAt);
 
   const caller = await getCallerInfo(supabase, user.id);
   if (!caller?.tenant_id) return NextResponse.json({ error: "Tenant not found" }, { status: 400 });
@@ -39,13 +55,12 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Only admins can invite team members." }, { status: 403 });
   }
 
-  const { email, role } = await request.json();
-  if (!email || !role) return NextResponse.json({ error: "email and role required" }, { status: 400 });
-
-  const validRoles = ["reviewer", "senior_reviewer", "admin"];
-  if (!validRoles.includes(role)) {
-    return NextResponse.json({ error: "Invalid role" }, { status: 400 });
+  const body = await request.json();
+  const parsed = inviteSchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid request", details: parsed.error.flatten().fieldErrors }, { status: 400 });
   }
+  const { email, role } = parsed.data;
 
   // Use service role to invite user via Supabase Auth
   const serviceClient = createServiceClient(
@@ -98,4 +113,8 @@ export async function POST(request: NextRequest) {
   });
 
   return NextResponse.json({ success: true });
+  } catch (err) {
+    console.error("[settings/team POST] Unhandled error:", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
 }

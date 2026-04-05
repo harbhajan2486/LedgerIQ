@@ -52,13 +52,14 @@ export function Sidebar() {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 px-3 py-4 space-y-0.5">
+      <nav className="flex-1 px-3 py-4 space-y-0.5" aria-label="Main navigation">
         {navItems.map(({ label, href, icon: Icon }) => {
           const active = pathname === href || pathname.startsWith(href + "/");
           return (
             <Link
               key={href}
               href={href}
+              aria-current={active ? "page" : undefined}
               className={cn(
                 "flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors",
                 active
@@ -66,7 +67,7 @@ export function Sidebar() {
                   : "text-gray-400 hover:bg-gray-800 hover:text-gray-100"
               )}
             >
-              <Icon size={16} className="flex-shrink-0" />
+              <Icon size={16} className="flex-shrink-0" aria-hidden="true" />
               {label}
             </Link>
           );
@@ -78,11 +79,12 @@ export function Sidebar() {
         <button
           onClick={handleLogout}
           disabled={loggingOut}
+          aria-label="Sign out of LedgerIQ"
           className="flex items-center gap-3 px-3 py-2 w-full rounded-md text-sm text-gray-400 hover:bg-gray-800 hover:text-gray-100 transition-colors"
         >
           {loggingOut
-            ? <Loader2 size={16} className="animate-spin" />
-            : <LogOut size={16} />
+            ? <Loader2 size={16} className="animate-spin" aria-hidden="true" />
+            : <LogOut size={16} aria-hidden="true" />
           }
           Sign out
         </button>

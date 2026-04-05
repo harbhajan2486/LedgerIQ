@@ -6,6 +6,7 @@ export async function DELETE(
   _request: NextRequest,
   { params }: { params: Promise<{ userId: string }> }
 ) {
+  try {
   const { userId: targetUserId } = await params;
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -57,4 +58,8 @@ export async function DELETE(
   });
 
   return NextResponse.json({ success: true });
+  } catch (err) {
+    console.error("[settings/team/[userId]] Unhandled error:", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
 }

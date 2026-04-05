@@ -11,6 +11,7 @@ async function getTenantId(supabase: Awaited<ReturnType<typeof createClient>>, u
 }
 
 export async function GET() {
+  try {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
@@ -28,9 +29,14 @@ export async function GET() {
     endpoint: tenant?.tally_endpoint ?? "",
     company: tenant?.tally_company_name ?? "",
   });
+  } catch (err) {
+    console.error("[settings/tally] Unhandled error:", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
 }
 
 export async function POST(request: NextRequest) {
+  try {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
@@ -61,4 +67,8 @@ export async function POST(request: NextRequest) {
   });
 
   return NextResponse.json({ success: true });
+  } catch (err) {
+    console.error("[settings/tally] Unhandled error:", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
 }

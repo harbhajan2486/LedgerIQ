@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
+import { toast } from "sonner";
 
 interface TallyDoc {
   id: string;
@@ -73,6 +74,11 @@ export default function TallyPage() {
     setPostingId(null);
     if (data.success) {
       setDocs((prev) => prev.filter((d) => d.id !== docId));
+      toast.success("Posted to Tally successfully.");
+    } else if (data.already_posted) {
+      toast.warning("Already posted — duplicate blocked.");
+    } else {
+      toast.error(data.error ?? "Failed to post to Tally. Check connection.");
     }
   }
 

@@ -377,6 +377,28 @@ export default function SettingsPage() {
               </Button>
             </CardContent>
           </Card>
+
+          {/* Data export */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base flex items-center gap-2">
+                <Download className="w-4 h-4" /> Export all firm data
+              </CardTitle>
+              <CardDescription>
+                Download all your documents, extractions, bank transactions, and reconciliations as a CSV. Use this for backups or if you ever switch platforms.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <a
+                href="/api/v1/export"
+                download
+                className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium border border-gray-200 rounded-md bg-white hover:bg-gray-50 transition-colors"
+                aria-label="Export all firm data as CSV"
+              >
+                <Download className="w-4 h-4" aria-hidden="true" /> Export firm data (CSV)
+              </a>
+            </CardContent>
+          </Card>
         </div>
       )}
 

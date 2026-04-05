@@ -1,5 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { checkRateLimit, rateLimitResponse } from "@/lib/rate-limit";
+import { z } from "zod";
+import { log } from "@/lib/logger";
+
+const correctSchema = z.object({
+  extractionId: z.string().uuid(),
+  action: z.enum(["accept", "correct"]),
+  correctValue: z.string().optional(),
+});
 
 // POST — record a correction or acceptance for a single field
 // This is the core of the learning engine — every correction is persisted immediately
@@ -7,18 +16,22 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ documentId: string }> }
 ) {
+  try {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
 
-  const { documentId } = await params;
-  const { extractionId, action, correctValue } = await request.json();
-  // action: "accept" | "correct"
-  // correctValue: required when action === "correct"
+  const rl = await checkRateLimit(user.id);
+  if (!rl.allowed) return rateLimitResponse(rl.resetAt);
 
-  if (!extractionId || !action) {
-    return NextResponse.json({ error: "extractionId and action are required" }, { status: 400 });
+  const { documentId } = await params;
+
+  const body = await request.json();
+  const parsed = correctSchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid request", details: parsed.error.flatten().fieldErrors }, { status: 400 });
   }
+  const { extractionId, action, correctValue } = parsed.data;
 
   const { data: profile } = await supabase
     .from("users")
@@ -131,4 +144,8 @@ export async function POST(
   }
 
   return NextResponse.json({ error: "Invalid action" }, { status: 400 });
+  } catch (err) {
+    log.error("correction_failed", { error: String(err) });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
 }

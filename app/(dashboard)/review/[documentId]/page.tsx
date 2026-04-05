@@ -236,17 +236,17 @@ export default function ReviewDetailPage() {
             <CardTitle className="text-sm text-gray-600">Original Document</CardTitle>
           </CardHeader>
           <CardContent className="p-0 h-full">
-            {document?.signedUrl ? (
-              document.signedUrl.includes(".pdf") || document.file_name?.endsWith(".pdf") ? (
+            {document?.id ? (
+              document.file_name?.endsWith(".pdf") || !document.file_name?.match(/\.(jpe?g|png|gif|webp)$/i) ? (
                 <iframe
-                  src={document.signedUrl}
+                  src={`/api/v1/documents/${document.id}/file`}
                   className="w-full h-full border-0"
                   title="Document preview"
                 />
               ) : (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
-                  src={document.signedUrl}
+                  src={`/api/v1/documents/${document.id}/file`}
                   alt="Document"
                   className="w-full h-full object-contain p-4"
                 />

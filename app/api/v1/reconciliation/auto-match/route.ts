@@ -6,6 +6,7 @@ const MATCH_THRESHOLD = 70;   // auto-match if score >= 70
 const POSSIBLE_THRESHOLD = 30; // flag as possible match if 30-69
 
 export async function POST(request: NextRequest) {
+  try {
   const supabase = await createClient();
   const { tenantId, transactionIds } = await request.json();
 
@@ -134,4 +135,8 @@ export async function POST(request: NextRequest) {
   }
 
   return NextResponse.json({ matched: autoMatched, possible: possibleMatched });
+  } catch (err) {
+    console.error("[reconciliation/auto-match] Unhandled error:", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
 }

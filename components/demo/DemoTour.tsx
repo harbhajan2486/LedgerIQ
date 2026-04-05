@@ -6,6 +6,7 @@ import { driver } from "driver.js";
 import "driver.js/dist/driver.css";
 import { Play, Sparkles, Loader2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { toast } from "sonner";
 
 export function DemoTour() {
   const [mounted, setMounted] = useState(false);
@@ -24,7 +25,12 @@ export function DemoTour() {
       if (res.ok) {
         setSeeded(true);
         router.refresh();
+        toast.success("Demo data loaded — explore the review queue and reconciliation screens.");
+      } else {
+        toast.error("Could not load demo data. Please try again.");
       }
+    } catch {
+      toast.error("Network error loading demo data.");
     } finally {
       setSeeding(false);
     }
@@ -37,7 +43,12 @@ export function DemoTour() {
       if (res.ok) {
         setSeeded(false);
         router.refresh();
+        toast.success("Demo data cleared.");
+      } else {
+        toast.error("Could not clear demo data. Please try again.");
       }
+    } catch {
+      toast.error("Network error clearing demo data.");
     } finally {
       setClearing(false);
     }
@@ -148,19 +159,20 @@ export function DemoTour() {
           variant="outline"
           onClick={clearDemoData}
           disabled={clearing}
+          aria-label="Clear demo data"
           className="gap-2 text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
         >
-          {clearing ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+          {clearing ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Trash2 size={14} aria-hidden="true" />}
           {clearing ? "Clearing…" : "Clear demo data"}
         </Button>
       ) : (
-        <Button variant="outline" onClick={loadDemoData} disabled={seeding} className="gap-2">
-          {seeding ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+        <Button variant="outline" onClick={loadDemoData} disabled={seeding} aria-label="Load demo data" className="gap-2">
+          {seeding ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Sparkles size={14} aria-hidden="true" />}
           {seeding ? "Loading…" : "Load demo data"}
         </Button>
       )}
-      <Button variant="outline" onClick={startTour} className="gap-2">
-        <Play size={14} />
+      <Button variant="outline" onClick={startTour} aria-label="Watch product tour" className="gap-2">
+        <Play size={14} aria-hidden="true" />
         Watch tour
       </Button>
     </div>

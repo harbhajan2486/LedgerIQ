@@ -3,6 +3,7 @@ import { createClient as createServiceClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 
 export async function DELETE() {
+  try {
   const supabase = await createClient();
   const { data: { session } } = await supabase.auth.getSession();
   if (!session) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
@@ -53,9 +54,14 @@ export async function DELETE() {
     .like("ref_number", "DEMO-%");
 
   return NextResponse.json({ success: true });
+  } catch (err) {
+    console.error("[demo/seed] Unhandled error:", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
 }
 
 export async function POST() {
+  try {
   const supabase = await createClient();
   const { data: { session } } = await supabase.auth.getSession();
   if (!session) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
@@ -247,4 +253,8 @@ export async function POST() {
   }
 
   return NextResponse.json({ success: true, documentsCreated: docs?.length ?? 0 });
+  } catch (err) {
+    console.error("[demo/seed] Unhandled error:", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
 }

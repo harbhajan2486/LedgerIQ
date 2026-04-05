@@ -1,19 +1,34 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { buildPurchaseVoucher, generateVoucherXml, postToTally } from "@/lib/tally-xml";
+import { checkRateLimit, rateLimitResponse } from "@/lib/rate-limit";
+import { z } from "zod";
+
+const postSchema = z.object({
+  documentId: z.string().uuid(),
+});
 
 export async function POST(request: NextRequest) {
+  try {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+
+  const rl = await checkRateLimit(user.id);
+  if (!rl.allowed) return rateLimitResponse(rl.resetAt);
 
   const { data: profile } = await supabase
     .from("users").select("tenant_id").eq("id", user.id).single();
   if (!profile?.tenant_id) return NextResponse.json({ error: "Tenant not found" }, { status: 400 });
 
   const tenantId = profile.tenant_id;
-  const { documentId } = await request.json();
-  if (!documentId) return NextResponse.json({ error: "documentId required" }, { status: 400 });
+
+  const body = await request.json();
+  const parsed = postSchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid request", details: parsed.error.flatten().fieldErrors }, { status: 400 });
+  }
+  const { documentId } = parsed.data;
 
   // Verify document belongs to tenant and is in the right state
   const { data: doc } = await supabase
@@ -138,4 +153,8 @@ export async function POST(request: NextRequest) {
     error: result.error ?? null,
     posting_id: posting?.id ?? null,
   });
+  } catch (err) {
+    console.error("[tally/post] Unhandled error:", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
 }

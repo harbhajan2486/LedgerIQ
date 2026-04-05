@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { checkRateLimit, rateLimitResponse } from "@/lib/rate-limit";
+import { log } from "@/lib/logger";
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 
@@ -14,9 +16,13 @@ const ALLOWED_MIMES = new Set([
 ]);
 
 export async function POST(request: NextRequest) {
+  try {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+
+  const rl = await checkRateLimit(user.id);
+  if (!rl.allowed) return rateLimitResponse(rl.resetAt);
 
   const { data: profile } = await supabase
     .from("users")
@@ -143,6 +149,8 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  log.info("document_uploaded", { userId: user.id, tenantId: profile.tenant_id, documentId: doc.id, fileName: file.name, queued: monthlySpend >= budgetLimit });
+
   return NextResponse.json({
     success: true,
     documentId: doc.id,
@@ -151,4 +159,8 @@ export async function POST(request: NextRequest) {
       : null,
     queued: monthlySpend >= budgetLimit,
   });
+  } catch (err) {
+    log.error("document_upload_failed", { error: String(err) });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
 }

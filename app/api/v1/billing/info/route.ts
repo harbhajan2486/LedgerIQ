@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 
 export async function GET() {
+  try {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
@@ -46,4 +47,8 @@ export async function GET() {
     docs_this_month: docsThisMonth ?? 0,
     ai_spend_this_month: aiSpend,
   });
+  } catch (err) {
+    console.error("[billing/info] Unhandled error:", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
 }

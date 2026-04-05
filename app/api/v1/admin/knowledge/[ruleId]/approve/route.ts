@@ -6,6 +6,7 @@ export async function POST(
   _request: NextRequest,
   { params }: { params: Promise<{ ruleId: string }> }
 ) {
+  try {
   const { ruleId } = await params;
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -36,4 +37,8 @@ export async function POST(
   });
 
   return NextResponse.json({ success: true });
+  } catch (err) {
+    console.error("[admin/knowledge/approve] Unhandled error:", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
 }

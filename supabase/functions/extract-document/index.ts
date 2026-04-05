@@ -38,8 +38,11 @@ const EXTRACTION_FIELDS = [
 ];
 
 Deno.serve(async (req) => {
+  let documentId: string | undefined;
   try {
-    const { documentId, tenantId, storagePath, documentType, monthlySpend } = await req.json();
+    const body = await req.json();
+    documentId = body.documentId;
+    const { tenantId, storagePath, documentType, monthlySpend } = body;
 
     if (!documentId || !tenantId) {
       return new Response(JSON.stringify({ error: "documentId and tenantId required" }), {
@@ -225,6 +228,12 @@ Return JSON in this exact format:
     // ----------------------------------------------------------------
     // CALL CLAUDE — try Haiku first, Sonnet if confidence too low
     // ----------------------------------------------------------------
+    const isPdf = mimeType === "application/pdf";
+    // PDFs use type:"document", images use type:"image" — Anthropic API requires this distinction
+    const fileContent = isPdf
+      ? { type: "document" as const, source: { type: "base64" as const, media_type: "application/pdf" as const, data: base64File } }
+      : { type: "image" as const, source: { type: "base64" as const, media_type: mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp", data: base64File } };
+
     async function callClaude(model: string) {
       const response = await anthropic.messages.create({
         model,
@@ -233,14 +242,7 @@ Return JSON in this exact format:
         messages: [{
           role: "user",
           content: [
-            {
-              type: "image",
-              source: {
-                type: "base64",
-                media_type: mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
-                data: base64File,
-              },
-            },
+            fileContent,
             { type: "text", text: userPrompt },
           ],
         }],
@@ -374,14 +376,10 @@ Return JSON in this exact format:
 
   } catch (err) {
     console.error("[extract-document] error:", err);
-    // Mark document as failed so user can retry
-    try {
-      const { documentId } = await req.clone().json();
-      if (documentId) {
-        const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-        await sb.from("documents").update({ status: "failed" }).eq("id", documentId);
-      }
-    } catch {}
+    // documentId is captured at the top of the handler — always available here
+    if (documentId) {
+      await supabase.from("documents").update({ status: "failed" }).eq("id", documentId).catch(() => {});
+    }
     return new Response(
       JSON.stringify({ error: "Extraction failed" }),
       { status: 500, headers: { "Content-Type": "application/json" } }
