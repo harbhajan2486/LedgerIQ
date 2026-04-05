@@ -9,7 +9,7 @@ const ContentSecurityPolicy = [
   "connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.anthropic.com",
   "frame-src 'self' blob: https://*.supabase.co",
   "frame-ancestors 'none'",
-  "object-src 'none'",
+  "object-src data:",
   "base-uri 'self'",
 ].join("; ");
 
