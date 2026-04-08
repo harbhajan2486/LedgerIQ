@@ -34,7 +34,6 @@ const STATUS_CONFIG: Record<string, { label: string; cls: string; icon: React.Re
   reconciled:      { label: "Reconciled",    cls: "bg-blue-50 text-blue-700 border-blue-200",       icon: <CheckCircle2 size={10} /> },
   posted:          { label: "Posted",        cls: "bg-purple-50 text-purple-700 border-purple-200", icon: <CheckCircle2 size={10} /> },
   extracting:      { label: "Processing",    cls: "bg-gray-50 text-gray-600 border-gray-200",       icon: <Loader2 size={10} className="animate-spin" /> },
-  pending:         { label: "Processing",    cls: "bg-gray-50 text-gray-600 border-gray-200",       icon: <Loader2 size={10} className="animate-spin" /> },
   queued:          { label: "Queued",        cls: "bg-gray-50 text-gray-500 border-gray-200",       icon: <Clock size={10} /> },
   failed:          { label: "Failed",        cls: "bg-red-50 text-red-700 border-red-200",          icon: <AlertTriangle size={10} /> },
 };
@@ -48,7 +47,7 @@ const DOC_TYPE_LABELS: Record<string, string> = {
   debit_note: "Debit Note",
 };
 
-const RETRYABLE = new Set(["pending", "extracting", "queued", "failed"]);
+const RETRYABLE = new Set(["extracting", "queued", "failed"]);
 
 export default function ClientDetailPage() {
   const params = useParams();

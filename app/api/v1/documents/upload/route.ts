@@ -89,7 +89,7 @@ export async function POST(request: NextRequest) {
 
   // Create the document record
   // If over budget, set status to 'queued' — it will process when budget resets
-  const status = monthlySpend >= budgetLimit ? "queued" : "pending";
+  const status = monthlySpend >= budgetLimit ? "queued" : "queued";
 
   const { data: doc, error: docError } = await supabase
     .from("documents")

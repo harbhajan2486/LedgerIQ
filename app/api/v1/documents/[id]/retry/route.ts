@@ -54,8 +54,8 @@ export async function POST(
       clientIndustry = clientData?.industry_name ?? null;
     }
 
-    // Reset status to pending before retrying
-    await supabase.from("documents").update({ status: "pending" }).eq("id", id);
+    // Reset status to queued before retrying (pending is not a valid DB status)
+    await supabase.from("documents").update({ status: "queued" }).eq("id", id);
 
     // Check monthly spend
     const now = new Date();

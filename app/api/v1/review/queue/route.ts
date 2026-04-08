@@ -52,7 +52,7 @@ export async function GET(request: NextRequest) {
         .from("documents")
         .select("id, original_filename, document_type, status, uploaded_at")
         .eq("tenant_id", profile.tenant_id)
-        .in("status", ["pending", "extracting", "queued"])
+        .in("status", ["extracting", "queued"])
         .lt("uploaded_at", stuckCutoff)
         .order("uploaded_at", { ascending: false })
         .limit(20),
