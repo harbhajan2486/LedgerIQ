@@ -176,6 +176,8 @@ export async function POST(request: NextRequest) {
     debit_amount: txn.debit,
     credit_amount: txn.credit,
     balance: txn.balance,
+    amount: txn.debit ?? txn.credit ?? 0,
+    type: txn.debit ? "debit" : "credit",
     status: "unmatched",
   }));
 
