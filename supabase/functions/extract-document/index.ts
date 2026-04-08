@@ -93,7 +93,14 @@ Deno.serve(async (req) => {
     }
 
     const fileBytes = await fileData.arrayBuffer();
-    const base64File = btoa(String.fromCharCode(...new Uint8Array(fileBytes)));
+    // Encode in 8 KB chunks — spreading the full array at once overflows the call stack for large files
+    const uint8 = new Uint8Array(fileBytes);
+    let binary = "";
+    const CHUNK = 8192;
+    for (let i = 0; i < uint8.length; i += CHUNK) {
+      binary += String.fromCharCode(...uint8.subarray(i, i + CHUNK));
+    }
+    const base64File = btoa(binary);
     const mimeType = fileData.type || "application/pdf";
 
     // ----------------------------------------------------------------
@@ -500,7 +507,9 @@ Return JSON in this exact format:
     console.error("[extract-document] error:", err);
     // documentId is captured at the top of the handler — always available here
     if (documentId) {
-      await supabase.from("documents").update({ status: "failed" }).eq("id", documentId).catch(() => {});
+      try {
+        await supabase.from("documents").update({ status: "failed" }).eq("id", documentId);
+      } catch { /* best-effort status update */ }
     }
     return new Response(
       JSON.stringify({ error: "Extraction failed" }),

@@ -2,9 +2,11 @@
 
 import { useEffect, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
-import { ClipboardCheck, FileText, ChevronRight, Loader2, AlertTriangle, Upload } from "lucide-react";
+import { Skeleton } from "@/components/ui/skeleton";
+import { ClipboardCheck, FileText, ChevronRight, AlertTriangle, Upload, RefreshCw, Loader2 } from "lucide-react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
+import { toast } from "sonner";
 
 interface QueueItem {
   id: string;
@@ -16,6 +18,14 @@ interface QueueItem {
   avgConfidence: number;
 }
 
+interface StuckItem {
+  id: string;
+  fileName: string;
+  type: string;
+  status: string;
+  uploadedAt: string;
+}
+
 const DOC_TYPE_LABELS: Record<string, string> = {
   purchase_invoice: "Purchase Invoice",
   sales_invoice:    "Sales Invoice",
@@ -25,22 +35,72 @@ const DOC_TYPE_LABELS: Record<string, string> = {
   debit_note:       "Debit Note",
 };
 
+const STATUS_LABELS: Record<string, string> = {
+  pending:    "Waiting to process",
+  extracting: "AI reading…",
+  queued:     "Budget limit — queued",
+  failed:     "Extraction failed",
+};
+
 export default function ReviewQueuePage() {
   const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [stuck, setStuck] = useState<StuckItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState<string | null>(null);
 
-  useEffect(() => {
+  function loadQueue() {
     fetch("/api/v1/review/queue")
       .then((r) => r.json())
-      .then((d) => { setQueue(d.queue ?? []); setLoading(false); })
+      .then((d) => {
+        setQueue(d.queue ?? []);
+        setStuck(d.stuck ?? []);
+        setLoading(false);
+      })
       .catch(() => { setError("Failed to load review queue."); setLoading(false); });
-  }, []);
+  }
+
+  useEffect(() => { loadQueue(); }, []);
+
+  async function retryExtraction(docId: string, fileName: string) {
+    setRetrying(docId);
+    try {
+      const res = await fetch(`/api/v1/documents/${docId}/retry`, { method: "POST" });
+      const data = await res.json();
+      if (res.ok) {
+        toast.success(`Extraction started for "${fileName}". Check back in 30–60 seconds.`);
+        setStuck((prev) => prev.filter((d) => d.id !== docId));
+      } else {
+        toast.error(data.error ?? "Could not retry extraction.");
+      }
+    } finally {
+      setRetrying(null);
+    }
+  }
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-24">
-        <Loader2 size={24} className="animate-spin text-gray-400" />
+      <div className="space-y-6 max-w-4xl">
+        <div>
+          <Skeleton className="h-7 w-40 mb-2" />
+          <Skeleton className="h-4 w-72" />
+        </div>
+        <div className="space-y-2">
+          {[1, 2, 3].map((i) => (
+            <Card key={i}>
+              <CardContent className="p-4">
+                <div className="flex items-center gap-4">
+                  <Skeleton className="w-9 h-9 rounded-lg" />
+                  <div className="flex-1 space-y-2">
+                    <Skeleton className="h-4 w-48" />
+                    <Skeleton className="h-3 w-32" />
+                  </div>
+                  <Skeleton className="h-6 w-24 rounded-full" />
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
       </div>
     );
   }
@@ -67,8 +127,42 @@ export default function ReviewQueuePage() {
         </div>
       )}
 
+      {/* Stuck documents — need retry */}
+      {stuck.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Stuck — needs retry</p>
+          {stuck.map((item) => (
+            <Card key={item.id} className="border-amber-200 bg-amber-50">
+              <CardContent className="p-4">
+                <div className="flex items-center gap-4">
+                  <div className="w-9 h-9 bg-amber-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                    <AlertTriangle size={16} className="text-amber-600" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-900 truncate">{item.fileName}</p>
+                    <p className="text-xs text-amber-700 mt-0.5">
+                      {STATUS_LABELS[item.status] ?? item.status} · uploaded {new Date(item.uploadedAt).toLocaleDateString("en-IN")}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => retryExtraction(item.id, item.fileName)}
+                    disabled={retrying === item.id}
+                    className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded border border-amber-300 text-amber-700 hover:bg-amber-100 disabled:opacity-50 transition-colors"
+                  >
+                    {retrying === item.id
+                      ? <><Loader2 size={12} className="animate-spin" /> Retrying…</>
+                      : <><RefreshCw size={12} /> Retry</>
+                    }
+                  </button>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+
       {/* Empty state */}
-      {queue.length === 0 && !error && (
+      {queue.length === 0 && stuck.length === 0 && !error && (
         <Card className="border-dashed border-2 border-gray-200">
           <CardContent className="flex flex-col items-center justify-center py-16 text-center">
             <div className="w-12 h-12 bg-green-50 rounded-full flex items-center justify-center mb-4">

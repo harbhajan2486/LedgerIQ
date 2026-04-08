@@ -89,7 +89,7 @@ export async function POST(request: NextRequest) {
 
   // Create the document record
   // If over budget, set status to 'queued' — it will process when budget resets
-  const status = monthlySpend >= budgetLimit ? "queued" : "queued";
+  const status = monthlySpend >= budgetLimit ? "queued" : "pending";
 
   const { data: doc, error: docError } = await supabase
     .from("documents")
@@ -140,26 +140,39 @@ export async function POST(request: NextRequest) {
         clientIndustry = clientData?.industry_name ?? null;
       }
 
-      fetch(`${supabaseUrl}/functions/v1/extract-document`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${serviceKey}`,
-        },
-        body: JSON.stringify({
-          documentId: doc.id,
-          tenantId: profile.tenant_id,
-          storagePath,
-          documentType,
-          monthlySpend,
-          budgetLimit,
-          clientId: clientId || null,
-          clientIndustry,
-        }),
-      }).catch(() => {
-        // Edge Function call failed — document stays in 'queued' state, will be retried
-        console.error(`[upload] Failed to trigger extraction for doc ${doc.id}`);
+      // Retry up to 3 times with exponential backoff if the Edge Function call fails
+      const triggerPayload = JSON.stringify({
+        documentId: doc.id,
+        tenantId: profile.tenant_id,
+        storagePath,
+        documentType,
+        monthlySpend,
+        budgetLimit,
+        clientId: clientId || null,
+        clientIndustry,
       });
+
+      (async () => {
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            const res = await fetch(`${supabaseUrl}/functions/v1/extract-document`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Authorization: `Bearer ${serviceKey}` },
+              body: triggerPayload,
+            });
+            if (res.ok) break;
+            throw new Error(`HTTP ${res.status}`);
+          } catch (err) {
+            if (attempt === 3) {
+              console.error(`[upload] Extraction trigger failed after 3 attempts for doc ${doc.id}:`, err);
+              // Mark document as failed so the user sees the error instead of infinite "processing"
+              await supabase.from("documents").update({ status: "failed" }).eq("id", doc.id).catch(() => {});
+            } else {
+              await new Promise((r) => setTimeout(r, attempt * 1000));
+            }
+          }
+        }
+      })();
     }
   }
 
