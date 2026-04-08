@@ -131,10 +131,23 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "No transactions found in file. Check the file has transaction rows." }, { status: 400 });
   }
 
+  // Convert DD/MM/YYYY → YYYY-MM-DD for PostgreSQL
+  function toISODate(d: string): string {
+    if (!d) return d;
+    // Already YYYY-MM-DD
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+    // DD/MM/YYYY or DD-MM-YYYY
+    const parts = d.split(/[\/\-]/);
+    if (parts.length === 3 && parts[2].length === 4) {
+      return `${parts[2]}-${parts[1].padStart(2,"0")}-${parts[0].padStart(2,"0")}`;
+    }
+    return d;
+  }
+
   const rows = transactions.map((txn) => ({
     tenant_id: tenantId,
     bank_name: bankName,
-    transaction_date: txn.date,
+    transaction_date: toISODate(txn.date),
     narration: txn.narration,
     ref_number: txn.ref_number,
     debit_amount: txn.debit,
