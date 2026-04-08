@@ -131,17 +131,40 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "No transactions found in file. Check the file has transaction rows." }, { status: 400 });
   }
 
-  // Convert DD/MM/YYYY → YYYY-MM-DD for PostgreSQL
+  // Normalise any date format → YYYY-MM-DD for PostgreSQL
+  const MONTHS: Record<string, string> = {
+    jan:"01",feb:"02",mar:"03",apr:"04",may:"05",jun:"06",
+    jul:"07",aug:"08",sep:"09",oct:"10",nov:"11",dec:"12",
+  };
   function toISODate(d: string): string {
     if (!d) return d;
+    const s = d.trim();
     // Already YYYY-MM-DD
-    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
-    // DD/MM/YYYY or DD-MM-YYYY
-    const parts = d.split(/[\/\-]/);
-    if (parts.length === 3 && parts[2].length === 4) {
-      return `${parts[2]}-${parts[1].padStart(2,"0")}-${parts[0].padStart(2,"0")}`;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    // DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
+    if (/^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4}$/.test(s)) {
+      const [dd, mm, yyyy] = s.split(/[\/\-\.]/);
+      return `${yyyy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
     }
-    return d;
+    // YYYY/MM/DD or YYYY.MM.DD
+    if (/^\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2}$/.test(s)) {
+      const [yyyy, mm, dd] = s.split(/[\/\-\.]/);
+      return `${yyyy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
+    }
+    // DD-Mon-YYYY or DD/Mon/YYYY (e.g. 13-Apr-2024, 13 Apr 2024)
+    const monMatch = s.match(/^(\d{1,2})[\s\-\/]([A-Za-z]{3})[\s\-\/](\d{4})$/);
+    if (monMatch) {
+      const mm = MONTHS[monMatch[2].toLowerCase()];
+      if (mm) return `${monMatch[3]}-${mm}-${monMatch[1].padStart(2,"0")}`;
+    }
+    // DD Month YYYY (e.g. 13 April 2024)
+    const longMonMatch = s.match(/^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/);
+    if (longMonMatch) {
+      const mm = MONTHS[longMonMatch[2].slice(0,3).toLowerCase()];
+      if (mm) return `${longMonMatch[3]}-${mm}-${longMonMatch[1].padStart(2,"0")}`;
+    }
+    // Fallback — return as-is and let DB error surface
+    return s;
   }
 
   const rows = transactions.map((txn) => ({
