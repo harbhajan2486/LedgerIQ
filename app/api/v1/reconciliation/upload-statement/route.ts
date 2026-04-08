@@ -15,6 +15,9 @@ interface ParsedTransaction {
 }
 
 async function parsePDFStatement(fileBytes: ArrayBuffer): Promise<ParsedTransaction[]> {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error("ANTHROPIC_API_KEY is not set in Vercel environment variables.");
+  }
   const base64 = Buffer.from(fileBytes).toString("base64");
 
   const response = await anthropic.messages.create({
@@ -103,8 +106,12 @@ export async function POST(request: NextRequest) {
     }
   } catch (err) {
     console.error("[upload-statement] parse error:", err);
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("API key") || msg.includes("auth") || msg.includes("401")) {
+      return NextResponse.json({ error: "AI service not configured. Add ANTHROPIC_API_KEY to Vercel environment variables." }, { status: 503 });
+    }
     return NextResponse.json(
-      { error: "Could not read the file. For PDFs, ensure it is a text-based PDF (not a scanned image)." },
+      { error: `Could not read the file: ${msg}` },
       { status: 400 }
     );
   }
