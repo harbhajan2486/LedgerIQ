@@ -166,7 +166,9 @@ export async function POST(request: NextRequest) {
             if (attempt === 3) {
               console.error(`[upload] Extraction trigger failed after 3 attempts for doc ${doc.id}:`, err);
               // Mark document as failed so the user sees the error instead of infinite "processing"
-              await supabase.from("documents").update({ status: "failed" }).eq("id", doc.id).catch(() => {});
+              try {
+                await supabase.from("documents").update({ status: "failed" }).eq("id", doc.id);
+              } catch { /* best-effort */ }
             } else {
               await new Promise((r) => setTimeout(r, attempt * 1000));
             }
