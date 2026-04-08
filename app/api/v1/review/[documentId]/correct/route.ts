@@ -113,30 +113,69 @@ export async function POST(
       new_value: { value: correctValue, field: extraction.field_name },
     });
 
-    // Trigger async: check if vendor profile should be updated + generate embedding
-    // Fire and forget — don't block the reviewer
-    if (correctionRecord?.id) {
-      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-      const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    // Update vendor profile with this correction so future invoices benefit immediately
+    // Only fields that are vendor-specific and stable are worth learning
+    const VENDOR_LEARNABLE_FIELDS = new Set([
+      "vendor_gstin", "tds_section", "tds_rate", "reverse_charge",
+      "place_of_supply", "cgst_rate", "sgst_rate", "igst_rate",
+    ]);
 
-      if (serviceKey) {
-        fetch(`${supabaseUrl}/functions/v1/process-correction`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${serviceKey}`,
-          },
-          body: JSON.stringify({
-            correctionId: correctionRecord.id,
-            extractionId,
-            tenantId: profile?.tenant_id,
-            documentId,
-            fieldName: extraction.field_name,
-            wrongValue: extraction.extracted_value,
-            correctValue,
-            docFingerprint: doc?.doc_fingerprint,
-          }),
-        }).catch((err) => console.error("[correct] Failed to trigger process-correction:", err));
+    if (VENDOR_LEARNABLE_FIELDS.has(extraction.field_name) && correctValue) {
+      // Get vendor_name from extractions for this document
+      const { data: vendorExt } = await supabase
+        .from("extractions")
+        .select("extracted_value")
+        .eq("document_id", documentId)
+        .eq("field_name", "vendor_name")
+        .eq("tenant_id", profile?.tenant_id)
+        .maybeSingle();
+
+      const vendorName = vendorExt?.extracted_value;
+
+      if (vendorName) {
+        // Get vendor GSTIN if already extracted
+        const { data: gstinExt } = await supabase
+          .from("extractions")
+          .select("extracted_value")
+          .eq("document_id", documentId)
+          .eq("field_name", "vendor_gstin")
+          .eq("tenant_id", profile?.tenant_id)
+          .maybeSingle();
+
+        // Upsert vendor profile — update invoice_quirks with the corrected field
+        const { data: existingProfile } = await supabase
+          .from("vendor_profiles")
+          .select("id, invoice_quirks, tds_category")
+          .eq("tenant_id", profile?.tenant_id)
+          .ilike("vendor_name", vendorName)
+          .maybeSingle();
+
+        if (existingProfile) {
+          const updatedQuirks = {
+            ...(existingProfile.invoice_quirks as Record<string, string> ?? {}),
+            [extraction.field_name]: correctValue,
+          };
+          await supabase
+            .from("vendor_profiles")
+            .update({
+              invoice_quirks: updatedQuirks,
+              tds_category: extraction.field_name === "tds_section" ? correctValue : existingProfile.tds_category,
+              gstin: gstinExt?.extracted_value || undefined,
+              last_updated: new Date().toISOString(),
+            })
+            .eq("id", existingProfile.id);
+        } else {
+          await supabase
+            .from("vendor_profiles")
+            .insert({
+              tenant_id: profile?.tenant_id,
+              vendor_name: vendorName,
+              gstin: gstinExt?.extracted_value || null,
+              tds_category: extraction.field_name === "tds_section" ? correctValue : null,
+              invoice_quirks: { [extraction.field_name]: correctValue },
+              last_updated: new Date().toISOString(),
+            });
+        }
       }
     }
 
