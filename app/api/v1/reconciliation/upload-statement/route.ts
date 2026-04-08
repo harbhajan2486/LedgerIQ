@@ -21,8 +21,8 @@ async function parsePDFStatement(fileBytes: ArrayBuffer): Promise<ParsedTransact
   const base64 = Buffer.from(fileBytes).toString("base64");
 
   const response = await anthropic.messages.create({
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 4096,
+    model: "claude-sonnet-4-6",
+    max_tokens: 8192,
     messages: [{
       role: "user",
       content: [
@@ -57,7 +57,18 @@ Return only the JSON array.`,
   const text = response.content[0].type === "text" ? response.content[0].text : "[]";
   const match = text.match(/\[[\s\S]*\]/);
   if (!match) throw new Error("No JSON array found in AI response");
-  return JSON.parse(match[0]) as ParsedTransaction[];
+
+  let jsonStr = match[0];
+  // If truncated (response hit token limit), close the array cleanly
+  if (response.stop_reason === "max_tokens") {
+    // Find last complete object by trimming to last closing brace
+    const lastClose = jsonStr.lastIndexOf("}");
+    if (lastClose !== -1) {
+      jsonStr = jsonStr.slice(0, lastClose + 1) + "]";
+    }
+  }
+
+  return JSON.parse(jsonStr) as ParsedTransaction[];
 }
 
 export async function POST(request: NextRequest) {
