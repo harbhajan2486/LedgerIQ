@@ -261,6 +261,13 @@ function UploadPageInner() {
                         ))}
                       </select>
                     )}
+                    {item.status === "pending" && item.documentType === "bank_statement" && (
+                      <p className="text-xs text-amber-600 mt-1.5">
+                        Bank statements are uploaded via{" "}
+                        <Link href="/reconciliation" className="underline font-medium">Reconciliation → Upload bank statement</Link>
+                        {" "}— supports PDF, CSV, and Excel.
+                      </p>
+                    )}
 
                     {["validating","uploading","processing"].includes(item.status) && (
                       <Progress value={item.progress} className="mt-2 h-1" />

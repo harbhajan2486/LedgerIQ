@@ -41,6 +41,12 @@ export async function POST(request: NextRequest) {
 
   if (!file) return NextResponse.json({ error: "No file provided" }, { status: 400 });
   if (!documentType) return NextResponse.json({ error: "Document type is required" }, { status: 400 });
+  if (documentType === "bank_statement") {
+    return NextResponse.json(
+      { error: "Bank statements must be uploaded via Reconciliation → Upload bank statement (CSV or Excel only)." },
+      { status: 400 }
+    );
+  }
 
   // Validate file size
   if (file.size > MAX_FILE_SIZE) {
