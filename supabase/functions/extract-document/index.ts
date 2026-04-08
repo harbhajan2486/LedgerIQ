@@ -456,8 +456,10 @@ Return JSON in this exact format:
     }
 
     // ----------------------------------------------------------------
-    // STORE EXTRACTIONS
+    // STORE EXTRACTIONS — delete any existing rows first (handles retries)
     // ----------------------------------------------------------------
+    await supabase.from("extractions").delete().eq("document_id", documentId);
+
     const extractionRows = EXTRACTION_FIELDS.map((field) => ({
       document_id: documentId,
       tenant_id: tenantId,

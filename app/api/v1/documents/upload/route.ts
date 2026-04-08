@@ -70,12 +70,32 @@ export async function POST(request: NextRequest) {
   const monthlySpend = (usageData ?? []).reduce((sum, row) => sum + Number(row.cost_usd), 0);
   const budgetLimit = Number(process.env.AI_MONTHLY_BUDGET_USD ?? 50);
 
+  const bytes = await file.arrayBuffer();
+
+  // Compute SHA-256 hash for duplicate detection
+  const hashBuffer = await crypto.subtle.digest("SHA-256", bytes);
+  const fileHash = Array.from(new Uint8Array(hashBuffer)).map((b) => b.toString(16).padStart(2, "0")).join("");
+
+  // Reject if this exact file has already been uploaded by this tenant
+  const { data: existing } = await supabase
+    .from("documents")
+    .select("id, original_filename, status")
+    .eq("tenant_id", profile.tenant_id)
+    .eq("file_hash", fileHash)
+    .maybeSingle();
+
+  if (existing) {
+    const statusMsg = existing.status === "review_required" ? "is waiting in your review queue" : `has status: ${existing.status}`;
+    return NextResponse.json(
+      { error: `This file was already uploaded as "${existing.original_filename}" and ${statusMsg}.` },
+      { status: 409 }
+    );
+  }
+
   // Store the file in Supabase Storage
   const fileExt = file.name.split(".").pop() ?? "bin";
   const fileId = crypto.randomUUID();
   const storagePath = `${profile.tenant_id}/invoices/${fileId}.${fileExt}`;
-
-  const bytes = await file.arrayBuffer();
   const { error: storageError } = await supabase.storage
     .from("documents")
     .upload(storagePath, bytes, {
@@ -99,6 +119,7 @@ export async function POST(request: NextRequest) {
       document_type: documentType,
       storage_path: storagePath,
       original_filename: file.name,
+      file_hash: fileHash,
       file_size_bytes: file.size,
       mime_type: file.type,
       status,
