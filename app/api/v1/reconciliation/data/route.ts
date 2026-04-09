@@ -32,7 +32,7 @@ export async function GET() {
     .eq("tenant_id", tenantId)
     .eq("status", "unmatched")
     .order("transaction_date", { ascending: false })
-    .limit(100);
+    .limit(1000);
 
   // Fetch unreconciled invoices (reviewed but not matched)
   const { data: unmatchedDocs } = await supabase

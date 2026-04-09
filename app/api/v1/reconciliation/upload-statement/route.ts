@@ -104,6 +104,7 @@ export async function POST(request: NextRequest) {
   const formData = await request.formData();
   const file = formData.get("file") as File | null;
   const bankName = (formData.get("bank_name") as string) || "Unknown Bank";
+  const clientId = (formData.get("client_id") as string) || null;
 
   if (!file) return NextResponse.json({ error: "No file provided" }, { status: 400 });
 
@@ -211,15 +212,22 @@ export async function POST(request: NextRequest) {
 
   // Build rows with hash-based dedup
   const rowsToInsert: Record<string, unknown>[] = [];
+  const allHashes: string[] = [];
+  let minDate = "9999-12-31", maxDate = "0000-01-01";
+
   for (const txn of transactions) {
     const isoDate = toISODate(txn.date);
     const isDebit = !!txn.debit;
     const { category, voucher_type } = classifyTransaction(txn.narration ?? "", isDebit);
 
-    // Hash = bank + date + narration (normalised) + amount for dedup
+    // Hash = bank + date + narration (normalised) + debit + credit for dedup
     const hashStr = `${bankName}|${isoDate}|${(txn.narration ?? "").toLowerCase().trim()}|${txn.debit ?? ""}|${txn.credit ?? ""}`;
     const hashBuf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(hashStr));
     const txnHash = Array.from(new Uint8Array(hashBuf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+    allHashes.push(txnHash);
+
+    if (isoDate < minDate) minDate = isoDate;
+    if (isoDate > maxDate) maxDate = isoDate;
 
     rowsToInsert.push({
       tenant_id: tenantId,
@@ -236,10 +244,33 @@ export async function POST(request: NextRequest) {
       category,
       voucher_type,
       txn_hash: txnHash,
+      ...(clientId ? { client_id: clientId } : {}),
     });
   }
 
-  // Upsert — duplicates (same hash) are silently skipped
+  // Smart incremental merge:
+  // 1. Remove old NULL-hash rows in same bank+date range (pre-migration duplicates)
+  if (minDate !== "9999-12-31") {
+    await supabase
+      .from("bank_transactions")
+      .delete()
+      .eq("tenant_id", tenantId)
+      .eq("bank_name", bankName)
+      .is("txn_hash", null)
+      .gte("transaction_date", minDate)
+      .lte("transaction_date", maxDate);
+  }
+
+  // 2. Check how many hashes already exist (for reporting)
+  const { data: existingRows } = await supabase
+    .from("bank_transactions")
+    .select("txn_hash")
+    .eq("tenant_id", tenantId)
+    .in("txn_hash", allHashes);
+  const existingHashes = new Set((existingRows ?? []).map((r) => r.txn_hash));
+  const alreadyPresent = existingHashes.size;
+
+  // 3. Upsert — rows with existing hash are silently skipped
   const { data: inserted, error: insertError } = await supabase
     .from("bank_transactions")
     .upsert(rowsToInsert, { onConflict: "tenant_id,txn_hash", ignoreDuplicates: true })
@@ -249,7 +280,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: insertError.message }, { status: 500 });
   }
 
-  const insertedCount = (inserted ?? []).length;
+  const newlyAdded = (inserted ?? []).length;
+  const total = transactions.length;
 
   await supabase.from("audit_log").insert({
     tenant_id: tenantId,
@@ -257,20 +289,33 @@ export async function POST(request: NextRequest) {
     action: "upload_bank_statement",
     entity_type: "bank_transactions",
     entity_id: tenantId,
-    new_value: { file_name: file.name, bank_name: bankName, transaction_count: transactions.length, new_count: insertedCount },
+    new_value: { file_name: file.name, bank_name: bankName, total, newly_added: newlyAdded, already_present: alreadyPresent },
   });
 
   const transactionIds = (inserted ?? []).map((r) => r.id);
-  fetch(`${process.env.NEXT_PUBLIC_APP_URL}/api/v1/reconciliation/auto-match`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tenantId, transactionIds }),
-  }).catch(() => {});
+  if (transactionIds.length > 0) {
+    fetch(`${process.env.NEXT_PUBLIC_APP_URL}/api/v1/reconciliation/auto-match`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tenantId, transactionIds }),
+    }).catch(() => {});
+  }
 
-  const skipped = transactions.length - insertedCount;
+  // Build a user-friendly message
+  let message: string;
+  if (newlyAdded === 0 && alreadyPresent > 0) {
+    message = `All ${total} transactions already present — no duplicates added.`;
+  } else if (alreadyPresent > 0) {
+    message = `${newlyAdded} new transactions added. ${alreadyPresent} already present (skipped). Statement has ${total} total transactions.`;
+  } else {
+    message = `${newlyAdded} transactions imported successfully.`;
+  }
+
   return NextResponse.json({
     success: true,
-    count: insertedCount,
-    ...(skipped > 0 && { skipped, message: `${skipped} duplicate transaction(s) skipped.` }),
+    count: newlyAdded,
+    already_present: alreadyPresent,
+    total_in_file: total,
+    message,
   });
 }

@@ -5,7 +5,7 @@ import { useParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Building2, ChevronLeft, FileText, Loader2, Upload,
-  CheckCircle2, AlertTriangle, Clock, RefreshCw
+  CheckCircle2, AlertTriangle, Clock, RefreshCw, Landmark
 } from "lucide-react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
@@ -26,6 +26,28 @@ interface Document {
   status: string;
   uploaded_at: string;
   ai_model_used: string | null;
+}
+
+interface BankTxn {
+  id: string;
+  transaction_date: string;
+  narration: string;
+  ref_number: string | null;
+  debit_amount: number | null;
+  credit_amount: number | null;
+  balance: number | null;
+  bank_name: string;
+  status: string;
+  category: string | null;
+  voucher_type: string | null;
+}
+
+interface BankSummary {
+  total: number;
+  total_debit: number;
+  total_credit: number;
+  matched: number;
+  unmatched: number;
 }
 
 const STATUS_CONFIG: Record<string, { label: string; cls: string; icon: React.ReactNode }> = {
@@ -57,6 +79,10 @@ export default function ClientDetailPage() {
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
   const [retrying, setRetrying] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"documents" | "bank">("documents");
+  const [bankTxns, setBankTxns] = useState<BankTxn[]>([]);
+  const [bankSummary, setBankSummary] = useState<BankSummary | null>(null);
+  const [bankLoading, setBankLoading] = useState(false);
 
   function loadData() {
     fetch(`/api/v1/clients/${clientId}`)
@@ -68,7 +94,19 @@ export default function ClientDetailPage() {
       .finally(() => setLoading(false));
   }
 
+  function loadBankTxns() {
+    setBankLoading(true);
+    fetch(`/api/v1/clients/${clientId}/bank-transactions`)
+      .then((r) => r.json())
+      .then((d) => {
+        setBankTxns(d.transactions ?? []);
+        setBankSummary(d.summary ?? null);
+      })
+      .finally(() => setBankLoading(false));
+  }
+
   useEffect(() => { loadData(); }, [clientId]);
+  useEffect(() => { if (activeTab === "bank") loadBankTxns(); }, [activeTab, clientId]);
 
   async function retryExtraction(docId: string, fileName: string) {
     setRetrying(docId);
@@ -153,8 +191,31 @@ export default function ClientDetailPage() {
         ))}
       </div>
 
+      {/* Tabs */}
+      <div className="flex border-b border-gray-200 gap-1">
+        {([
+          { key: "documents", label: "Documents", icon: <FileText size={14} />, count: documents.length },
+          { key: "bank", label: "Bank Statements", icon: <Landmark size={14} />, count: bankSummary?.total ?? null },
+        ] as const).map((tab) => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveTab(tab.key)}
+            className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+              activeTab === tab.key
+                ? "border-blue-500 text-blue-600"
+                : "border-transparent text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            {tab.icon} {tab.label}
+            {tab.count !== null && tab.count > 0 && (
+              <span className="ml-1 text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full">{tab.count}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
       {/* Document list */}
-      <Card>
+      {activeTab === "documents" && <Card>
         <CardHeader className="py-4 px-5 border-b">
           <CardTitle className="text-sm text-gray-700">Documents</CardTitle>
         </CardHeader>
@@ -223,7 +284,109 @@ export default function ClientDetailPage() {
             </table>
           )}
         </CardContent>
-      </Card>
+      </Card>}
+
+      {/* Bank Statements tab */}
+      {activeTab === "bank" && (
+        <div className="space-y-4">
+          {/* BS summary cards */}
+          {bankSummary && bankSummary.total > 0 && (
+            <div className="grid grid-cols-4 gap-3">
+              {[
+                { label: "Total transactions", value: bankSummary.total, cls: "text-gray-900" },
+                { label: "Total debits", value: `₹${bankSummary.total_debit.toLocaleString("en-IN")}`, cls: "text-red-600" },
+                { label: "Total credits", value: `₹${bankSummary.total_credit.toLocaleString("en-IN")}`, cls: "text-green-600" },
+                { label: "Unmatched", value: bankSummary.unmatched, cls: bankSummary.unmatched > 0 ? "text-amber-600" : "text-gray-500" },
+              ].map(({ label, value, cls }) => (
+                <Card key={label}><CardContent className="py-3 px-4">
+                  <p className="text-xs text-gray-500">{label}</p>
+                  <p className={`text-xl font-bold mt-0.5 ${cls}`}>{value}</p>
+                </CardContent></Card>
+              ))}
+            </div>
+          )}
+
+          <Card>
+            <CardHeader className="py-4 px-5 border-b flex flex-row items-center justify-between">
+              <CardTitle className="text-sm text-gray-700">Bank transactions</CardTitle>
+              <Link
+                href={`/reconciliation?client=${clientId}`}
+                className="text-xs text-blue-600 hover:underline"
+              >
+                Upload bank statement →
+              </Link>
+            </CardHeader>
+            <CardContent className="p-0">
+              {bankLoading ? (
+                <div className="flex items-center gap-2 text-sm text-gray-400 py-10 justify-center">
+                  <Loader2 size={16} className="animate-spin" /> Loading…
+                </div>
+              ) : bankTxns.length === 0 ? (
+                <div className="text-center py-12">
+                  <Landmark size={28} className="text-gray-300 mx-auto mb-2" />
+                  <p className="text-sm text-gray-500 mb-1">No bank transactions yet</p>
+                  <p className="text-xs text-gray-400">
+                    Upload a bank statement in{" "}
+                    <Link href="/reconciliation" className="text-blue-600 hover:underline">Reconciliation</Link>
+                    {" "}and select this client.
+                  </p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b bg-gray-50 text-xs text-gray-500">
+                        <th className="text-left px-5 py-3 font-medium">Date</th>
+                        <th className="text-left px-4 py-3 font-medium">Narration</th>
+                        <th className="text-left px-4 py-3 font-medium">Category</th>
+                        <th className="text-right px-4 py-3 font-medium">Debit</th>
+                        <th className="text-right px-4 py-3 font-medium">Credit</th>
+                        <th className="text-right px-4 py-3 font-medium">Balance</th>
+                        <th className="px-4 py-3 font-medium">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {bankTxns.map((txn) => (
+                        <tr key={txn.id} className="border-b last:border-0 hover:bg-gray-50/50 text-xs">
+                          <td className="px-5 py-2.5 text-gray-500 whitespace-nowrap">{txn.transaction_date}</td>
+                          <td className="px-4 py-2.5 max-w-xs">
+                            <p className="truncate text-gray-800">{txn.narration}</p>
+                            {txn.ref_number && <p className="text-gray-400 text-xs">Ref: {txn.ref_number}</p>}
+                          </td>
+                          <td className="px-4 py-2.5">
+                            {txn.category && (
+                              <span className="px-1.5 py-0.5 rounded text-xs bg-blue-50 text-blue-700">{txn.category}</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-2.5 text-right text-red-600 font-medium whitespace-nowrap">
+                            {txn.debit_amount ? `₹${Number(txn.debit_amount).toLocaleString("en-IN")}` : ""}
+                          </td>
+                          <td className="px-4 py-2.5 text-right text-green-600 font-medium whitespace-nowrap">
+                            {txn.credit_amount ? `₹${Number(txn.credit_amount).toLocaleString("en-IN")}` : ""}
+                          </td>
+                          <td className="px-4 py-2.5 text-right text-gray-500 whitespace-nowrap">
+                            {txn.balance != null ? `₹${Number(txn.balance).toLocaleString("en-IN")}` : ""}
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium ${
+                              txn.status === "matched" ? "bg-green-50 text-green-700" :
+                              txn.status === "possible_match" ? "bg-yellow-50 text-yellow-700" :
+                              "bg-gray-100 text-gray-500"
+                            }`}>
+                              {txn.status === "matched" ? <CheckCircle2 size={9} /> : null}
+                              {txn.status.replace("_", " ")}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
     </div>
   );
 }

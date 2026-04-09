@@ -75,6 +75,8 @@ export default function ReconciliationPage() {
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [bankName, setBankName] = useState("HDFC Bank");
+  const [uploadClientId, setUploadClientId] = useState<string>("");
+  const [clients, setClients] = useState<{ id: string; client_name: string }[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Manual match state
@@ -92,6 +94,10 @@ export default function ReconciliationPage() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  useEffect(() => {
+    fetch("/api/v1/clients").then((r) => r.json()).then((d) => setClients(d.clients ?? [])).catch(() => {});
+  }, []);
+
   async function handleUpload(e: React.FormEvent) {
     e.preventDefault();
     const file = fileInputRef.current?.files?.[0];
@@ -101,11 +107,11 @@ export default function ReconciliationPage() {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("bank_name", bankName);
+    if (uploadClientId) formData.append("client_id", uploadClientId);
     const res = await fetch("/api/v1/reconciliation/upload-statement", { method: "POST", body: formData });
     const d = await res.json();
     if (res.ok) {
-      const skippedNote = d.skipped ? ` (${d.skipped} duplicate${d.skipped > 1 ? "s" : ""} skipped)` : "";
-      setUploadMsg({ type: "success", text: `Uploaded! ${d.count} new transactions${skippedNote}. Auto-matching in progress...` });
+      setUploadMsg({ type: "success", text: d.message ?? `${d.count} transactions imported.` });
       setTimeout(() => { setUploadOpen(false); loadData(); }, 2500);
     } else {
       setUploadMsg({ type: "error", text: d.error ?? "Upload failed." });
@@ -201,6 +207,19 @@ export default function ReconciliationPage() {
                     {BANKS.map((b) => <option key={b}>{b}</option>)}
                   </select>
                 </div>
+                {clients.length > 0 && (
+                  <div className="space-y-1">
+                    <label className="text-sm font-medium text-gray-700">Client (optional)</label>
+                    <select
+                      value={uploadClientId}
+                      onChange={(e) => setUploadClientId(e.target.value)}
+                      className="w-full h-10 px-3 rounded-md border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="">— All / Unassigned —</option>
+                      {clients.map((c) => <option key={c.id} value={c.id}>{c.client_name}</option>)}
+                    </select>
+                  </div>
+                )}
                 <div className="space-y-1">
                   <label className="text-sm font-medium text-gray-700">Statement file</label>
                   <input
