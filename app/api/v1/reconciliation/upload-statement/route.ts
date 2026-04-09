@@ -32,43 +32,59 @@ async function parsePDFStatement(fileBytes: ArrayBuffer): Promise<ParsedTransact
         },
         {
           type: "text",
-          text: `Extract all bank transactions from this bank statement.
+          text: `Extract ALL bank transactions from this statement. Return ONLY a CSV with no extra text.
 
-Return ONLY a JSON array, no markdown, no explanation. Each item must have:
-- "date": transaction date in DD/MM/YYYY format
-- "narration": full transaction description/narration
-- "ref_number": UTR, cheque number, or reference number (null if not present)
-- "debit": amount debited as a number (null if not a debit)
-- "credit": amount credited as a number (null if not a credit)
-- "balance": running balance as a number (null if not shown)
+Header row (exactly):
+date,narration,ref_number,debit,credit,balance
+
+Rules:
+- date: DD/MM/YYYY
+- narration: full description, no commas (replace commas with semicolons)
+- ref_number: UTR/cheque/reference or empty
+- debit: number or empty (not null)
+- credit: number or empty (not null)
+- balance: number or empty (not null)
+- Skip opening/closing balance rows
 
 Example:
-[
-  {"date":"01/04/2025","narration":"NEFT CR-HDFC0001234-TATA STEEL LTD","ref_number":"N2025040112345","debit":null,"credit":495600,"balance":1234567.89},
-  {"date":"02/04/2025","narration":"IMPS-987654321-VENDOR PAYMENT","ref_number":"987654321","debit":50000,"credit":null,"balance":1184567.89}
-]
-
-Return only the JSON array.`,
+date,narration,ref_number,debit,credit,balance
+01/04/2025,NEFT CR-HDFC0001234-TATA STEEL LTD,N2025040112345,,495600,1234567.89
+02/04/2025,IMPS-987654321-VENDOR PAYMENT,987654321,50000,,1184567.89`,
         },
       ],
     }],
   });
 
-  const text = response.content[0].type === "text" ? response.content[0].text : "[]";
-  const match = text.match(/\[[\s\S]*\]/);
-  if (!match) throw new Error("No JSON array found in AI response");
+  const text = response.content[0].type === "text" ? response.content[0].text : "";
+  if (!text.trim()) throw new Error("No response from AI");
 
-  let jsonStr = match[0];
-  // If truncated (response hit token limit), close the array cleanly
-  if (response.stop_reason === "max_tokens") {
-    // Find last complete object by trimming to last closing brace
-    const lastClose = jsonStr.lastIndexOf("}");
-    if (lastClose !== -1) {
-      jsonStr = jsonStr.slice(0, lastClose + 1) + "]";
-    }
+  // Parse the CSV response
+  const lines = text.trim().split("\n").filter((l) => l.trim());
+  const transactions: ParsedTransaction[] = [];
+
+  // Find the header row
+  const headerIdx = lines.findIndex((l) => l.toLowerCase().includes("date,narration"));
+  const dataLines = headerIdx >= 0 ? lines.slice(headerIdx + 1) : lines.slice(1);
+
+  for (const line of dataLines) {
+    const parts = line.split(",");
+    if (parts.length < 2) continue;
+    const [date, narration, ref_number, debitStr, creditStr, balanceStr] = parts;
+    if (!date || !narration) continue;
+    const debit = debitStr?.trim() ? parseFloat(debitStr.trim()) || null : null;
+    const credit = creditStr?.trim() ? parseFloat(creditStr.trim()) || null : null;
+    const balance = balanceStr?.trim() ? parseFloat(balanceStr.trim()) || null : null;
+    transactions.push({
+      date: date.trim(),
+      narration: narration.trim().replace(/;/g, ","),
+      ref_number: ref_number?.trim() || null,
+      debit: isNaN(debit as number) ? null : debit,
+      credit: isNaN(credit as number) ? null : credit,
+      balance: isNaN(balance as number) ? null : balance,
+    });
   }
 
-  return JSON.parse(jsonStr) as ParsedTransaction[];
+  return transactions;
 }
 
 export async function POST(request: NextRequest) {
@@ -167,28 +183,73 @@ export async function POST(request: NextRequest) {
     return s;
   }
 
-  const rows = transactions.map((txn) => ({
-    tenant_id: tenantId,
-    bank_name: bankName,
-    transaction_date: toISODate(txn.date),
-    narration: txn.narration,
-    ref_number: txn.ref_number,
-    debit_amount: txn.debit,
-    credit_amount: txn.credit,
-    balance: txn.balance,
-    amount: txn.debit ?? txn.credit ?? 0,
-    type: txn.debit ? "debit" : "credit",
-    status: "unmatched",
-  }));
+  // Classify each transaction by category + voucher type
+  function classifyTransaction(narration: string, isDebit: boolean): { category: string; voucher_type: string } {
+    const n = narration.toUpperCase();
+    if (/\bGSTIN\b|\bGST\s*PAY|\bGSTP\b|\bCGST\b|\bSGST\b|\bIGST\b/.test(n))
+      return { category: "GST Payment", voucher_type: "Payment" };
+    if (/\bTDS\b|\b26QB\b|\b26QC\b|\bINCOME.?TAX\b/.test(n))
+      return { category: "TDS Payment", voucher_type: "Journal" };
+    if (/\bSALARY\b|\bSALARIES\b|\bPAYROLL\b|\bWAGES\b|\bSTIPEND\b/.test(n))
+      return { category: "Salary", voucher_type: "Payment" };
+    if (/\bCHARGES\b|\bSERVICE FEE\b|\bANNUAL FEE\b|\bSMS CHARGE|\bATM CHARGE|\bBANK FEE|\bPROCESSING FEE|\bMAINTENANCE CHARGE/.test(n))
+      return { category: "Bank Charges", voucher_type: "Journal" };
+    if (/\bEMI\b|\bLOAN\b|\bREPAYMENT\b|\bINSTAL/.test(n))
+      return { category: "Loan Repayment", voucher_type: "Payment" };
+    if (/\bRENT\b|\bRENTAL\b|\bLEASE\b/.test(n))
+      return { category: "Rent", voucher_type: "Payment" };
+    if (/\bINSURANCE\b|\bPREMIUM\b|\bLIC\b|\bPOLICY\b/.test(n))
+      return { category: "Insurance", voucher_type: "Payment" };
+    if (/\bINTEREST\b/.test(n))
+      return { category: isDebit ? "Interest Expense" : "Interest Income", voucher_type: "Journal" };
+    if (/\bSELF TRANSFER\b|\bFD TRANSFER\b|\bSWEEP\b|\bOD ACCOUNT\b|\bOWN ACCOUNT\b/.test(n))
+      return { category: "Inter-bank Transfer", voucher_type: "Contra" };
+    if (!isDebit)
+      return { category: "Customer Receipt", voucher_type: "Receipt" };
+    return { category: "Vendor Payment", voucher_type: "Payment" };
+  }
 
+  // Build rows with hash-based dedup
+  const rowsToInsert: Record<string, unknown>[] = [];
+  for (const txn of transactions) {
+    const isoDate = toISODate(txn.date);
+    const isDebit = !!txn.debit;
+    const { category, voucher_type } = classifyTransaction(txn.narration ?? "", isDebit);
+
+    // Hash = bank + date + narration (normalised) + amount for dedup
+    const hashStr = `${bankName}|${isoDate}|${(txn.narration ?? "").toLowerCase().trim()}|${txn.debit ?? ""}|${txn.credit ?? ""}`;
+    const hashBuf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(hashStr));
+    const txnHash = Array.from(new Uint8Array(hashBuf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+
+    rowsToInsert.push({
+      tenant_id: tenantId,
+      bank_name: bankName,
+      transaction_date: isoDate,
+      narration: txn.narration,
+      ref_number: txn.ref_number,
+      debit_amount: txn.debit,
+      credit_amount: txn.credit,
+      balance: txn.balance,
+      amount: txn.debit ?? txn.credit ?? 0,
+      type: isDebit ? "debit" : "credit",
+      status: "unmatched",
+      category,
+      voucher_type,
+      txn_hash: txnHash,
+    });
+  }
+
+  // Upsert — duplicates (same hash) are silently skipped
   const { data: inserted, error: insertError } = await supabase
     .from("bank_transactions")
-    .insert(rows)
+    .upsert(rowsToInsert, { onConflict: "tenant_id,txn_hash", ignoreDuplicates: true })
     .select("id");
 
   if (insertError) {
     return NextResponse.json({ error: insertError.message }, { status: 500 });
   }
+
+  const insertedCount = (inserted ?? []).length;
 
   await supabase.from("audit_log").insert({
     tenant_id: tenantId,
@@ -196,7 +257,7 @@ export async function POST(request: NextRequest) {
     action: "upload_bank_statement",
     entity_type: "bank_transactions",
     entity_id: tenantId,
-    new_value: { file_name: file.name, bank_name: bankName, transaction_count: transactions.length },
+    new_value: { file_name: file.name, bank_name: bankName, transaction_count: transactions.length, new_count: insertedCount },
   });
 
   const transactionIds = (inserted ?? []).map((r) => r.id);
@@ -206,5 +267,10 @@ export async function POST(request: NextRequest) {
     body: JSON.stringify({ tenantId, transactionIds }),
   }).catch(() => {});
 
-  return NextResponse.json({ success: true, count: transactions.length });
+  const skipped = transactions.length - insertedCount;
+  return NextResponse.json({
+    success: true,
+    count: insertedCount,
+    ...(skipped > 0 && { skipped, message: `${skipped} duplicate transaction(s) skipped.` }),
+  });
 }

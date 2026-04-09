@@ -20,6 +20,8 @@ interface BankTxn {
   credit_amount: number | null;
   bank_name: string;
   status?: ReconciliationStatus;
+  category?: string | null;
+  voucher_type?: string | null;
 }
 
 interface ReconDoc {
@@ -102,7 +104,8 @@ export default function ReconciliationPage() {
     const res = await fetch("/api/v1/reconciliation/upload-statement", { method: "POST", body: formData });
     const d = await res.json();
     if (res.ok) {
-      setUploadMsg({ type: "success", text: `Uploaded! ${d.count} transactions found. Auto-matching in progress...` });
+      const skippedNote = d.skipped ? ` (${d.skipped} duplicate${d.skipped > 1 ? "s" : ""} skipped)` : "";
+      setUploadMsg({ type: "success", text: `Uploaded! ${d.count} new transactions${skippedNote}. Auto-matching in progress...` });
       setTimeout(() => { setUploadOpen(false); loadData(); }, 2500);
     } else {
       setUploadMsg({ type: "error", text: d.error ?? "Upload failed." });
@@ -286,6 +289,12 @@ export default function ReconciliationPage() {
                             {txn?.debit_amount ? `₹${Number(txn.debit_amount).toLocaleString("en-IN")} debit` :
                              txn?.credit_amount ? `₹${Number(txn.credit_amount).toLocaleString("en-IN")} credit` : ""}
                           </p>
+                          {(txn?.category || txn?.voucher_type) && (
+                            <div className="flex gap-1 mt-1">
+                              {txn.category && <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">{txn.category}</span>}
+                              {txn.voucher_type && <span className="text-xs px-1.5 py-0.5 rounded bg-purple-50 text-purple-700">{txn.voucher_type}</span>}
+                            </div>
+                          )}
                         </div>
                       </div>
                       <div className="flex items-start gap-3">
@@ -449,10 +458,18 @@ export default function ReconciliationPage() {
                         } ${selectedTxnId === txn.id ? "border-blue-500 bg-blue-50" : "border-gray-200 bg-white"}`}
                       >
                         <div className="flex items-start justify-between">
-                          <div>
+                          <div className="flex-1 min-w-0">
                             <p className="text-sm font-medium text-gray-900 line-clamp-1">{txn.narration}</p>
                             <p className="text-xs text-gray-500 mt-0.5">{txn.bank_name} · {txn.transaction_date}</p>
                             {txn.ref_number && <p className="text-xs text-gray-400">Ref: {txn.ref_number}</p>}
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {txn.category && (
+                                <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-medium">{txn.category}</span>
+                              )}
+                              {txn.voucher_type && (
+                                <span className="text-xs px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 font-medium">{txn.voucher_type}</span>
+                              )}
+                            </div>
                           </div>
                           <p className="text-sm font-semibold text-gray-700 ml-3 flex-shrink-0">
                             {txn.debit_amount ? `₹${Number(txn.debit_amount).toLocaleString("en-IN")}` :

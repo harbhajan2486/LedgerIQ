@@ -44,7 +44,7 @@ export async function POST(request: NextRequest) {
     .select("document_id, field_name, extracted_value")
     .in("document_id", docIds)
     .in("field_name", MATCH_FIELDS)
-    .eq("status", "accepted");
+    .in("status", ["accepted", "corrected"]);
 
   // Build invoice objects from extractions
   const invoiceMap: Record<string, Record<string, string | null>> = {};

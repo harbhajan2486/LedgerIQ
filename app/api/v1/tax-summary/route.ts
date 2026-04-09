@@ -16,35 +16,30 @@ export async function GET(request: NextRequest) {
   const period = searchParams.get("period") ?? "this_month"; // this_month | last_month | this_quarter | this_year
 
   const now = new Date();
+  const toDate = (d: Date) => d.toISOString().slice(0, 10); // YYYY-MM-DD
   let startDate: string;
-  let endDate: string = now.toISOString();
+  let endDate: string = toDate(now);
 
   if (period === "last_month") {
-    const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    startDate = lastMonth.toISOString();
-    endDate = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+    startDate = toDate(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+    endDate = toDate(new Date(now.getFullYear(), now.getMonth(), 0)); // last day of prev month
   } else if (period === "this_quarter") {
-    const quarterStart = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1);
-    startDate = quarterStart.toISOString();
+    startDate = toDate(new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1));
   } else if (period === "this_year") {
-    startDate = new Date(now.getFullYear(), 3, 1).toISOString(); // Indian FY starts April 1
-    if (now.getMonth() < 3) {
-      // Before April — use previous year's April 1
-      startDate = new Date(now.getFullYear() - 1, 3, 1).toISOString();
-    }
+    const fyYear = now.getMonth() < 3 ? now.getFullYear() - 1 : now.getFullYear();
+    startDate = toDate(new Date(fyYear, 3, 1)); // April 1 (Indian FY)
   } else {
     // this_month
-    startDate = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+    startDate = toDate(new Date(now.getFullYear(), now.getMonth(), 1));
   }
 
-  // Get reviewed/reconciled/posted documents in this period
+  // Get all reviewed/reconciled/posted documents for this tenant
+  // Period filtering is done on invoice_date (from extractions) not created_at
   const { data: docs } = await supabase
     .from("documents")
     .select("id, original_filename, document_type, created_at")
     .eq("tenant_id", tenantId)
-    .in("status", ["reviewed", "reconciled", "posted"])
-    .gte("created_at", startDate)
-    .lte("created_at", endDate);
+    .in("status", ["reviewed", "reconciled", "posted"]);
 
   if (!docs || docs.length === 0) {
     return NextResponse.json({
@@ -71,7 +66,7 @@ export async function GET(request: NextRequest) {
     .select("document_id, field_name, extracted_value")
     .in("document_id", docIds)
     .in("field_name", TAX_FIELDS)
-    .eq("status", "accepted");
+    .in("status", ["accepted", "corrected"]);
 
   // Build per-document field map
   const docFields: Record<string, Record<string, string | null>> = {};
@@ -84,7 +79,18 @@ export async function GET(request: NextRequest) {
   let totalTaxable = 0, totalCGST = 0, totalSGST = 0, totalIGST = 0, totalTDS = 0;
   const tdsSection: Record<string, number> = {};
 
-  const docRows = docs.map((doc) => {
+  // Filter by invoice_date falling in the period (more accurate than created_at)
+  const filteredDocs = docs.filter((doc) => {
+    const invDate = docFields[doc.id]?.invoice_date;
+    const refDate = invDate ?? doc.created_at;
+    return refDate >= startDate && refDate <= endDate;
+  });
+
+  // Reset totals — recalculate only for filtered docs
+  totalTaxable = 0; totalCGST = 0; totalSGST = 0; totalIGST = 0; totalTDS = 0;
+  Object.keys(tdsSection).forEach((k) => delete tdsSection[k]);
+
+  const docRows = filteredDocs.map((doc) => {
     const f = docFields[doc.id] ?? {};
     const taxable = parseFloat(f.taxable_value ?? "0") || 0;
     const cgst = parseFloat(f.cgst_amount ?? "0") || 0;
@@ -134,7 +140,7 @@ export async function GET(request: NextRequest) {
     },
     tds_summary: tdsSection,
     total_tds: totalTDS,
-    document_count: docs.length,
+    document_count: filteredDocs.length,
     documents: docRows,
   });
   } catch (err) {

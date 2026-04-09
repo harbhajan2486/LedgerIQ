@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   Loader2, Send, CheckCircle2, XCircle, AlertCircle,
-  Plug, RefreshCw, FileText, Building2
+  Plug, RefreshCw, FileText, Building2, Download
 } from "lucide-react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
@@ -112,9 +112,14 @@ export default function TallyPage() {
             Send reviewed invoices to TallyPrime as purchase vouchers.
           </p>
         </div>
-        <Button variant="outline" onClick={loadQueue} disabled={loading}>
-          <RefreshCw className={`w-4 h-4 mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => window.open("/api/v1/tally/export-excel?period=this_month")}>
+            <Download className="w-4 h-4 mr-2" /> Export Excel
+          </Button>
+          <Button variant="outline" onClick={loadQueue} disabled={loading}>
+            <RefreshCw className={`w-4 h-4 mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
+          </Button>
+        </div>
       </div>
 
       {/* Tally connection status */}

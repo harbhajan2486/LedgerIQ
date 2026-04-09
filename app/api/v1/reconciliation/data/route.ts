@@ -28,7 +28,7 @@ export async function GET() {
   // Fetch unmatched bank transactions (no reconciliation record)
   const { data: allTxns } = await supabase
     .from("bank_transactions")
-    .select("id, transaction_date, narration, ref_number, debit_amount, credit_amount, bank_name, status")
+    .select("id, transaction_date, narration, ref_number, debit_amount, credit_amount, bank_name, status, category, voucher_type")
     .eq("tenant_id", tenantId)
     .eq("status", "unmatched")
     .order("transaction_date", { ascending: false })
@@ -51,7 +51,7 @@ export async function GET() {
         .select("document_id, extracted_value")
         .in("document_id", unmatchedDocIds)
         .eq("field_name", "total_amount")
-        .eq("status", "accepted")
+        .in("status", ["accepted", "corrected"])
     : { data: [] };
   const amountMap: Record<string, string> = {};
   for (const a of amounts ?? []) amountMap[a.document_id] = a.extracted_value;
