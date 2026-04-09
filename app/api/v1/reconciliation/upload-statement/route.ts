@@ -52,7 +52,6 @@ async function parsePDFStatement(fileBytes: ArrayBuffer): Promise<ParsedTransact
   if (!process.env.ANTHROPIC_API_KEY) {
     throw new Error("ANTHROPIC_API_KEY is not set in Vercel environment variables.");
   }
-  const base64 = Buffer.from(fileBytes).toString("base64");
 
   const CSV_PROMPT = `Extract bank transactions from this statement. Return ONLY a CSV, no markdown, no explanation.
 
@@ -63,14 +62,22 @@ Exact header: date,narration,ref_number,debit,credit,balance
 - debit/credit/balance: number or empty
 - Skip opening balance, closing balance rows`;
 
+  // Upload the PDF once to Anthropic Files API — avoids re-sending the entire
+  // PDF (can be 10-20MB) on every pass. All passes reuse the same file_id.
+  const uploadedFile = await anthropic.beta.files.upload({
+    file: new File([new Uint8Array(fileBytes)], "statement.pdf", { type: "application/pdf" }),
+  });
+  const fileId = uploadedFile.id;
+
   const allTransactions: ParsedTransaction[] = [];
   let afterCursor: { date: string; narration: string } | null = null;
 
-  // Up to 4 passes — handles statements with 1000+ transactions
-  for (let pass = 0; pass < 4; pass++) {
-    const promptText = pass === 0
-      ? CSV_PROMPT
-      : `${CSV_PROMPT}
+  try {
+    // Up to 4 passes — handles statements with 1000+ transactions
+    for (let pass = 0; pass < 4; pass++) {
+      const promptText = pass === 0
+        ? CSV_PROMPT
+        : `${CSV_PROMPT}
 
 IMPORTANT: Only extract transactions that appear AFTER this transaction in the statement:
 Date: ${afterCursor!.date}
@@ -78,30 +85,36 @@ Narration starts with: ${afterCursor!.narration.slice(0, 60)}
 
 Skip all transactions up to and including that one. Continue from the next transaction onwards.`;
 
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 8192,
-      messages: [{
-        role: "user",
-        content: [
-          { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-          { type: "text", text: promptText },
-        ],
-      }],
-    });
+      const response = await anthropic.messages.create({
+        model: "claude-sonnet-4-6",
+        max_tokens: 8192,
+        messages: [{
+          role: "user",
+          content: [
+            // Reference the already-uploaded file — no re-upload on each pass
+            { type: "document", source: { type: "file", file_id: fileId } } as never,
+            { type: "text", text: promptText },
+          ],
+        }],
+        betas: ["files-api-2025-04-14"],
+      } as never);
 
-    const text = response.content[0].type === "text" ? response.content[0].text : "";
-    const batch = parseCsvLines(text);
+      const text = (response as never as { content: Array<{ type: string; text: string }> }).content[0]?.type === "text"
+        ? (response as never as { content: Array<{ type: string; text: string }> }).content[0].text
+        : "";
+      const batch = parseCsvLines(text);
 
-    if (batch.length === 0) break;
-    allTransactions.push(...batch);
+      if (batch.length === 0) break;
+      allTransactions.push(...batch);
 
-    // Stop if model finished naturally (not cut off)
-    if (response.stop_reason !== "max_tokens") break;
+      if ((response as never as { stop_reason: string }).stop_reason !== "max_tokens") break;
 
-    // Set cursor to last transaction for next pass
-    const last = batch[batch.length - 1];
-    afterCursor = { date: last.date, narration: last.narration };
+      const last = batch[batch.length - 1];
+      afterCursor = { date: last.date, narration: last.narration };
+    }
+  } finally {
+    // Always clean up the uploaded file from Anthropic's servers
+    await anthropic.beta.files.delete(fileId).catch(() => {});
   }
 
   return allTransactions;
