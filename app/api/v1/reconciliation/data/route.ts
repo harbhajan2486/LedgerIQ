@@ -1,7 +1,7 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -12,29 +12,42 @@ export async function GET() {
   if (!profile?.tenant_id) return NextResponse.json({ error: "Tenant not found" }, { status: 400 });
 
   const tenantId = profile.tenant_id;
+  const clientId = new URL(request.url).searchParams.get("clientId") ?? null;
 
   // Fetch reconciliations with their bank transaction + document data
-  const { data: recons } = await supabase
+  let reconQuery = supabase
     .from("reconciliations")
     .select(`
       id, status, match_score, match_reasons, matched_at,
       bank_transaction_id, document_id,
-      bank_transactions(id, transaction_date, narration, ref_number, debit_amount, credit_amount, bank_name, category, voucher_type),
+      bank_transactions(id, transaction_date, narration, ref_number, debit_amount, credit_amount, bank_name, category, voucher_type, client_id),
       documents(id, original_filename, document_type)
     `)
     .eq("tenant_id", tenantId)
     .order("matched_at", { ascending: false });
 
-  // Fetch unmatched bank transactions (no reconciliation record)
-  const { data: allTxns } = await supabase
+  const { data: recons } = await reconQuery;
+
+  // Filter by client if requested
+  const filteredRecons = clientId
+    ? (recons ?? []).filter((r) => {
+        const txn = Array.isArray(r.bank_transactions) ? r.bank_transactions[0] : r.bank_transactions;
+        return (txn as { client_id?: string | null } | null)?.client_id === clientId;
+      })
+    : (recons ?? []);
+
+  // Fetch unmatched bank transactions
+  let txnQuery = supabase
     .from("bank_transactions")
     .select("id, transaction_date, narration, ref_number, debit_amount, credit_amount, bank_name, status, category, voucher_type")
     .eq("tenant_id", tenantId)
     .eq("status", "unmatched")
     .order("transaction_date", { ascending: false })
     .limit(1000);
+  if (clientId) txnQuery = txnQuery.eq("client_id", clientId);
+  const { data: allTxns } = await txnQuery;
 
-  // Fetch unreconciled invoices (review_required or reviewed, but not yet matched)
+  // Fetch unreconciled invoices
   const { data: unmatchedDocs } = await supabase
     .from("documents")
     .select("id, original_filename, document_type, status")
@@ -43,7 +56,7 @@ export async function GET() {
     .order("created_at", { ascending: false })
     .limit(200);
 
-  // For unmatched docs, get total_amount field
+  // Get amounts for unmatched docs
   const unmatchedDocIds = (unmatchedDocs ?? []).map((d) => d.id);
   const { data: amounts } = unmatchedDocIds.length > 0
     ? await supabase
@@ -56,15 +69,14 @@ export async function GET() {
   const amountMap: Record<string, string> = {};
   for (const a of amounts ?? []) amountMap[a.document_id] = a.extracted_value;
 
-  // Summary stats
-  const matched = (recons ?? []).filter((r) => r.status === "matched").length;
-  const possible = (recons ?? []).filter((r) => r.status === "possible_match").length;
-  const exceptions = (recons ?? []).filter((r) => r.status === "exception").length;
-  const unmatched = (allTxns ?? []).length;
+  const matched    = filteredRecons.filter((r) => r.status === "matched").length;
+  const possible   = filteredRecons.filter((r) => r.status === "possible_match").length;
+  const exceptions = filteredRecons.filter((r) => r.status === "exception").length;
+  const unmatched  = (allTxns ?? []).length;
 
   return NextResponse.json({
     summary: { matched, possible, exceptions, unmatched_transactions: unmatched, unmatched_invoices: (unmatchedDocs ?? []).length },
-    reconciliations: recons ?? [],
+    reconciliations: filteredRecons,
     unmatched_transactions: allTxns ?? [],
     unmatched_invoices: (unmatchedDocs ?? []).map((d) => ({
       ...d,
