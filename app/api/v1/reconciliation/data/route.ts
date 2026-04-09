@@ -19,7 +19,7 @@ export async function GET() {
     .select(`
       id, status, match_score, match_reasons, matched_at,
       bank_transaction_id, document_id,
-      bank_transactions(id, transaction_date, narration, ref_number, debit_amount, credit_amount, bank_name),
+      bank_transactions(id, transaction_date, narration, ref_number, debit_amount, credit_amount, bank_name, category, voucher_type),
       documents(id, original_filename, document_type)
     `)
     .eq("tenant_id", tenantId)
@@ -34,14 +34,14 @@ export async function GET() {
     .order("transaction_date", { ascending: false })
     .limit(1000);
 
-  // Fetch unreconciled invoices (reviewed but not matched)
+  // Fetch unreconciled invoices (review_required or reviewed, but not yet matched)
   const { data: unmatchedDocs } = await supabase
     .from("documents")
-    .select("id, original_filename, document_type")
+    .select("id, original_filename, document_type, status")
     .eq("tenant_id", tenantId)
-    .eq("status", "reviewed")
+    .in("status", ["review_required", "reviewed"])
     .order("created_at", { ascending: false })
-    .limit(100);
+    .limit(200);
 
   // For unmatched docs, get total_amount field
   const unmatchedDocIds = (unmatchedDocs ?? []).map((d) => d.id);
