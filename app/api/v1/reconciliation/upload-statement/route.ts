@@ -107,6 +107,10 @@ Skip all transactions up to and including that one. Continue from the next trans
   return allTransactions;
 }
 
+// Tell Vercel this route needs more than the default 10s timeout
+// Requires Vercel Pro or higher (free plan max is 10s)
+export const maxDuration = 300; // 5 minutes — enough for multi-pass large PDFs
+
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();

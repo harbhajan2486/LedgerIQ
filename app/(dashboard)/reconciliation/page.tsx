@@ -127,19 +127,40 @@ export default function ReconciliationPage() {
     if (!file) return;
     setUploading(true);
     setUploadMsg(null);
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("bank_name", bankName);
-    if (uploadClientId) formData.append("client_id", uploadClientId);
-    const res = await fetch("/api/v1/reconciliation/upload-statement", { method: "POST", body: formData });
-    const d = await res.json();
-    if (res.ok) {
-      setUploadMsg({ type: "success", text: d.message ?? `${d.count} transactions imported.` });
-      setTimeout(() => { setUploadOpen(false); loadData(); }, 2500);
-    } else {
-      setUploadMsg({ type: "error", text: d.error ?? "Upload failed." });
+
+    // 4-minute client timeout — PDF multi-pass can take up to 3 min for large files
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4 * 60 * 1000);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("bank_name", bankName);
+      if (uploadClientId) formData.append("client_id", uploadClientId);
+      const res = await fetch("/api/v1/reconciliation/upload-statement", {
+        method: "POST",
+        body: formData,
+        signal: controller.signal,
+      });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setUploadMsg({ type: "success", text: d.message ?? `${d.count} transactions imported.` });
+        setTimeout(() => { setUploadOpen(false); loadData(); }, 2500);
+      } else {
+        setUploadMsg({ type: "error", text: d.error ?? `Upload failed (${res.status}).` });
+      }
+    } catch (err) {
+      const isTimeout = err instanceof Error && err.name === "AbortError";
+      setUploadMsg({
+        type: "error",
+        text: isTimeout
+          ? "Upload timed out — the PDF may be too large. Try splitting it into smaller files or use CSV/Excel format instead."
+          : "Upload failed. Check your connection and try again.",
+      });
+    } finally {
+      clearTimeout(timer);
+      setUploading(false);
     }
-    setUploading(false);
   }
 
   async function handleManualMatch(documentId: string) {
