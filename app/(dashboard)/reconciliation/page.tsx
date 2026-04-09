@@ -81,6 +81,7 @@ function fmt(n: number | string | null | undefined) {
 export default function ReconciliationPage() {
   const [data, setData] = useState<ReconData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [matching, setMatching] = useState(false);
   const [activeTab, setActiveTab] = useState<ActiveTab>("matched");
 
   // Upload state
@@ -118,12 +119,13 @@ export default function ReconciliationPage() {
   }, []);
 
   async function runAutoMatch() {
-    setLoading(true);
+    setMatching(true);
     await fetch("/api/v1/reconciliation/auto-match", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     });
+    setMatching(false);
     await loadData();
   }
 
@@ -230,8 +232,9 @@ export default function ReconciliationPage() {
           <p className="text-sm text-gray-500 mt-1">Match invoices with bank transactions automatically.</p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={runAutoMatch} disabled={loading}>
-            <RefreshCw className={`w-4 h-4 mr-2 ${loading ? "animate-spin" : ""}`} /> Re-run matching
+          <Button variant="outline" onClick={runAutoMatch} disabled={matching}>
+            <RefreshCw className={`w-4 h-4 mr-2 ${matching ? "animate-spin" : ""}`} />
+            {matching ? "Matching…" : "Re-run matching"}
           </Button>
           <Button variant="outline" onClick={() => window.open("/api/v1/reconciliation/export?format=csv")}>
             <Download className="w-4 h-4 mr-2" /> Export CSV
