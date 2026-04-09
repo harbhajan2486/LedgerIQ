@@ -86,7 +86,7 @@ Narration starts with: ${afterCursor!.narration.slice(0, 60)}
 Skip all transactions up to and including that one. Continue from the next transaction onwards.`;
 
     const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
+      model: "claude-haiku-4-5-20251001",
       max_tokens: 8192,
       messages: [{
         role: "user",
