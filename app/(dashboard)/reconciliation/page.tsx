@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   Loader2, Upload, CheckCircle2, AlertCircle, HelpCircle,
-  Link2, Link2Off, Download, RefreshCw, FileText, Building2
+  Link2, Link2Off, Download, RefreshCw, FileText, Building2, Pencil
 } from "lucide-react";
 
 type ReconciliationStatus = "matched" | "possible_match" | "exception" | "unmatched";
@@ -79,6 +79,19 @@ export default function ReconciliationPage() {
   const [clients, setClients] = useState<{ id: string; client_name: string }[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Inline category/voucher edit state: txnId → field being edited
+  const [editingTxn, setEditingTxn] = useState<string | null>(null);
+
+  async function updateTxnField(txnId: string, field: "category" | "voucher_type", value: string) {
+    await fetch(`/api/v1/reconciliation/transactions/${txnId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [field]: value }),
+    });
+    setEditingTxn(null);
+    loadData();
+  }
+
   // Manual match state
   const [matchMode, setMatchMode] = useState(false);
   const [selectedTxnId, setSelectedTxnId] = useState<string | null>(null);
@@ -91,6 +104,16 @@ export default function ReconciliationPage() {
     if (res.ok) setData(await res.json());
     setLoading(false);
   }, []);
+
+  async function runAutoMatch() {
+    setLoading(true);
+    await fetch("/api/v1/reconciliation/auto-match", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    await loadData();
+  }
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -176,8 +199,8 @@ export default function ReconciliationPage() {
           <p className="text-sm text-gray-500 mt-1">Match invoices with bank transactions automatically.</p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={loadData} disabled={loading}>
-            <RefreshCw className={`w-4 h-4 mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
+          <Button variant="outline" onClick={runAutoMatch} disabled={loading}>
+            <RefreshCw className={`w-4 h-4 mr-2 ${loading ? "animate-spin" : ""}`} /> Re-run matching
           </Button>
           <Button variant="outline" onClick={() => window.open("/api/v1/reconciliation/export?format=csv")}>
             <Download className="w-4 h-4 mr-2" /> Export CSV
@@ -308,10 +331,10 @@ export default function ReconciliationPage() {
                             {txn?.debit_amount ? `₹${Number(txn.debit_amount).toLocaleString("en-IN")} debit` :
                              txn?.credit_amount ? `₹${Number(txn.credit_amount).toLocaleString("en-IN")} credit` : ""}
                           </p>
-                          {(txn?.category || txn?.voucher_type) && (
+                          {txn && (
                             <div className="flex gap-1 mt-1">
-                              {txn.category && <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">{txn.category}</span>}
-                              {txn.voucher_type && <span className="text-xs px-1.5 py-0.5 rounded bg-purple-50 text-purple-700">{txn.voucher_type}</span>}
+                              <CategoryChip txnId={txn.id} value={txn.category} field="category" editingTxn={editingTxn} setEditingTxn={setEditingTxn} onSave={updateTxnField} />
+                              <CategoryChip txnId={txn.id} value={txn.voucher_type} field="voucher_type" editingTxn={editingTxn} setEditingTxn={setEditingTxn} onSave={updateTxnField} />
                             </div>
                           )}
                         </div>
@@ -482,12 +505,8 @@ export default function ReconciliationPage() {
                             <p className="text-xs text-gray-500 mt-0.5">{txn.bank_name} · {txn.transaction_date}</p>
                             {txn.ref_number && <p className="text-xs text-gray-400">Ref: {txn.ref_number}</p>}
                             <div className="flex flex-wrap gap-1 mt-1">
-                              {txn.category && (
-                                <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-medium">{txn.category}</span>
-                              )}
-                              {txn.voucher_type && (
-                                <span className="text-xs px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 font-medium">{txn.voucher_type}</span>
-                              )}
+                              <CategoryChip txnId={txn.id} value={txn.category} field="category" editingTxn={editingTxn} setEditingTxn={setEditingTxn} onSave={updateTxnField} />
+                              <CategoryChip txnId={txn.id} value={txn.voucher_type} field="voucher_type" editingTxn={editingTxn} setEditingTxn={setEditingTxn} onSave={updateTxnField} />
                             </div>
                           </div>
                           <p className="text-sm font-semibold text-gray-700 ml-3 flex-shrink-0">
@@ -547,5 +566,57 @@ export default function ReconciliationPage() {
         </div>
       )}
     </div>
+  );
+}
+
+const CATEGORIES = [
+  "Vendor Payment", "Customer Receipt", "GST Payment", "TDS Payment",
+  "Salary", "Rent", "Bank Charges", "Loan Repayment", "Insurance",
+  "Interest Income", "Interest Expense", "Inter-bank Transfer",
+  "Other Payment", "Other Receipt",
+];
+const VOUCHER_TYPES = ["Payment", "Receipt", "Journal", "Contra", "Purchase", "Sales"];
+
+function CategoryChip({
+  txnId, value, field, editingTxn, setEditingTxn, onSave,
+}: {
+  txnId: string;
+  value: string | null | undefined;
+  field: "category" | "voucher_type";
+  editingTxn: string | null;
+  setEditingTxn: (id: string | null) => void;
+  onSave: (txnId: string, field: "category" | "voucher_type", value: string) => void;
+}) {
+  const editKey = `${txnId}-${field}`;
+  const isEditing = editingTxn === editKey;
+  const options = field === "category" ? CATEGORIES : VOUCHER_TYPES;
+  const chipCls = field === "category"
+    ? "bg-blue-50 text-blue-700"
+    : "bg-purple-50 text-purple-700";
+
+  if (isEditing) {
+    return (
+      <select
+        autoFocus
+        className="text-xs rounded border border-blue-300 px-1 py-0.5 focus:outline-none focus:ring-1 focus:ring-blue-400"
+        defaultValue={value ?? ""}
+        onBlur={(e) => { if (e.target.value) onSave(txnId, field, e.target.value); else setEditingTxn(null); }}
+        onChange={(e) => { onSave(txnId, field, e.target.value); }}
+      >
+        <option value="">— select —</option>
+        {options.map((o) => <option key={o} value={o}>{o}</option>)}
+      </select>
+    );
+  }
+
+  return (
+    <button
+      className={`group inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded font-medium ${chipCls} hover:opacity-80`}
+      title="Click to edit"
+      onClick={() => setEditingTxn(editKey)}
+    >
+      {value ?? `Set ${field.replace("_", " ")}`}
+      <Pencil className="w-2.5 h-2.5 opacity-0 group-hover:opacity-60" />
+    </button>
   );
 }

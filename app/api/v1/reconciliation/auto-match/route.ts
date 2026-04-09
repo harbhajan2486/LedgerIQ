@@ -8,9 +8,17 @@ const POSSIBLE_THRESHOLD = 30; // flag as possible match if 30-69
 export async function POST(request: NextRequest) {
   try {
   const supabase = await createClient();
-  const { tenantId, transactionIds } = await request.json();
+  const body = await request.json().catch(() => ({}));
+  let { tenantId, transactionIds } = body;
 
-  if (!tenantId) return NextResponse.json({ error: "tenantId required" }, { status: 400 });
+  // If tenantId not provided (e.g. called from frontend), resolve from session
+  if (!tenantId) {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+    const { data: profile } = await supabase.from("users").select("tenant_id").eq("id", user.id).single();
+    if (!profile?.tenant_id) return NextResponse.json({ error: "Tenant not found" }, { status: 400 });
+    tenantId = profile.tenant_id;
+  }
 
   // Fetch the transactions to match
   const txnQuery = supabase
@@ -26,12 +34,12 @@ export async function POST(request: NextRequest) {
   const { data: transactions } = await txnQuery;
   if (!transactions || transactions.length === 0) return NextResponse.json({ matched: 0 });
 
-  // Fetch all reviewed invoices (documents that are in "reviewed" status)
+  // Fetch all invoices that have been extracted (any status except queued/extracting/failed)
   const { data: docs } = await supabase
     .from("documents")
-    .select("id")
+    .select("id, status")
     .eq("tenant_id", tenantId)
-    .eq("status", "reviewed");
+    .in("status", ["review_required", "reviewed", "reconciled", "posted"]);
 
   if (!docs || docs.length === 0) return NextResponse.json({ matched: 0 });
 
@@ -44,7 +52,7 @@ export async function POST(request: NextRequest) {
     .select("document_id, field_name, extracted_value")
     .in("document_id", docIds)
     .in("field_name", MATCH_FIELDS)
-    .in("status", ["accepted", "corrected"]);
+    .not("status", "eq", "rejected");
 
   // Build invoice objects from extractions
   const invoiceMap: Record<string, Record<string, string | null>> = {};

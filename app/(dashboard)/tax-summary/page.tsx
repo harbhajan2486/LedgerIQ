@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Loader2, FileText, Download, TrendingUp } from "lucide-react";
 
-type Period = "this_month" | "last_month" | "this_quarter" | "this_year";
+type Period = "this_month" | "last_month" | "this_quarter" | "this_year" | "last_year";
 
 interface GSTSummary {
   total_taxable: number;
@@ -47,6 +47,7 @@ const PERIOD_LABELS: Record<Period, string> = {
   last_month: "Last month",
   this_quarter: "This quarter",
   this_year: "This financial year",
+  last_year: "Last financial year",
 };
 
 function fmt(n: number) {

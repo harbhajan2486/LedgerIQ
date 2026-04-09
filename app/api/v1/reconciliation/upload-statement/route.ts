@@ -14,77 +14,97 @@ interface ParsedTransaction {
   balance: number | null;
 }
 
+function parseCsvLines(text: string): ParsedTransaction[] {
+  const lines = text.trim().split("\n").filter((l) => l.trim());
+  const transactions: ParsedTransaction[] = [];
+  const headerIdx = lines.findIndex((l) => /^date[,\t]/i.test(l.trim()));
+  const dataLines = headerIdx >= 0 ? lines.slice(headerIdx + 1) : lines;
+
+  for (const line of dataLines) {
+    const parts = line.split(",");
+    if (parts.length < 4) continue;
+    // Format: date, narration (may span multiple commas), ref, debit, credit, balance
+    // Take last 4 as ref/debit/credit/balance, rest between index 1 and -4 as narration
+    const date = parts[0]?.trim();
+    if (!date || !/\d/.test(date)) continue;
+    const balance = parts[parts.length - 1]?.trim();
+    const credit = parts[parts.length - 2]?.trim();
+    const debit = parts[parts.length - 3]?.trim();
+    const ref_number = parts[parts.length - 4]?.trim();
+    const narration = parts.slice(1, parts.length - 4).join(",").trim().replace(/;/g, ",") || parts[1]?.trim() || "";
+    if (!narration) continue;
+    const debitNum = debit ? parseFloat(debit) || null : null;
+    const creditNum = credit ? parseFloat(credit) || null : null;
+    const balanceNum = balance ? parseFloat(balance) || null : null;
+    transactions.push({
+      date,
+      narration,
+      ref_number: ref_number || null,
+      debit: debitNum,
+      credit: creditNum,
+      balance: balanceNum,
+    });
+  }
+  return transactions;
+}
+
 async function parsePDFStatement(fileBytes: ArrayBuffer): Promise<ParsedTransaction[]> {
   if (!process.env.ANTHROPIC_API_KEY) {
     throw new Error("ANTHROPIC_API_KEY is not set in Vercel environment variables.");
   }
   const base64 = Buffer.from(fileBytes).toString("base64");
 
-  const response = await anthropic.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 8192,
-    messages: [{
-      role: "user",
-      content: [
-        {
-          type: "document",
-          source: { type: "base64", media_type: "application/pdf", data: base64 },
-        },
-        {
-          type: "text",
-          text: `Extract ALL bank transactions from this statement. Return ONLY a CSV with no extra text.
+  const CSV_PROMPT = `Extract bank transactions from this statement. Return ONLY a CSV, no markdown, no explanation.
 
-Header row (exactly):
-date,narration,ref_number,debit,credit,balance
-
-Rules:
+Exact header: date,narration,ref_number,debit,credit,balance
 - date: DD/MM/YYYY
-- narration: full description, no commas (replace commas with semicolons)
-- ref_number: UTR/cheque/reference or empty
-- debit: number or empty (not null)
-- credit: number or empty (not null)
-- balance: number or empty (not null)
-- Skip opening/closing balance rows
+- narration: replace any commas with semicolons
+- ref_number: UTR/cheque/ref or empty
+- debit/credit/balance: number or empty
+- Skip opening balance, closing balance rows`;
 
-Example:
-date,narration,ref_number,debit,credit,balance
-01/04/2025,NEFT CR-HDFC0001234-TATA STEEL LTD,N2025040112345,,495600,1234567.89
-02/04/2025,IMPS-987654321-VENDOR PAYMENT,987654321,50000,,1184567.89`,
-        },
-      ],
-    }],
-  });
+  const allTransactions: ParsedTransaction[] = [];
+  let afterCursor: { date: string; narration: string } | null = null;
 
-  const text = response.content[0].type === "text" ? response.content[0].text : "";
-  if (!text.trim()) throw new Error("No response from AI");
+  // Up to 4 passes — handles statements with 1000+ transactions
+  for (let pass = 0; pass < 4; pass++) {
+    const promptText = pass === 0
+      ? CSV_PROMPT
+      : `${CSV_PROMPT}
 
-  // Parse the CSV response
-  const lines = text.trim().split("\n").filter((l) => l.trim());
-  const transactions: ParsedTransaction[] = [];
+IMPORTANT: Only extract transactions that appear AFTER this transaction in the statement:
+Date: ${afterCursor!.date}
+Narration starts with: ${afterCursor!.narration.slice(0, 60)}
 
-  // Find the header row
-  const headerIdx = lines.findIndex((l) => l.toLowerCase().includes("date,narration"));
-  const dataLines = headerIdx >= 0 ? lines.slice(headerIdx + 1) : lines.slice(1);
+Skip all transactions up to and including that one. Continue from the next transaction onwards.`;
 
-  for (const line of dataLines) {
-    const parts = line.split(",");
-    if (parts.length < 2) continue;
-    const [date, narration, ref_number, debitStr, creditStr, balanceStr] = parts;
-    if (!date || !narration) continue;
-    const debit = debitStr?.trim() ? parseFloat(debitStr.trim()) || null : null;
-    const credit = creditStr?.trim() ? parseFloat(creditStr.trim()) || null : null;
-    const balance = balanceStr?.trim() ? parseFloat(balanceStr.trim()) || null : null;
-    transactions.push({
-      date: date.trim(),
-      narration: narration.trim().replace(/;/g, ","),
-      ref_number: ref_number?.trim() || null,
-      debit: isNaN(debit as number) ? null : debit,
-      credit: isNaN(credit as number) ? null : credit,
-      balance: isNaN(balance as number) ? null : balance,
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 8192,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
+          { type: "text", text: promptText },
+        ],
+      }],
     });
+
+    const text = response.content[0].type === "text" ? response.content[0].text : "";
+    const batch = parseCsvLines(text);
+
+    if (batch.length === 0) break;
+    allTransactions.push(...batch);
+
+    // Stop if model finished naturally (not cut off)
+    if (response.stop_reason !== "max_tokens") break;
+
+    // Set cursor to last transaction for next pass
+    const last = batch[batch.length - 1];
+    afterCursor = { date: last.date, narration: last.narration };
   }
 
-  return transactions;
+  return allTransactions;
 }
 
 export async function POST(request: NextRequest) {

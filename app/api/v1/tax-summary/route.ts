@@ -28,6 +28,11 @@ export async function GET(request: NextRequest) {
   } else if (period === "this_year") {
     const fyYear = now.getMonth() < 3 ? now.getFullYear() - 1 : now.getFullYear();
     startDate = toDate(new Date(fyYear, 3, 1)); // April 1 (Indian FY)
+  } else if (period === "last_year") {
+    // Last Indian FY: April 1 (year-1) → March 31 (year)
+    const fyYear = now.getMonth() < 3 ? now.getFullYear() - 2 : now.getFullYear() - 1;
+    startDate = toDate(new Date(fyYear, 3, 1));
+    endDate = toDate(new Date(fyYear + 1, 2, 31));
   } else {
     // this_month
     startDate = toDate(new Date(now.getFullYear(), now.getMonth(), 1));
