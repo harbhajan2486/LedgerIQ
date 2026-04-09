@@ -261,7 +261,7 @@ export async function POST(request: NextRequest) {
       .lte("transaction_date", maxDate);
   }
 
-  // 2. Check how many hashes already exist (for reporting)
+  // 2. Check which hashes already exist — only insert the missing ones
   const { data: existingRows } = await supabase
     .from("bank_transactions")
     .select("txn_hash")
@@ -270,10 +270,22 @@ export async function POST(request: NextRequest) {
   const existingHashes = new Set((existingRows ?? []).map((r) => r.txn_hash));
   const alreadyPresent = existingHashes.size;
 
-  // 3. Upsert — rows with existing hash are silently skipped
+  // 3. Only insert rows whose hash isn't already in the DB
+  const newRows = rowsToInsert.filter((r) => !existingHashes.has(r.txn_hash as string));
+
+  if (newRows.length === 0) {
+    return NextResponse.json({
+      success: true,
+      count: 0,
+      already_present: alreadyPresent,
+      total_in_file: transactions.length,
+      message: `All ${transactions.length} transactions already present — no duplicates added.`,
+    });
+  }
+
   const { data: inserted, error: insertError } = await supabase
     .from("bank_transactions")
-    .upsert(rowsToInsert, { onConflict: "tenant_id,txn_hash", ignoreDuplicates: true })
+    .insert(newRows)
     .select("id");
 
   if (insertError) {
