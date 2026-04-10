@@ -711,7 +711,7 @@ export default function ClientDetailPage() {
                         </table>
                       </div>
                     )}
-                  </Card>
+                  </CardContent></Card>
                 </div>
               )}
             </>
