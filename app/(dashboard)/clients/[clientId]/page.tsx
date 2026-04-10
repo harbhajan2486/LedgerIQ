@@ -465,8 +465,18 @@ export default function ClientDetailPage() {
 
       {/* Document list */}
       {activeTab === "documents" && <Card>
-        <CardHeader className="py-4 px-5 border-b">
+        <CardHeader className="py-4 px-5 border-b flex flex-row items-center justify-between">
           <CardTitle className="text-sm text-gray-700">Documents</CardTitle>
+          <div className="flex items-center gap-3">
+            <a href={`/api/v1/clients/${clientId}/sales-register?type=sales`}
+              className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800">
+              <Download size={12} /> Sales Register
+            </a>
+            <a href={`/api/v1/clients/${clientId}/sales-register?type=purchase`}
+              className="inline-flex items-center gap-1 text-xs text-purple-600 hover:text-purple-800">
+              <Download size={12} /> Purchase Register
+            </a>
+          </div>
         </CardHeader>
         <CardContent className="p-0">
           {documents.length === 0 ? (
@@ -816,9 +826,13 @@ export default function ClientDetailPage() {
                 <button onClick={() => openClaimModal()} className="text-xs text-gray-500 hover:text-gray-700 inline-flex items-center gap-1">
                   <Link2 size={11} /> Link existing
                 </button>
+                <a href={`/api/v1/clients/${clientId}/day-book`}
+                  className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800">
+                  <Download size={12} /> Day Book
+                </a>
                 <a href={`/api/v1/clients/${clientId}/bank-book`}
                   className="inline-flex items-center gap-1 text-xs text-green-600 hover:text-green-800">
-                  <Download size={12} /> Export Bank Book
+                  <Download size={12} /> Bank Book
                 </a>
                 <Link href={`/reconciliation?client=${clientId}`} className="text-xs text-blue-600 hover:underline">
                   Upload bank statement →
