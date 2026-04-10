@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import ExcelJS from "exceljs";
+import * as XLSX from "xlsx";
 
 export async function GET(
   _req: NextRequest,
@@ -24,61 +24,41 @@ export async function GET(
     .order("transaction_date", { ascending: true })
     .order("created_at", { ascending: true });
 
-  const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet("Bank Book");
-
-  // Title rows
-  ws.addRow([client?.client_name ?? "Bank Book"]);
-  ws.addRow(["Bank Book"]);
-  ws.addRow([]);
-
-  // Header
-  const headerRow = ws.addRow([
-    "Date", "Narration", "Ref No", "Bank", "Voucher Type",
-    "Ledger Name", "Category", "Debit (₹)", "Credit (₹)", "Balance (₹)", "Recon Status"
-  ]);
-  headerRow.font = { bold: true };
-  headerRow.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE2E8F0" } };
-
-  // Column widths
-  ws.columns = [
-    { width: 14 }, { width: 40 }, { width: 18 }, { width: 20 }, { width: 14 },
-    { width: 28 }, { width: 22 }, { width: 14 }, { width: 14 }, { width: 14 }, { width: 14 },
-  ];
-
-  for (const txn of txns ?? []) {
-    const row = ws.addRow([
-      txn.transaction_date,
-      txn.narration,
-      txn.ref_number ?? "",
-      txn.bank_name,
-      txn.voucher_type ?? "",
-      txn.ledger_name ?? "",
-      txn.category ?? "",
-      txn.debit_amount ? Number(txn.debit_amount) : null,
-      txn.credit_amount ? Number(txn.credit_amount) : null,
-      txn.balance ? Number(txn.balance) : null,
-      txn.status,
-    ]);
-    // Highlight unmatched rows
-    if (txn.status === "unmatched") {
-      row.getCell(6).font = { color: { argb: "FFB45309" } }; // amber for missing ledger
-    }
-    if (!txn.ledger_name) {
-      row.getCell(6).value = "— not set —";
-      row.getCell(6).font = { color: { argb: "FFB45309" }, italic: true };
-    }
-  }
+  const rows = (txns ?? []).map((txn) => ({
+    Date:           txn.transaction_date,
+    Narration:      txn.narration,
+    "Ref No":       txn.ref_number ?? "",
+    Bank:           txn.bank_name,
+    "Voucher Type": txn.voucher_type ?? "",
+    "Ledger Name":  txn.ledger_name ?? "",
+    Category:       txn.category ?? "",
+    "Debit (₹)":   txn.debit_amount  ? Number(txn.debit_amount)  : "",
+    "Credit (₹)":  txn.credit_amount ? Number(txn.credit_amount) : "",
+    "Balance (₹)": txn.balance       ? Number(txn.balance)       : "",
+    Status:         txn.status,
+  }));
 
   // Totals row
-  const totalDebit  = (txns ?? []).reduce((s, t) => s + (Number(t.debit_amount) || 0), 0);
+  const totalDebit  = (txns ?? []).reduce((s, t) => s + (Number(t.debit_amount)  || 0), 0);
   const totalCredit = (txns ?? []).reduce((s, t) => s + (Number(t.credit_amount) || 0), 0);
-  const totRow = ws.addRow(["TOTAL", "", "", "", "", "", "", totalDebit || null, totalCredit || null, "", ""]);
-  totRow.font = { bold: true };
-  totRow.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF1F5F9" } };
+  rows.push({
+    Date: "TOTAL", Narration: "", "Ref No": "", Bank: "", "Voucher Type": "",
+    "Ledger Name": "", Category: "",
+    "Debit (₹)": totalDebit || "", "Credit (₹)": totalCredit || "", "Balance (₹)": "", Status: "",
+  });
 
-  const buf = await wb.xlsx.writeBuffer();
+  const ws = XLSX.utils.json_to_sheet(rows);
+  ws["!cols"] = [
+    { wch: 14 }, { wch: 40 }, { wch: 18 }, { wch: 20 }, { wch: 14 },
+    { wch: 28 }, { wch: 22 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 14 },
+  ];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Bank Book");
+
+  const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
   const safeName = (client?.client_name ?? "client").replace(/[^a-z0-9]/gi, "_");
+
   return new NextResponse(buf, {
     headers: {
       "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
