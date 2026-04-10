@@ -153,6 +153,15 @@ export default function ClientDetailPage() {
   const [linkingId, setLinkingId] = useState<string | null>(null);
   const [editingTxn, setEditingTxn] = useState<string | null>(null);
 
+  // Claim transactions state
+  const [claimOpen, setClaimOpen] = useState(false);
+  const [claimTxns, setClaimTxns] = useState<{ id: string; transaction_date: string; narration: string; bank_name: string; debit_amount: number | null; credit_amount: number | null }[]>([]);
+  const [claimBanks, setClaimBanks] = useState<string[]>([]);
+  const [claimBankFilter, setClaimBankFilter] = useState("");
+  const [claimSelected, setClaimSelected] = useState<Set<string>>(new Set());
+  const [claimLoading, setClaimLoading] = useState(false);
+  const [claimSaving, setClaimSaving] = useState(false);
+
   // Ledger master state
   const [ledgers, setLedgers] = useState<{ id: string; ledger_name: string; ledger_type: string }[]>([]);
   const [ledgersLoading, setLedgersLoading] = useState(false);
@@ -241,6 +250,48 @@ export default function ClientDetailPage() {
       body: JSON.stringify({ reconciliationId: reconId }),
     });
     loadRecon();
+  }
+
+  async function openClaimModal(bank?: string) {
+    setClaimOpen(true);
+    setClaimLoading(true);
+    setClaimSelected(new Set());
+    const url = `/api/v1/clients/${clientId}/claim-transactions${bank ? `?bank=${encodeURIComponent(bank)}` : ""}`;
+    const res = await fetch(url);
+    const d = await res.json();
+    setClaimTxns(d.transactions ?? []);
+    setClaimBanks(d.bank_names ?? []);
+    setClaimLoading(false);
+  }
+
+  async function applyClaimFilter(bank: string) {
+    setClaimBankFilter(bank);
+    setClaimLoading(true);
+    setClaimSelected(new Set());
+    const url = `/api/v1/clients/${clientId}/claim-transactions${bank ? `?bank=${encodeURIComponent(bank)}` : ""}`;
+    const res = await fetch(url);
+    const d = await res.json();
+    setClaimTxns(d.transactions ?? []);
+    setClaimLoading(false);
+  }
+
+  async function saveClaim() {
+    if (claimSelected.size === 0) return;
+    setClaimSaving(true);
+    const res = await fetch(`/api/v1/clients/${clientId}/claim-transactions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transactionIds: [...claimSelected] }),
+    });
+    const d = await res.json();
+    if (res.ok) {
+      toast.success(`${d.assigned} transactions linked to ${client?.client_name}`);
+      setClaimOpen(false);
+      loadBankTxns();
+    } else {
+      toast.error(d.error ?? "Could not assign transactions");
+    }
+    setClaimSaving(false);
   }
 
   function loadLedgers() {
@@ -743,6 +794,9 @@ export default function ClientDetailPage() {
             <CardHeader className="py-4 px-5 border-b flex flex-row items-center justify-between">
               <CardTitle className="text-sm text-gray-700">Bank transactions</CardTitle>
               <div className="flex items-center gap-3">
+                <button onClick={() => openClaimModal()} className="text-xs text-gray-500 hover:text-gray-700 inline-flex items-center gap-1">
+                  <Link2 size={11} /> Link existing
+                </button>
                 <a href={`/api/v1/clients/${clientId}/bank-book`}
                   className="inline-flex items-center gap-1 text-xs text-green-600 hover:text-green-800">
                   <Download size={12} /> Export Bank Book
@@ -760,12 +814,14 @@ export default function ClientDetailPage() {
               ) : bankTxns.length === 0 ? (
                 <div className="text-center py-12">
                   <Landmark size={28} className="text-gray-300 mx-auto mb-2" />
-                  <p className="text-sm text-gray-500 mb-1">No bank transactions yet</p>
-                  <p className="text-xs text-gray-400">
-                    Upload a bank statement in{" "}
-                    <Link href="/reconciliation" className="text-blue-600 hover:underline">Reconciliation</Link>
-                    {" "}and select this client.
+                  <p className="text-sm text-gray-500 mb-1">No bank transactions linked to this client</p>
+                  <p className="text-xs text-gray-400 mb-3">
+                    Upload a bank statement in Reconciliation and select this client, or link existing transactions below.
                   </p>
+                  <button onClick={() => openClaimModal()}
+                    className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md bg-blue-600 text-white hover:bg-blue-700">
+                    <Link2 size={13} /> Link existing transactions
+                  </button>
                 </div>
               ) : (
                 <div className="overflow-x-auto">
@@ -835,6 +891,83 @@ export default function ClientDetailPage() {
                 </div>
               )}
             </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* Claim transactions modal */}
+      {claimOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <Card className="w-full max-w-2xl mx-4 max-h-[85vh] flex flex-col">
+            <CardHeader className="flex-shrink-0 pb-3">
+              <div className="flex items-start justify-between">
+                <div>
+                  <CardTitle className="text-base">Link transactions to {client?.client_name}</CardTitle>
+                  <p className="text-xs text-gray-500 mt-1">These transactions have no client assigned. Select the ones belonging to this client.</p>
+                </div>
+                <button onClick={() => setClaimOpen(false)} className="text-gray-400 hover:text-gray-600 ml-4"><X size={18} /></button>
+              </div>
+              {claimBanks.length > 1 && (
+                <div className="flex items-center gap-2 mt-3">
+                  <span className="text-xs text-gray-500">Filter by bank:</span>
+                  <select value={claimBankFilter} onChange={(e) => applyClaimFilter(e.target.value)}
+                    className="text-xs rounded border border-gray-300 px-2 py-1">
+                    <option value="">All banks</option>
+                    {claimBanks.map((b) => <option key={b} value={b}>{b}</option>)}
+                  </select>
+                </div>
+              )}
+            </CardHeader>
+            <CardContent className="overflow-y-auto flex-1 pt-0">
+              {claimLoading ? (
+                <div className="py-8 flex items-center justify-center gap-2 text-gray-400 text-sm">
+                  <Loader2 size={16} className="animate-spin" /> Loading…
+                </div>
+              ) : claimTxns.length === 0 ? (
+                <p className="text-sm text-gray-400 py-6 text-center">No unassigned transactions found. All transactions may already be linked to clients.</p>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs text-gray-500">{claimSelected.size} of {claimTxns.length} selected</span>
+                    <button onClick={() => setClaimSelected(claimSelected.size === claimTxns.length ? new Set() : new Set(claimTxns.map((t) => t.id)))}
+                      className="text-xs text-blue-600 hover:underline">
+                      {claimSelected.size === claimTxns.length ? "Deselect all" : "Select all"}
+                    </button>
+                  </div>
+                  <div className="space-y-1">
+                    {claimTxns.map((txn) => (
+                      <label key={txn.id} className={`flex items-center gap-3 p-2.5 rounded-lg border cursor-pointer transition-colors ${claimSelected.has(txn.id) ? "border-blue-400 bg-blue-50" : "border-gray-200 hover:border-gray-300"}`}>
+                        <input type="checkbox" checked={claimSelected.has(txn.id)}
+                          onChange={(e) => {
+                            const s = new Set(claimSelected);
+                            e.target.checked ? s.add(txn.id) : s.delete(txn.id);
+                            setClaimSelected(s);
+                          }}
+                          className="rounded border-gray-300" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-gray-900 truncate">{txn.narration}</p>
+                          <p className="text-xs text-gray-500">{txn.bank_name} · {txn.transaction_date}</p>
+                        </div>
+                        <span className="text-sm font-semibold flex-shrink-0">
+                          {txn.debit_amount ? <span className="text-red-600">₹{Number(txn.debit_amount).toLocaleString("en-IN")}</span>
+                            : <span className="text-green-700">₹{Number(txn.credit_amount).toLocaleString("en-IN")}</span>}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </>
+              )}
+            </CardContent>
+            {claimTxns.length > 0 && (
+              <div className="flex-shrink-0 px-6 py-4 border-t flex justify-end gap-2">
+                <button onClick={() => setClaimOpen(false)} className="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-md hover:bg-gray-50">Cancel</button>
+                <button onClick={saveClaim} disabled={claimSelected.size === 0 || claimSaving}
+                  className="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 inline-flex items-center gap-2">
+                  {claimSaving ? <Loader2 size={13} className="animate-spin" /> : null}
+                  Link {claimSelected.size > 0 ? claimSelected.size : ""} transactions
+                </button>
+              </div>
+            )}
           </Card>
         </div>
       )}
