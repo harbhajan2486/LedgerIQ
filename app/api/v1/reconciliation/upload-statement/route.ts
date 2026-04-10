@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { parseCSV, parseXLSX } from "@/lib/bank-statement-parser";
 import Anthropic from "@anthropic-ai/sdk";
+import { suggestLedger, extractPattern } from "@/lib/ledger-rules";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
@@ -244,10 +245,26 @@ export async function POST(request: NextRequest) {
   const allHashes: string[] = [];
   let minDate = "9999-12-31", maxDate = "0000-01-01";
 
+  // Pre-load confirmed client-specific mapping rules (if client is set)
+  const clientRules: Map<string, string> = new Map();
+  if (clientId) {
+    const { data: rules } = await supabase
+      .from("ledger_mapping_rules")
+      .select("pattern, ledger_name")
+      .eq("tenant_id", tenantId)
+      .eq("client_id", clientId)
+      .eq("confirmed", true);
+    for (const r of rules ?? []) clientRules.set(r.pattern, r.ledger_name);
+  }
+
   for (const txn of transactions) {
     const isoDate = toISODate(txn.date);
     const isDebit = !!txn.debit;
     const { category, voucher_type } = classifyTransaction(txn.narration ?? "", isDebit);
+
+    // Suggest ledger_name: Layer 3 client rules first, then Layer 1 global rules
+    const pattern = extractPattern(txn.narration ?? "");
+    const ledger_name = clientRules.get(pattern) ?? suggestLedger(txn.narration ?? "") ?? null;
 
     // Hash = bank + date + narration (normalised) + debit + credit for dedup
     const hashStr = `${bankName}|${isoDate}|${(txn.narration ?? "").toLowerCase().trim()}|${txn.debit ?? ""}|${txn.credit ?? ""}`;
@@ -272,6 +289,7 @@ export async function POST(request: NextRequest) {
       status: "unmatched",
       category,
       voucher_type,
+      ledger_name,
       txn_hash: txnHash,
       ...(clientId ? { client_id: clientId } : {}),
     });

@@ -18,7 +18,7 @@ export async function GET(
 
     const { data: txns } = await supabase
       .from("bank_transactions")
-      .select("id, transaction_date, narration, ref_number, debit_amount, credit_amount, balance, bank_name, status, category, voucher_type")
+      .select("id, transaction_date, narration, ref_number, debit_amount, credit_amount, balance, bank_name, status, category, voucher_type, ledger_name")
       .eq("tenant_id", profile.tenant_id)
       .eq("client_id", clientId)
       .order("transaction_date", { ascending: false })

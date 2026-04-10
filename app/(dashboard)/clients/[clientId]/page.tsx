@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Building2, ChevronLeft, FileText, Loader2, Upload,
   CheckCircle2, AlertTriangle, Clock, RefreshCw, Landmark,
-  Link2, Link2Off, HelpCircle, X, Pencil
+  Link2, Link2Off, X, Pencil, BookOpen, Download, Plus, Trash2
 } from "lucide-react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
@@ -41,6 +41,7 @@ interface BankTxn {
   status: string;
   category: string | null;
   voucher_type: string | null;
+  ledger_name: string | null;
 }
 
 interface BankSummary {
@@ -138,7 +139,7 @@ export default function ClientDetailPage() {
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
   const [retrying, setRetrying] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"documents" | "bank" | "reconciliation">("documents");
+  const [activeTab, setActiveTab] = useState<"documents" | "bank" | "reconciliation" | "ledgers">("documents");
   const [bankTxns, setBankTxns] = useState<BankTxn[]>([]);
   const [bankSummary, setBankSummary] = useState<BankSummary | null>(null);
   const [bankLoading, setBankLoading] = useState(false);
@@ -151,6 +152,14 @@ export default function ClientDetailPage() {
   const [linkingTxn, setLinkingTxn] = useState<BankTxn | null>(null);
   const [linkingId, setLinkingId] = useState<string | null>(null);
   const [editingTxn, setEditingTxn] = useState<string | null>(null);
+
+  // Ledger master state
+  const [ledgers, setLedgers] = useState<{ id: string; ledger_name: string; ledger_type: string }[]>([]);
+  const [ledgersLoading, setLedgersLoading] = useState(false);
+  const [newLedgerName, setNewLedgerName] = useState("");
+  const [newLedgerType, setNewLedgerType] = useState("expense");
+  const [addingLedger, setAddingLedger] = useState(false);
+  const [seedingLedgers, setSeedingLedgers] = useState(false);
 
   function loadData() {
     fetch(`/api/v1/clients/${clientId}`)
@@ -234,9 +243,52 @@ export default function ClientDetailPage() {
     loadRecon();
   }
 
+  function loadLedgers() {
+    setLedgersLoading(true);
+    fetch(`/api/v1/clients/${clientId}/ledgers`)
+      .then((r) => r.json())
+      .then((d) => setLedgers(d.ledgers ?? []))
+      .finally(() => setLedgersLoading(false));
+  }
+
+  async function addLedger(e: React.FormEvent) {
+    e.preventDefault();
+    if (!newLedgerName.trim()) return;
+    setAddingLedger(true);
+    const res = await fetch(`/api/v1/clients/${clientId}/ledgers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ledger_name: newLedgerName.trim(), ledger_type: newLedgerType }),
+    });
+    if (res.ok) { setNewLedgerName(""); loadLedgers(); }
+    else { const d = await res.json(); toast.error(d.error ?? "Could not add ledger"); }
+    setAddingLedger(false);
+  }
+
+  async function seedLedgers() {
+    setSeedingLedgers(true);
+    const res = await fetch(`/api/v1/clients/${clientId}/ledgers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seed: true }),
+    });
+    if (res.ok) { const d = await res.json(); toast.success(`${d.seeded} common ledgers loaded`); loadLedgers(); }
+    setSeedingLedgers(false);
+  }
+
+  async function deleteLedger(ledgerId: string) {
+    await fetch(`/api/v1/clients/${clientId}/ledgers`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ledgerId }),
+    });
+    loadLedgers();
+  }
+
   useEffect(() => { loadData(); }, [clientId]);
   useEffect(() => { if (activeTab === "bank") loadBankTxns(); }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "reconciliation") loadRecon(); }, [activeTab, clientId]);
+  useEffect(() => { if (activeTab === "ledgers") loadLedgers(); }, [activeTab, clientId]);
 
   async function retryExtraction(docId: string, fileName: string) {
     setRetrying(docId);
@@ -327,6 +379,7 @@ export default function ClientDetailPage() {
           { key: "documents", label: "Documents", icon: <FileText size={14} />, count: documents.length },
           { key: "bank", label: "Bank Statements", icon: <Landmark size={14} />, count: bankSummary?.total ?? null },
           { key: "reconciliation", label: "Reconciliation", icon: <Link2 size={14} />, count: reconData?.summary.matched ?? null },
+          { key: "ledgers", label: "Ledger Master", icon: <BookOpen size={14} />, count: ledgers.length || null },
         ] as const).map((tab) => (
           <button
             key={tab.key}
@@ -689,12 +742,15 @@ export default function ClientDetailPage() {
           <Card>
             <CardHeader className="py-4 px-5 border-b flex flex-row items-center justify-between">
               <CardTitle className="text-sm text-gray-700">Bank transactions</CardTitle>
-              <Link
-                href={`/reconciliation?client=${clientId}`}
-                className="text-xs text-blue-600 hover:underline"
-              >
-                Upload bank statement →
-              </Link>
+              <div className="flex items-center gap-3">
+                <a href={`/api/v1/clients/${clientId}/bank-book`}
+                  className="inline-flex items-center gap-1 text-xs text-green-600 hover:text-green-800">
+                  <Download size={12} /> Export Bank Book
+                </a>
+                <Link href={`/reconciliation?client=${clientId}`} className="text-xs text-blue-600 hover:underline">
+                  Upload bank statement →
+                </Link>
+              </div>
             </CardHeader>
             <CardContent className="p-0">
               {bankLoading ? (
@@ -718,6 +774,7 @@ export default function ClientDetailPage() {
                       <tr className="border-b bg-gray-50 text-xs text-gray-500">
                         <th className="text-left px-5 py-3 font-medium">Date</th>
                         <th className="text-left px-4 py-3 font-medium">Narration</th>
+                        <th className="text-left px-4 py-3 font-medium">Ledger</th>
                         <th className="text-left px-4 py-3 font-medium">Category</th>
                         <th className="text-right px-4 py-3 font-medium">Debit</th>
                         <th className="text-right px-4 py-3 font-medium">Credit</th>
@@ -732,6 +789,20 @@ export default function ClientDetailPage() {
                           <td className="px-4 py-2.5 max-w-xs">
                             <p className="truncate text-gray-800">{txn.narration}</p>
                             {txn.ref_number && <p className="text-gray-400 text-xs">Ref: {txn.ref_number}</p>}
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <LedgerCell
+                              txnId={txn.id} value={txn.ledger_name}
+                              ledgers={ledgers}
+                              onSave={async (txnId, val) => {
+                                await fetch(`/api/v1/reconciliation/transactions/${txnId}`, {
+                                  method: "PATCH",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ ledger_name: val }),
+                                });
+                                loadBankTxns();
+                              }}
+                            />
                           </td>
                           <td className="px-4 py-2.5">
                             {txn.category && (
@@ -767,6 +838,132 @@ export default function ClientDetailPage() {
           </Card>
         </div>
       )}
+
+      {/* Ledger Master tab */}
+      {activeTab === "ledgers" && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-900">Ledger Master</h2>
+              <p className="text-xs text-gray-500 mt-0.5">Define Tally ledger names for this client. Used to auto-classify bank transactions.</p>
+            </div>
+            <button onClick={seedLedgers} disabled={seedingLedgers}
+              className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
+              {seedingLedgers ? <Loader2 size={13} className="animate-spin" /> : <BookOpen size={13} />}
+              Load 25 common ledgers
+            </button>
+          </div>
+
+          {/* Add ledger form */}
+          <Card>
+            <CardContent className="pt-4 pb-4">
+              <form onSubmit={addLedger} className="flex gap-2 items-end">
+                <div className="flex-1 space-y-1">
+                  <label className="text-xs font-medium text-gray-600">Ledger name</label>
+                  <input value={newLedgerName} onChange={(e) => setNewLedgerName(e.target.value)}
+                    placeholder="e.g. Petrol Expenses"
+                    className="w-full h-9 px-3 rounded-md border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-gray-600">Type</label>
+                  <select value={newLedgerType} onChange={(e) => setNewLedgerType(e.target.value)}
+                    className="h-9 px-2 rounded-md border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    {["expense","income","asset","liability","capital","bank","tax"].map((t) => (
+                      <option key={t} value={t}>{t.charAt(0).toUpperCase() + t.slice(1)}</option>
+                    ))}
+                  </select>
+                </div>
+                <button type="submit" disabled={addingLedger || !newLedgerName.trim()}
+                  className="h-9 px-4 rounded-md bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 inline-flex items-center gap-1">
+                  {addingLedger ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />} Add
+                </button>
+              </form>
+            </CardContent>
+          </Card>
+
+          {/* Ledger list */}
+          <Card>
+            <CardContent className="p-0">
+              {ledgersLoading ? (
+                <div className="py-8 flex items-center justify-center gap-2 text-gray-400 text-sm">
+                  <Loader2 size={16} className="animate-spin" /> Loading…
+                </div>
+              ) : ledgers.length === 0 ? (
+                <div className="py-12 text-center text-gray-400 text-sm">
+                  <BookOpen size={28} className="mx-auto mb-2 text-gray-300" />
+                  No ledgers yet. Add one above or click "Load 25 common ledgers".
+                </div>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b bg-gray-50">
+                      <th className="text-left px-5 py-3 text-xs font-medium text-gray-500">Ledger Name</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500">Type</th>
+                      <th className="px-4 py-3" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ledgers.map((l) => (
+                      <tr key={l.id} className="border-b last:border-0 hover:bg-gray-50/50">
+                        <td className="px-5 py-2.5 font-medium text-gray-800">{l.ledger_name}</td>
+                        <td className="px-4 py-2.5">
+                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                            l.ledger_type === "expense"   ? "bg-red-50 text-red-700" :
+                            l.ledger_type === "income"    ? "bg-green-50 text-green-700" :
+                            l.ledger_type === "tax"       ? "bg-orange-50 text-orange-700" :
+                            l.ledger_type === "capital"   ? "bg-purple-50 text-purple-700" :
+                            l.ledger_type === "bank"      ? "bg-blue-50 text-blue-700" :
+                            "bg-gray-100 text-gray-600"
+                          }`}>{l.ledger_type}</span>
+                        </td>
+                        <td className="px-4 py-2.5 text-right">
+                          <button onClick={() => deleteLedger(l.id)} className="text-gray-300 hover:text-red-500 transition-colors">
+                            <Trash2 size={14} />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
     </div>
+  );
+}
+
+function LedgerCell({ txnId, value, ledgers, onSave }: {
+  txnId: string;
+  value: string | null | undefined;
+  ledgers: { id: string; ledger_name: string; ledger_type: string }[];
+  onSave: (txnId: string, value: string) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  if (editing) {
+    return (
+      <select autoFocus defaultValue={value ?? ""}
+        className="text-xs rounded border border-blue-300 px-1 py-0.5 max-w-[160px] focus:outline-none focus:ring-1 focus:ring-blue-400"
+        onBlur={(e) => { setEditing(false); if (e.target.value && e.target.value !== value) { setSaving(true); onSave(txnId, e.target.value).finally(() => setSaving(false)); } }}
+        onChange={async (e) => { if (e.target.value) { setEditing(false); setSaving(true); await onSave(txnId, e.target.value); setSaving(false); } }}>
+        <option value="">— select ledger —</option>
+        {ledgers.map((l) => <option key={l.id} value={l.ledger_name}>{l.ledger_name}</option>)}
+      </select>
+    );
+  }
+
+  if (saving) return <span className="text-xs text-gray-400 italic">Saving…</span>;
+
+  return (
+    <button onClick={() => setEditing(true)}
+      className={`group inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded max-w-[160px] truncate ${
+        value ? "bg-green-50 text-green-800 hover:opacity-80" : "bg-amber-50 text-amber-700 hover:opacity-80 italic"
+      }`}>
+      <span className="truncate">{value ?? "Set ledger"}</span>
+      <Pencil size={9} className="flex-shrink-0 opacity-0 group-hover:opacity-60" />
+    </button>
   );
 }
