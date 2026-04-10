@@ -169,6 +169,7 @@ export default function ClientDetailPage() {
   const [newLedgerType, setNewLedgerType] = useState("expense");
   const [addingLedger, setAddingLedger] = useState(false);
   const [seedingLedgers, setSeedingLedgers] = useState(false);
+  const [reapplying, setReapplying] = useState(false);
 
   function loadData() {
     fetch(`/api/v1/clients/${clientId}`)
@@ -327,6 +328,19 @@ export default function ClientDetailPage() {
     setSeedingLedgers(false);
   }
 
+  async function reapplyLedgerRules() {
+    setReapplying(true);
+    const res = await fetch(`/api/v1/clients/${clientId}/reapply-ledger-rules`, { method: "POST" });
+    const d = await res.json();
+    if (res.ok) {
+      toast.success(d.updated > 0 ? `Updated ${d.updated} transaction${d.updated === 1 ? "" : "s"}` : "All ledgers are already up to date");
+      loadBankTxns();
+    } else {
+      toast.error(d.error ?? "Could not re-apply rules");
+    }
+    setReapplying(false);
+  }
+
   async function deleteLedger(ledgerId: string) {
     await fetch(`/api/v1/clients/${clientId}/ledgers`, {
       method: "DELETE",
@@ -337,7 +351,7 @@ export default function ClientDetailPage() {
   }
 
   useEffect(() => { loadData(); }, [clientId]);
-  useEffect(() => { if (activeTab === "bank") loadBankTxns(); }, [activeTab, clientId]);
+  useEffect(() => { if (activeTab === "bank") { loadBankTxns(); loadLedgers(); } }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "reconciliation") loadRecon(); }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "ledgers") loadLedgers(); }, [activeTab, clientId]);
 
@@ -794,6 +808,11 @@ export default function ClientDetailPage() {
             <CardHeader className="py-4 px-5 border-b flex flex-row items-center justify-between">
               <CardTitle className="text-sm text-gray-700">Bank transactions</CardTitle>
               <div className="flex items-center gap-3">
+                <button onClick={reapplyLedgerRules} disabled={reapplying}
+                  className="text-xs text-gray-500 hover:text-gray-700 inline-flex items-center gap-1 disabled:opacity-50">
+                  {reapplying ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+                  Re-apply ledger rules
+                </button>
                 <button onClick={() => openClaimModal()} className="text-xs text-gray-500 hover:text-gray-700 inline-flex items-center gap-1">
                   <Link2 size={11} /> Link existing
                 </button>
