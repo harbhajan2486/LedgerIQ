@@ -132,22 +132,16 @@ export async function POST(request: NextRequest) {
   if (reconRows.length === 0) return NextResponse.json({ matched: 0, possible: 0 });
 
   // ── 4. Batch write everything ─────────────────────────────────────────────
-  const writes: Promise<unknown>[] = [
-    // Upsert all reconciliation rows in one call
-    supabase.from("reconciliations").upsert(reconRows, { onConflict: "tenant_id,bank_transaction_id" }),
-  ];
-
   // Batch-update bank transaction statuses (group by status to minimise calls)
-  const matchedTxnIds = matchedTxnUpdates.filter((u) => u.status === "matched").map((u) => u.id);
+  const matchedTxnIds  = matchedTxnUpdates.filter((u) => u.status === "matched").map((u) => u.id);
   const possibleTxnIds = matchedTxnUpdates.filter((u) => u.status === "possible_match").map((u) => u.id);
-  if (matchedTxnIds.length > 0)
-    writes.push(supabase.from("bank_transactions").update({ status: "matched" }).in("id", matchedTxnIds));
-  if (possibleTxnIds.length > 0)
-    writes.push(supabase.from("bank_transactions").update({ status: "possible_match" }).in("id", possibleTxnIds));
-  if (matchedDocIds.length > 0)
-    writes.push(supabase.from("documents").update({ status: "reconciled" }).in("id", matchedDocIds));
 
-  await Promise.all(writes);
+  await Promise.all([
+    supabase.from("reconciliations").upsert(reconRows, { onConflict: "tenant_id,bank_transaction_id" }).then(),
+    matchedTxnIds.length  > 0 ? supabase.from("bank_transactions").update({ status: "matched" }).in("id", matchedTxnIds).then() : null,
+    possibleTxnIds.length > 0 ? supabase.from("bank_transactions").update({ status: "possible_match" }).in("id", possibleTxnIds).then() : null,
+    matchedDocIds.length  > 0 ? supabase.from("documents").update({ status: "reconciled" }).in("id", matchedDocIds).then() : null,
+  ].filter(Boolean));
 
   return NextResponse.json({ matched: matchedTxnIds.length, possible: possibleTxnIds.length });
   } catch (err) {
