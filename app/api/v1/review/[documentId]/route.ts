@@ -29,11 +29,29 @@ export async function GET(
 
   if (docError || !doc) return NextResponse.json({ error: "Document not found" }, { status: 404 });
 
-  const { data: extractions } = await supabase
+  const { data: allExtractions } = await supabase
     .from("extractions")
-    .select("id, field_name, extracted_value, confidence, status")
+    .select("id, field_name, extracted_value, confidence, status, created_at")
     .eq("document_id", documentId)
-    .order("field_name");
+    .order("created_at", { ascending: false }); // newest first
+
+  // Deduplicate: one row per field. Priority: pending (human hasn't reviewed yet)
+  // over accepted/corrected, and within same status pick newest row.
+  const seen = new Set<string>();
+  const pendingByField = new Map<string, typeof allExtractions extends null ? never : (typeof allExtractions)[0]>();
+  const resolvedByField = new Map<string, typeof allExtractions extends null ? never : (typeof allExtractions)[0]>();
+
+  for (const row of allExtractions ?? []) {
+    if (row.status === "pending" && !pendingByField.has(row.field_name)) {
+      pendingByField.set(row.field_name, row);
+    } else if (row.status !== "pending" && !resolvedByField.has(row.field_name)) {
+      resolvedByField.set(row.field_name, row);
+    }
+  }
+
+  // Prefer pending over resolved (pending = fresh extraction, needs review)
+  const extractions = [...new Set([...pendingByField.keys(), ...resolvedByField.keys()])]
+    .map(field => pendingByField.get(field) ?? resolvedByField.get(field)!);
 
   // Generate signed URL for the original document (15-minute expiry)
   const { data: signedUrl } = await supabase.storage
@@ -42,7 +60,7 @@ export async function GET(
 
   return NextResponse.json({
     document: { ...doc, signedUrl: signedUrl?.signedUrl },
-    extractions: extractions ?? [],
+    extractions,
   });
   } catch (err) {
     console.error("[review/document] Unhandled error:", err);

@@ -661,8 +661,19 @@ Return JSON in this exact format:
     }
 
     // ----------------------------------------------------------------
-    // STORE EXTRACTIONS — delete any existing rows first (handles retries)
+    // STORE EXTRACTIONS — check we're still the active run before writing
+    // Re-check document status: if another run already completed (status=review_required),
+    // abort to avoid duplicates from concurrent calls
     // ----------------------------------------------------------------
+    const { data: currentDoc } = await supabase
+      .from("documents").select("status").eq("id", documentId).single();
+    if (currentDoc?.status === "review_required") {
+      // Another run finished while we were processing — discard our results
+      return new Response(
+        JSON.stringify({ success: true, skipped: true, reason: "concurrent_run_completed" }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }
     await supabase.from("extractions").delete().eq("document_id", documentId);
 
     const extractionRows = EXTRACTION_FIELDS.map((field) => ({
