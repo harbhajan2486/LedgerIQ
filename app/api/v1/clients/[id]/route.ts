@@ -44,7 +44,31 @@ export async function GET(
       .order("uploaded_at", { ascending: false })
       .limit(50);
 
-    return NextResponse.json({ client, documents: documents ?? [] });
+    // Per-doc confidence: % of fields with confidence >= 0.8 (non-null, non-rejected)
+    const docIds = (documents ?? []).map((d) => d.id);
+    const confMap: Record<string, { high: number; total: number }> = {};
+    if (docIds.length > 0) {
+      const { data: confRows } = await supabase
+        .from("extractions")
+        .select("document_id, confidence")
+        .in("document_id", docIds)
+        .not("status", "eq", "rejected")
+        .not("extracted_value", "is", null);
+      for (const row of confRows ?? []) {
+        if (!confMap[row.document_id]) confMap[row.document_id] = { high: 0, total: 0 };
+        confMap[row.document_id].total++;
+        if ((row.confidence ?? 0) >= 0.8) confMap[row.document_id].high++;
+      }
+    }
+
+    const docsWithConf = (documents ?? []).map((d) => ({
+      ...d,
+      conf_pct: confMap[d.id]
+        ? Math.round((confMap[d.id].high / confMap[d.id].total) * 100)
+        : null,
+    }));
+
+    return NextResponse.json({ client, documents: docsWithConf });
   } catch (err) {
     console.error("[clients/[id]/GET]", err);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });

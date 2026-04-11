@@ -28,6 +28,7 @@ interface Document {
   status: string;
   uploaded_at: string;
   ai_model_used: string | null;
+  conf_pct: number | null;
 }
 
 interface BankTxn {
@@ -658,6 +659,7 @@ export default function ClientDetailPage() {
                         <th className="text-left text-xs font-medium text-gray-500 px-5 py-3">File</th>
                         <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Type</th>
                         <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Status</th>
+                        <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Confidence</th>
                         <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Uploaded</th>
                         <th className="px-4 py-3"></th>
                       </tr>
@@ -688,6 +690,15 @@ export default function ClientDetailPage() {
                               <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium ${cfg.cls}`}>
                                 {cfg.icon} {cfg.label}
                               </span>
+                            </td>
+                            <td className="px-4 py-3">
+                              {doc.conf_pct !== null && doc.conf_pct !== undefined ? (
+                                <span className={`text-xs font-medium ${doc.conf_pct >= 80 ? "text-green-600" : doc.conf_pct >= 50 ? "text-amber-600" : "text-red-500"}`}>
+                                  {doc.conf_pct}% high
+                                </span>
+                              ) : (
+                                <span className="text-xs text-gray-300">—</span>
+                              )}
                             </td>
                             <td className="px-4 py-3 text-gray-400 text-xs">
                               {new Date(doc.uploaded_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
