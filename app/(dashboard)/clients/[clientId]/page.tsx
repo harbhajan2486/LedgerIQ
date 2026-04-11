@@ -531,6 +531,10 @@ export default function ClientDetailPage() {
           <div className="space-y-4">
             {/* Register downloads */}
             <div className="flex items-center justify-end gap-3">
+              <a href={`/api/v1/clients/${clientId}/tds-summary?format=excel`}
+                className="inline-flex items-center gap-1 text-xs text-orange-600 hover:text-orange-800">
+                <Download size={12} /> TDS Summary (26Q)
+              </a>
               <a href={`/api/v1/clients/${clientId}/sales-register?type=sales`}
                 className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800">
                 <Download size={12} /> Sales Register

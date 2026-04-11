@@ -31,16 +31,31 @@ interface DocumentData {
 }
 
 const FIELD_LABELS: Record<string, string> = {
-  vendor_name: "Vendor Name", vendor_gstin: "Vendor GSTIN",
+  vendor_name: "Vendor / Party Name", vendor_gstin: "Vendor GSTIN",
   buyer_gstin: "Buyer GSTIN", invoice_number: "Invoice Number",
   invoice_date: "Invoice Date", due_date: "Due Date",
-  taxable_value: "Taxable Value", cgst_rate: "CGST Rate",
-  cgst_amount: "CGST Amount", sgst_rate: "SGST Rate",
-  sgst_amount: "SGST Amount", igst_rate: "IGST Rate",
-  igst_amount: "IGST Amount", total_amount: "Total Amount",
-  tds_section: "TDS Section", tds_rate: "TDS Rate",
-  tds_amount: "TDS Amount", payment_reference: "Payment Reference (UTR)",
-  reverse_charge: "Reverse Charge", place_of_supply: "Place of Supply",
+  taxable_value: "Taxable Value (₹)", cgst_rate: "CGST Rate (%)",
+  cgst_amount: "CGST Amount (₹)", sgst_rate: "SGST Rate (%)",
+  sgst_amount: "SGST Amount (₹)", igst_rate: "IGST Rate (%)",
+  igst_amount: "IGST Amount (₹)", total_amount: "Total Amount (₹)",
+  tds_section: "TDS Section", tds_rate: "TDS Rate (%)",
+  tds_amount: "TDS Amount (₹)", payment_reference: "Payment Reference (UTR)",
+  reverse_charge: "Reverse Charge (RCM)", place_of_supply: "Place of Supply",
+  suggested_ledger: "Suggested Tally Ledger",
+};
+
+// Field grouping for display
+const FIELD_GROUPS = [
+  { label: "Invoice Details",    fields: ["vendor_name","vendor_gstin","buyer_gstin","invoice_number","invoice_date","due_date","place_of_supply","reverse_charge","payment_reference"] },
+  { label: "Amounts & GST",      fields: ["taxable_value","cgst_rate","cgst_amount","sgst_rate","sgst_amount","igst_rate","igst_amount","total_amount"] },
+  { label: "TDS Deduction",      fields: ["tds_section","tds_rate","tds_amount"] },
+  { label: "Ledger / Posting",   fields: ["suggested_ledger"] },
+];
+
+const TDS_SECTIONS = ["194C","194J","194I","194H","194A","194D","194O","194Q","192","193","194B","194G","195","No TDS"];
+const TDS_RATES: Record<string, string> = {
+  "194C":"2","194J":"10","194I":"10","194H":"5","194A":"10",
+  "194D":"5","194O":"1","194Q":"0.1","192":"slab","193":"10","No TDS":"0",
 };
 
 function confidenceColour(confidence: number) {
@@ -270,88 +285,142 @@ export default function ReviewDetailPage() {
           </CardContent>
         </Card>
 
-        {/* Right — extracted fields */}
-        <div className="overflow-y-auto space-y-2 pr-1">
-          {extractions.map((extraction, index) => (
-            <div
-              key={extraction.id}
-              className={`p-3 rounded-lg border bg-white transition-colors ${confidenceBorder(extraction.confidence, extraction.status)}`}
-            >
-              <div className="flex items-start justify-between gap-2 mb-1.5">
-                <label className="text-xs font-medium text-gray-500 uppercase tracking-wide">
-                  {FIELD_LABELS[extraction.field_name] ?? extraction.field_name.replace(/_/g, " ")}
-                </label>
-                <div className="flex items-center gap-1.5 flex-shrink-0">
-                  {/* Confidence badge */}
-                  <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${confidenceColour(extraction.confidence)}`}>
-                    {Math.round(extraction.confidence * 100)}%
-                  </span>
-                  {/* Status indicator */}
-                  {extraction.status === "accepted" && <CheckCircle2 size={14} className="text-green-500" />}
-                  {extraction.status === "corrected" && <CheckCircle2 size={14} className="text-blue-500" />}
-                  {extraction.saving && <Loader2 size={14} className="animate-spin text-gray-400" />}
-                  {/* Undo — re-open a resolved field */}
-                  {extraction.status !== "pending" && !extraction.saving && (
-                    <button
-                      onClick={() => startEdit(extraction.id)}
-                      className="text-gray-300 hover:text-gray-500"
-                      title="Re-correct this field"
-                    >
-                      <RotateCcw size={12} />
-                    </button>
-                  )}
+        {/* Right — extracted fields grouped */}
+        <div className="overflow-y-auto space-y-3 pr-1">
+          {extractions.length === 0 ? (
+            <div className="text-center py-12 text-sm text-gray-400">No fields extracted yet.</div>
+          ) : (
+            FIELD_GROUPS.map((group) => {
+              const groupExtractions = group.fields
+                .map((f) => extractions.find((e) => e.field_name === f))
+                .filter(Boolean) as typeof extractions;
+              if (groupExtractions.length === 0) return null;
+              const globalIndex = (fieldName: string) => extractions.findIndex((e) => e.field_name === fieldName);
+
+              return (
+                <div key={group.label}>
+                  <div className={`text-xs font-semibold uppercase tracking-wider mb-1.5 px-1 ${
+                    group.label === "TDS Deduction" ? "text-orange-600" :
+                    group.label === "Ledger / Posting" ? "text-blue-600" :
+                    "text-gray-400"
+                  }`}>{group.label}</div>
+                  <div className="space-y-1.5">
+                    {groupExtractions.map((extraction) => {
+                      const idx = globalIndex(extraction.field_name);
+                      const isTdsSection = extraction.field_name === "tds_section";
+                      const isLedger = extraction.field_name === "suggested_ledger";
+                      const isRuleBased = extraction.confidence === 0.78 || extraction.confidence === 0.75 || extraction.confidence === 0.72;
+
+                      return (
+                        <div key={extraction.id}
+                          className={`p-3 rounded-lg border bg-white transition-colors ${confidenceBorder(extraction.confidence, extraction.status)}`}>
+                          <div className="flex items-start justify-between gap-2 mb-1.5">
+                            <label className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+                              {FIELD_LABELS[extraction.field_name] ?? extraction.field_name.replace(/_/g, " ")}
+                              {isRuleBased && <span className="ml-1 normal-case text-orange-500 font-normal">(auto-inferred)</span>}
+                            </label>
+                            <div className="flex items-center gap-1.5 flex-shrink-0">
+                              <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${confidenceColour(extraction.confidence)}`}>
+                                {Math.round(extraction.confidence * 100)}%
+                              </span>
+                              {extraction.status === "accepted"  && <CheckCircle2 size={14} className="text-green-500" />}
+                              {extraction.status === "corrected" && <CheckCircle2 size={14} className="text-blue-500" />}
+                              {extraction.saving && <Loader2 size={14} className="animate-spin text-gray-400" />}
+                              {extraction.status !== "pending" && !extraction.saving && (
+                                <button onClick={() => startEdit(extraction.id)}
+                                  className="text-gray-300 hover:text-gray-500" title="Re-correct">
+                                  <RotateCcw size={12} />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* TDS Section: dropdown */}
+                          {isTdsSection ? (
+                            <div className="flex items-center gap-2">
+                              <select
+                                value={extraction.editingValue ?? extraction.extracted_value ?? ""}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setExtractions((prev) => prev.map((ex) =>
+                                    ex.id === extraction.id ? { ...ex, editingValue: val, isEditing: true } : ex
+                                  ));
+                                  // Auto-fill TDS rate when section changes
+                                  const rate = TDS_RATES[val];
+                                  if (rate) {
+                                    const rateExt = extractions.find((e) => e.field_name === "tds_rate");
+                                    if (rateExt) saveCorrection(rateExt.id, "correct", rate);
+                                  }
+                                  saveCorrection(extraction.id, "correct", val);
+                                }}
+                                disabled={extraction.saving}
+                                className={`flex-1 text-sm px-2 py-1.5 rounded border outline-none focus:ring-2 focus:ring-blue-500 ${
+                                  extraction.status === "accepted" ? "bg-green-50 border-green-200" :
+                                  extraction.status === "corrected" ? "bg-blue-50 border-blue-200" : "bg-white border-gray-200"
+                                }`}>
+                                <option value="">— No TDS —</option>
+                                {TDS_SECTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+                              </select>
+                              {extraction.status === "pending" && !extraction.saving && (
+                                <button onClick={() => acceptField(extraction.id)}
+                                  className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded bg-green-50 hover:bg-green-100 text-green-600"
+                                  title="Accept">
+                                  <Check size={14} />
+                                </button>
+                              )}
+                            </div>
+                          ) : (
+                            /* Standard text input */
+                            <div className="flex items-center gap-2">
+                              <input
+                                ref={(el) => { fieldRefs.current[extraction.id] = el; }}
+                                type="text"
+                                value={extraction.editingValue ?? extraction.extracted_value ?? ""}
+                                onChange={(e) => setExtractions((prev) => prev.map((ex) =>
+                                  ex.id === extraction.id ? { ...ex, editingValue: e.target.value, isEditing: true } : ex
+                                ))}
+                                onFocus={() => setExtractions((prev) => prev.map((ex) =>
+                                  ex.id === extraction.id ? { ...ex, isEditing: true } : ex
+                                ))}
+                                onBlur={() => onBlur(extraction)}
+                                onKeyDown={(e) => handleKeyDown(e, extraction.id, idx)}
+                                disabled={extraction.saving}
+                                placeholder={isLedger ? "e.g. Professional Fees, Rent…" : ""}
+                                className={`flex-1 text-sm px-2 py-1.5 rounded border outline-none focus:ring-2 focus:ring-blue-500 transition-colors
+                                  ${extraction.status === "accepted"  ? "bg-green-50 border-green-200 text-green-800" : ""}
+                                  ${extraction.status === "corrected" ? "bg-blue-50 border-blue-200 text-blue-800" : ""}
+                                  ${extraction.status === "pending"   ? "bg-white border-gray-200 text-gray-900" : ""}
+                                  ${extraction.saving ? "opacity-50" : ""}
+                                  ${isLedger ? "font-medium" : ""}
+                                `}
+                              />
+                              {extraction.status === "pending" && !extraction.saving && (
+                                <button onClick={() => acceptField(extraction.id)}
+                                  className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded bg-green-50 hover:bg-green-100 text-green-600"
+                                  title="Accept (Enter)">
+                                  <Check size={14} />
+                                </button>
+                              )}
+                            </div>
+                          )}
+
+                          {extraction.confidence < 0.5 && extraction.status === "pending" && (
+                            <p className="text-xs text-red-500 mt-1 flex items-center gap-1">
+                              <AlertCircle size={10} /> Low confidence — please verify
+                            </p>
+                          )}
+                          {isRuleBased && extraction.status === "pending" && (
+                            <p className="text-xs text-orange-500 mt-1">
+                              Inferred from vendor name — confirm or correct
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
-
-              {/* Editable field */}
-              <div className="flex items-center gap-2">
-                <input
-                  ref={(el) => { fieldRefs.current[extraction.id] = el; }}
-                  type="text"
-                  value={extraction.editingValue ?? extraction.extracted_value}
-                  onChange={(e) =>
-                    setExtractions((prev) => prev.map((ex) =>
-                      ex.id === extraction.id
-                        ? { ...ex, editingValue: e.target.value, isEditing: true }
-                        : ex
-                    ))
-                  }
-                  onFocus={() => setExtractions((prev) => prev.map((ex) =>
-                    ex.id === extraction.id ? { ...ex, isEditing: true } : ex
-                  ))}
-                  onBlur={() => onBlur(extraction)}
-                  onKeyDown={(e) => handleKeyDown(e, extraction.id, index)}
-                  disabled={extraction.saving}
-                  className={`flex-1 text-sm px-2 py-1.5 rounded border outline-none focus:ring-2 focus:ring-blue-500 transition-colors
-                    ${extraction.status === "accepted" ? "bg-green-50 border-green-200 text-green-800" : ""}
-                    ${extraction.status === "corrected" ? "bg-blue-50 border-blue-200 text-blue-800" : ""}
-                    ${extraction.status === "pending" ? "bg-white border-gray-200 text-gray-900" : ""}
-                    ${extraction.saving ? "opacity-50" : ""}
-                  `}
-                />
-                {extraction.status === "pending" && !extraction.saving && (
-                  <button
-                    onClick={() => acceptField(extraction.id)}
-                    className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded bg-green-50 hover:bg-green-100 text-green-600"
-                    title="Accept (Enter)"
-                  >
-                    <Check size={14} />
-                  </button>
-                )}
-              </div>
-
-              {extraction.confidence < 0.5 && extraction.status === "pending" && (
-                <p className="text-xs text-red-500 mt-1 flex items-center gap-1">
-                  <AlertCircle size={10} /> Low confidence — please verify carefully
-                </p>
-              )}
-            </div>
-          ))}
-
-          {extractions.length === 0 && (
-            <div className="text-center py-12 text-sm text-gray-400">
-              No fields extracted yet.
-            </div>
+              );
+            })
           )}
         </div>
       </div>

@@ -34,7 +34,62 @@ const EXTRACTION_FIELDS = [
   "vendor_name", "vendor_gstin", "buyer_gstin", "invoice_number", "invoice_date",
   "due_date", "taxable_value", "cgst_rate", "cgst_amount", "sgst_rate", "sgst_amount",
   "igst_rate", "igst_amount", "total_amount", "tds_section", "tds_rate", "tds_amount",
-  "payment_reference", "reverse_charge", "place_of_supply",
+  "payment_reference", "reverse_charge", "place_of_supply", "suggested_ledger",
+];
+
+// ─── TDS Keyword → Section mapping (deterministic Layer 1 post-processing) ───
+interface TdsRule {
+  section: string;
+  rate: string;
+  threshold: number;
+  keywords: RegExp;
+}
+
+const TDS_KEYWORD_RULES: TdsRule[] = [
+  {
+    section: "194J", rate: "10", threshold: 30000,
+    keywords: /\b(advocate|lawyer|legal|attorney|solicitor|chartered.accountant|ca.firm|auditor|audit|consultant|advisory|architect|interior.design|doctor|physician|surgeon|hospital|clinic|medical|healthcare|physiotherap|it.service|software|technology|technical.service|data.processing|research|scientific|information.tech)\b/i,
+  },
+  {
+    section: "194C", rate: "2", threshold: 30000,
+    keywords: /\b(transport|courier|logistics|freight|cargo|delivery|shipping|contractor|sub.contractor|construction|civil.work|builder|fabricat|manufactur|printing|advertis|media|broadcast|catering|housekeeping|security.guard|manpower|labour|labour.supply|event.management|pest.control|cleaning.service)\b/i,
+  },
+  {
+    section: "194I", rate: "10", threshold: 240000,
+    keywords: /\b(rent|rental|lease.rent|office.rent|premises|office.space|warehouse|godown|cold.storage|property.rent)\b/i,
+  },
+  {
+    section: "194H", rate: "5", threshold: 15000,
+    keywords: /\b(commission|brokerage|broker|referral.fee|dealership|franchise.fee|selling.agent)\b/i,
+  },
+  {
+    section: "194A", rate: "10", threshold: 5000,
+    keywords: /\b(interest|fd.interest|fixed.deposit.interest|ncd.interest|deposit.interest|loan.interest|debenture.interest)\b/i,
+  },
+  {
+    section: "194O", rate: "1", threshold: 500000,
+    keywords: /\b(amazon|flipkart|zomato|swiggy|meesho|myntra|snapdeal|paytm.mall|nykaa|bigbasket|blinkit|zepto|e.commerce|ecommerce)\b/i,
+  },
+];
+
+// ─── Vendor → Tally ledger suggestion ────────────────────────────────────────
+interface LedgerRule { keywords: RegExp; ledger: string }
+const INVOICE_LEDGER_RULES: LedgerRule[] = [
+  { keywords: /\b(salary|salaries|payroll|wages|stipend|hr|payslip)\b/i,         ledger: "Salary Expenses" },
+  { keywords: /\b(rent|rental|lease.rent|premises|office.rent)\b/i,               ledger: "Rent" },
+  { keywords: /\b(advocate|lawyer|legal|ca.firm|chartered|audit|consultant|advisory|architect|doctor|clinic|hospital|it.service|software|technical)\b/i, ledger: "Professional Fees" },
+  { keywords: /\b(transport|courier|logistics|freight|cargo|delivery)\b/i,        ledger: "Travelling Expenses" },
+  { keywords: /\b(advertis|marketing|media|promotion|campaign|pr.agency)\b/i,     ledger: "Advertising & Marketing" },
+  { keywords: /\b(electricity|power|mseb|bescom|tneb|discom)\b/i,                 ledger: "Electricity Expenses" },
+  { keywords: /\b(telephone|internet|broadband|wifi|jio|airtel|bsnl|vodafone|idea|mobile.bill)\b/i, ledger: "Telephone / Internet Expenses" },
+  { keywords: /\b(insurance|lic|policy.premium|general.insurance|fire.insurance)\b/i, ledger: "Insurance Expenses" },
+  { keywords: /\b(repair|maintenance|service.charge|amc|annual.maintenance)\b/i,  ledger: "Repair & Maintenance" },
+  { keywords: /\b(petrol|fuel|diesel|hpcl|bpcl|iocl|vehicle.fuel)\b/i,           ledger: "Petrol / Vehicle Expenses" },
+  { keywords: /\b(office.supply|stationery|printing|paper|cartridge|toner)\b/i,  ledger: "Printing & Stationery" },
+  { keywords: /\b(staff.welfare|pantry|canteen|food|swiggy|zomato|meal)\b/i,     ledger: "Staff Welfare Expenses" },
+  { keywords: /\b(computer|laptop|server|hardware|software.licen|subscription|microsoft|adobe|google.workspace|zoom)\b/i, ledger: "Computer / IT Expenses" },
+  { keywords: /\b(bank.charge|service.charge|sms.charge|annual.fee|processing.fee|atm.charge)\b/i, ledger: "Bank Charges" },
+  { keywords: /\b(loan|emi|repayment|instalment|principal)\b/i,                   ledger: "Loan Repayment" },
 ];
 
 Deno.serve(async (req) => {
@@ -452,6 +507,61 @@ Return JSON in this exact format:
         }
       } catch {
         // Layer 3 post-processing failed — continue with unmodified extraction
+      }
+    }
+
+    // ----------------------------------------------------------------
+    // TDS POST-PROCESSING — deterministic keyword rules (Layer 1 fallback)
+    // If AI didn't extract tds_section with confidence >= 0.6, apply keyword rules
+    // This ensures TDS is never blank for recognisable vendor/service types
+    // ----------------------------------------------------------------
+    const extractedTdsSection   = parsed["tds_section"]?.value;
+    const extractedTdsConfidence = parsed["tds_section"]?.confidence ?? 0;
+    const vendorForTds = ((parsed["vendor_name"]?.value ?? "") + " " + (parsed["payment_reference"]?.value ?? "")).toLowerCase();
+    const totalAmountNum = parseFloat(parsed["total_amount"]?.value ?? "0") || 0;
+
+    if (!extractedTdsSection || extractedTdsConfidence < 0.6) {
+      for (const rule of TDS_KEYWORD_RULES) {
+        if (rule.keywords.test(vendorForTds) && totalAmountNum >= rule.threshold) {
+          const inferenceConfidence = 0.78; // rule-based, not document-read
+          if (!parsed["tds_section"]?.value || (parsed["tds_section"].confidence ?? 0) < inferenceConfidence) {
+            parsed["tds_section"] = { value: rule.section,           confidence: inferenceConfidence };
+            parsed["tds_rate"]    = { value: rule.rate,              confidence: inferenceConfidence };
+            // Calculate TDS amount if not already extracted with reasonable confidence
+            if (!parsed["tds_amount"]?.value || (parsed["tds_amount"].confidence ?? 0) < 0.5) {
+              const base = parseFloat(parsed["taxable_value"]?.value ?? "0") || totalAmountNum;
+              const tdsAmt = (base * parseFloat(rule.rate) / 100).toFixed(2);
+              parsed["tds_amount"] = { value: tdsAmt, confidence: 0.72 };
+            }
+          }
+          break; // first matching rule wins
+        }
+      }
+    }
+
+    // ----------------------------------------------------------------
+    // LEDGER SUGGESTION — suggest Tally ledger based on vendor/document type
+    // Applied to purchase_invoice and expense documents
+    // ----------------------------------------------------------------
+    if (!parsed["suggested_ledger"]?.value || (parsed["suggested_ledger"].confidence ?? 0) < 0.5) {
+      const vendorForLedger = (parsed["vendor_name"]?.value ?? "").toLowerCase();
+      if (documentType === "purchase_invoice" || documentType === "expense") {
+        for (const rule of INVOICE_LEDGER_RULES) {
+          if (rule.keywords.test(vendorForLedger)) {
+            parsed["suggested_ledger"] = { value: rule.ledger, confidence: 0.75 };
+            break;
+          }
+        }
+        // Fallback: if TDS section 194J was inferred, default to Professional Fees
+        if (!parsed["suggested_ledger"]?.value && parsed["tds_section"]?.value === "194J") {
+          parsed["suggested_ledger"] = { value: "Professional Fees", confidence: 0.70 };
+        }
+        // Fallback: if TDS section 194C was inferred, default to Purchase Account
+        if (!parsed["suggested_ledger"]?.value && parsed["tds_section"]?.value === "194C") {
+          parsed["suggested_ledger"] = { value: "Miscellaneous Expenses", confidence: 0.65 };
+        }
+      } else if (documentType === "sales_invoice") {
+        parsed["suggested_ledger"] = { value: "Sales Account", confidence: 0.85 };
       }
     }
 
