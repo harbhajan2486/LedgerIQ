@@ -4,7 +4,7 @@ import * as XLSX from "xlsx";
 
 const EXTRACT_FIELDS = [
   "invoice_number", "invoice_date", "vendor_name", "buyer_name",
-  "buyer_gstin", "gstin", "taxable_amount", "total_amount",
+  "buyer_gstin", "vendor_gstin", "party_gstin", "taxable_value", "total_amount",
   "cgst_amount", "sgst_amount", "igst_amount", "tds_amount",
 ];
 
@@ -65,26 +65,36 @@ export async function GET(
 
   const docIds = docs.map((d) => d.id);
 
-  // Fetch extractions for all these documents
+  // Fetch extractions — select status for deduplication
   const { data: extractions } = await supabase
     .from("extractions")
-    .select("document_id, field_name, extracted_value")
+    .select("document_id, field_name, extracted_value, status")
     .in("document_id", docIds)
     .in("field_name", EXTRACT_FIELDS)
-    .not("status", "eq", "rejected");
+    .not("status", "eq", "rejected")
+    .order("created_at", { ascending: false });
 
-  // Build field map per document
+  // Build field map — verified (accepted/corrected) wins over pending; newest first
+  type ExtRow = { document_id: string; field_name: string; extracted_value: string | null; status: string };
+  const verifiedMap: Record<string, Record<string, string>> = {};
+  const pendingMap:  Record<string, Record<string, string>> = {};
+  for (const ext of (extractions ?? []) as ExtRow[]) {
+    if (!ext.extracted_value) continue;
+    const isVerified = ext.status === "accepted" || ext.status === "corrected";
+    const target = isVerified ? verifiedMap : pendingMap;
+    if (!target[ext.document_id]) target[ext.document_id] = {};
+    if (!target[ext.document_id][ext.field_name]) target[ext.document_id][ext.field_name] = ext.extracted_value;
+  }
   const fieldMap: Record<string, Record<string, string>> = {};
-  for (const ext of extractions ?? []) {
-    if (!fieldMap[ext.document_id]) fieldMap[ext.document_id] = {};
-    fieldMap[ext.document_id][ext.field_name] = ext.extracted_value ?? "";
+  for (const docId of docIds) {
+    fieldMap[docId] = { ...pendingMap[docId], ...verifiedMap[docId] };
   }
 
   const rows = docs.map((doc, i) => {
     const f = fieldMap[doc.id] ?? {};
     const partyName = f.buyer_name ?? f.vendor_name ?? "";
-    const partyGstin = f.buyer_gstin ?? f.gstin ?? "";
-    const taxable = f.taxable_amount ? Number(f.taxable_amount) : "";
+    const partyGstin = f.buyer_gstin ?? f.vendor_gstin ?? f.party_gstin ?? "";
+    const taxable = f.taxable_value ? Number(f.taxable_value) : "";
     const total   = f.total_amount   ? Number(f.total_amount)   : "";
     const cgst    = f.cgst_amount    ? Number(f.cgst_amount)    : "";
     const sgst    = f.sgst_amount    ? Number(f.sgst_amount)    : "";
