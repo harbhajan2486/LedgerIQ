@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -39,7 +39,7 @@ const FIELD_LABELS: Record<string, string> = {
   sgst_amount: "SGST Amount (₹)", igst_rate: "IGST Rate (%)",
   igst_amount: "IGST Amount (₹)", total_amount: "Total Amount (₹)",
   tds_section: "TDS Section", tds_rate: "TDS Rate (%)",
-  tds_amount: "TDS Amount (₹)", payment_reference: "Payment Reference (UTR)",
+  tds_amount: "TDS Amount (₹)", payment_reference: "Cheque / Ref. No.",
   reverse_charge: "Reverse Charge (RCM)", place_of_supply: "Place of Supply",
   suggested_ledger: "Suggested Tally Ledger",
   hsn_sac_code: "HSN / SAC Code", itc_eligible: "ITC Eligible",
@@ -75,7 +75,10 @@ function confidenceBorder(confidence: number, status: string) {
 export default function ReviewDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const documentId = params.documentId as string;
+  const fromClientId = searchParams.get("clientId");
+  const backHref = fromClientId ? `/clients/${fromClientId}` : "/review";
 
   const [document, setDocument] = useState<DocumentData | null>(null);
   const [extractions, setExtractions] = useState<Extraction[]>([]);
@@ -201,7 +204,7 @@ export default function ReviewDetailPage() {
     setCompleting(false);
     if (!res.ok) { toast.error(data.error); return; }
     toast.success("Review complete! Document moved to reconciliation queue.");
-    router.push("/review");
+    router.push(backHref);
   }
 
   async function rerunExtraction() {
@@ -239,7 +242,7 @@ export default function ReviewDetailPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <Link href="/review" className="text-gray-400 hover:text-gray-600">
+          <Link href={backHref} className="text-gray-400 hover:text-gray-600">
             <ChevronLeft size={20} />
           </Link>
           <div>
@@ -316,9 +319,20 @@ export default function ReviewDetailPage() {
             <div className="text-center py-12 text-sm text-gray-400">No fields extracted yet.</div>
           ) : (
             FIELD_GROUPS.map((group) => {
+              // GST mutual exclusivity: hide IGST rows when CGST is present, and vice versa
+              const cgstAmt = parseFloat(extractions.find(e => e.field_name === "cgst_amount")?.extracted_value ?? "0") || 0;
+              const igstAmt = parseFloat(extractions.find(e => e.field_name === "igst_amount")?.extracted_value ?? "0") || 0;
+              const hideIgst = cgstAmt > 0;
+              const hideCgstSgst = igstAmt > 0 && cgstAmt === 0;
+
               const groupExtractions = group.fields
                 .map((f) => extractions.find((e) => e.field_name === f))
-                .filter(Boolean) as typeof extractions;
+                .filter((e): e is Extraction => {
+                  if (!e) return false;
+                  if (hideIgst    && ["igst_rate","igst_amount"].includes(e.field_name)) return false;
+                  if (hideCgstSgst && ["cgst_rate","cgst_amount","sgst_rate","sgst_amount"].includes(e.field_name)) return false;
+                  return true;
+                });
               if (groupExtractions.length === 0) return null;
               const globalIndex = (fieldName: string) => extractions.findIndex((e) => e.field_name === fieldName);
 

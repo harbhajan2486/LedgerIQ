@@ -694,7 +694,7 @@ export default function ClientDetailPage() {
                             <td className="px-4 py-3">
                               <div className="flex items-center gap-3">
                                 {doc.status === "review_required" && (
-                                  <Link href={`/review/${doc.id}`} className="text-xs text-blue-600 hover:underline">Review →</Link>
+                                  <Link href={`/review/${doc.id}?clientId=${clientId}`} className="text-xs text-blue-600 hover:underline">Review →</Link>
                                 )}
                                 {canRetry && (
                                   <button onClick={() => retryExtraction(doc.id, doc.original_filename)} disabled={retrying === doc.id}

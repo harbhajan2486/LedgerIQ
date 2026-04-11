@@ -370,7 +370,7 @@ Return JSON in this exact format:
   "tds_section": {"value": "194C", "confidence": 0.80},
   "tds_rate": {"value": "1", "confidence": 0.80},
   "tds_amount": {"value": "500", "confidence": 0.75},
-  "payment_reference": {"value": null, "confidence": 0.0},
+  "payment_reference": {"value": null, "confidence": 0.0},  // cheque no. or bank ref printed ON the invoice (not a UTR — UTR is on bank statements only)
   "reverse_charge": {"value": "No", "confidence": 0.95},
   "place_of_supply": {"value": "Maharashtra", "confidence": 0.90},
   "hsn_sac_code": {"value": "998313", "confidence": 0.80},
