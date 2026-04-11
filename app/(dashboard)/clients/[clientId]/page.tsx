@@ -410,6 +410,29 @@ export default function ClientDetailPage() {
   useEffect(() => { if (activeTab === "ledgers") loadLedgers(); }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "gst") loadGstData(); }, [activeTab, clientId, gstPeriodFrom, gstPeriodTo]);
 
+  // Poll status for any documents currently extracting/queued
+  useEffect(() => {
+    const inFlight = documents.filter((d) => d.status === "extracting" || d.status === "queued");
+    if (inFlight.length === 0) return;
+    const timer = setInterval(async () => {
+      const updates = await Promise.all(
+        inFlight.map((d) =>
+          fetch(`/api/v1/documents/${d.id}/status`)
+            .then((r) => r.json())
+            .then((j) => ({ id: d.id, status: j.status as string }))
+            .catch(() => ({ id: d.id, status: d.status }))
+        )
+      );
+      setDocuments((prev) =>
+        prev.map((d) => {
+          const u = updates.find((u) => u.id === d.id);
+          return u && u.status !== d.status ? { ...d, status: u.status } : d;
+        })
+      );
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [documents]);
+
   async function retryExtraction(docId: string, fileName: string) {
     setRetrying(docId);
     try {
