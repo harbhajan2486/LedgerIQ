@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Building2, ChevronLeft, FileText, Loader2, Upload,
   CheckCircle2, AlertTriangle, Clock, RefreshCw, Landmark,
-  Link2, Link2Off, X, Pencil, BookOpen, Download, Plus, Trash2
+  Link2, Link2Off, X, Pencil, BookOpen, Download, Plus, Trash2,
+  ShoppingCart, Receipt, Wallet, CreditCard, FolderOpen
 } from "lucide-react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
@@ -139,7 +140,9 @@ export default function ClientDetailPage() {
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
   const [retrying, setRetrying] = useState<string | null>(null);
+  const [retagging, setRetagging] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"documents" | "bank" | "reconciliation" | "ledgers">("documents");
+  const [docFolder, setDocFolder] = useState<string | null>(null); // active folder filter
   const [bankTxns, setBankTxns] = useState<BankTxn[]>([]);
   const [bankSummary, setBankSummary] = useState<BankSummary | null>(null);
   const [bankLoading, setBankLoading] = useState(false);
@@ -170,6 +173,8 @@ export default function ClientDetailPage() {
   const [addingLedger, setAddingLedger] = useState(false);
   const [seedingLedgers, setSeedingLedgers] = useState(false);
   const [reapplying, setReapplying] = useState(false);
+  const [importingLedgers, setImportingLedgers] = useState(false);
+  const ledgerImportRef = useRef<HTMLInputElement>(null);
 
   function loadData() {
     fetch(`/api/v1/clients/${clientId}`)
@@ -350,6 +355,24 @@ export default function ClientDetailPage() {
     loadLedgers();
   }
 
+  async function importLedgers(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+    setImportingLedgers(true);
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch(`/api/v1/clients/${clientId}/ledgers/import`, { method: "POST", body: fd });
+    const d = await res.json();
+    if (res.ok) {
+      toast.success(`Imported ${d.imported} ledgers${d.skipped > 0 ? ` (${d.skipped} skipped)` : ""}`);
+      loadLedgers();
+    } else {
+      toast.error(d.error ?? "Could not import ledgers");
+    }
+    setImportingLedgers(false);
+  }
+
   useEffect(() => { loadData(); }, [clientId]);
   useEffect(() => { if (activeTab === "bank") { loadBankTxns(); loadLedgers(); } }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "reconciliation") loadRecon(); }, [activeTab, clientId]);
@@ -371,6 +394,22 @@ export default function ClientDetailPage() {
     } finally {
       setRetrying(null);
     }
+  }
+
+  async function retagDocument(docId: string, newType: string) {
+    setRetagging(docId);
+    const res = await fetch(`/api/v1/documents/${docId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ document_type: newType }),
+    });
+    if (res.ok) {
+      setDocuments((prev) => prev.map((d) => d.id === docId ? { ...d, document_type: newType } : d));
+      toast.success("Document type updated");
+    } else {
+      toast.error("Could not update document type");
+    }
+    setRetagging(null);
   }
 
   if (loading) return (
@@ -463,87 +502,167 @@ export default function ClientDetailPage() {
         ))}
       </div>
 
-      {/* Document list */}
-      {activeTab === "documents" && <Card>
-        <CardHeader className="py-4 px-5 border-b flex flex-row items-center justify-between">
-          <CardTitle className="text-sm text-gray-700">Documents</CardTitle>
-          <div className="flex items-center gap-3">
-            <a href={`/api/v1/clients/${clientId}/sales-register?type=sales`}
-              className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800">
-              <Download size={12} /> Sales Register
-            </a>
-            <a href={`/api/v1/clients/${clientId}/sales-register?type=purchase`}
-              className="inline-flex items-center gap-1 text-xs text-purple-600 hover:text-purple-800">
-              <Download size={12} /> Purchase Register
-            </a>
-          </div>
-        </CardHeader>
-        <CardContent className="p-0">
-          {documents.length === 0 ? (
-            <div className="text-center py-12">
-              <FileText size={32} className="text-gray-300 mx-auto mb-2" />
-              <p className="text-sm text-gray-500">No documents yet</p>
-              <Link href={`/upload?client=${clientId}`} className={`${buttonVariants()} mt-3 inline-flex`}>
-                <Upload size={14} className="mr-1.5" /> Upload first document
-              </Link>
+      {/* Document folders */}
+      {activeTab === "documents" && (() => {
+        const FOLDERS = [
+          { type: "sales_invoice",    label: "Sales Invoices",    icon: <ShoppingCart size={18} />, color: "blue" },
+          { type: "purchase_invoice", label: "Purchase Invoices", icon: <Receipt size={18} />,      color: "purple" },
+          { type: "expense",          label: "Expenses",          icon: <Wallet size={18} />,        color: "orange" },
+          { type: "credit_note",      label: "Credit Notes",      icon: <CreditCard size={18} />,    color: "green" },
+          { type: "debit_note",       label: "Debit Notes",       icon: <CreditCard size={18} />,    color: "red" },
+        ] as const;
+        const RETAG_TYPES = [
+          { value: "sales_invoice",    label: "Sales Invoice" },
+          { value: "purchase_invoice", label: "Purchase Invoice" },
+          { value: "expense",          label: "Expense" },
+          { value: "credit_note",      label: "Credit Note" },
+          { value: "debit_note",       label: "Debit Note" },
+        ];
+        const folderColors: Record<string, string> = {
+          blue:   "bg-blue-50 border-blue-200 text-blue-700",
+          purple: "bg-purple-50 border-purple-200 text-purple-700",
+          orange: "bg-orange-50 border-orange-200 text-orange-700",
+          green:  "bg-green-50 border-green-200 text-green-700",
+          red:    "bg-red-50 border-red-200 text-red-700",
+        };
+        const visibleDocs = docFolder ? documents.filter((d) => d.document_type === docFolder) : documents;
+
+        return (
+          <div className="space-y-4">
+            {/* Register downloads */}
+            <div className="flex items-center justify-end gap-3">
+              <a href={`/api/v1/clients/${clientId}/sales-register?type=sales`}
+                className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800">
+                <Download size={12} /> Sales Register
+              </a>
+              <a href={`/api/v1/clients/${clientId}/sales-register?type=purchase`}
+                className="inline-flex items-center gap-1 text-xs text-purple-600 hover:text-purple-800">
+                <Download size={12} /> Purchase Register
+              </a>
             </div>
-          ) : (
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b bg-gray-50">
-                  <th className="text-left text-xs font-medium text-gray-500 px-5 py-3">File</th>
-                  <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Type</th>
-                  <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Status</th>
-                  <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Uploaded</th>
-                  <th className="px-4 py-3"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {documents.map((doc) => {
-                  const cfg = STATUS_CONFIG[doc.status] ?? { label: doc.status, cls: "bg-gray-50 text-gray-600 border-gray-200", icon: null };
-                  const canRetry = RETRYABLE.has(doc.status);
-                  return (
-                    <tr key={doc.id} className="border-b last:border-0 hover:bg-gray-50/50">
-                      <td className="px-5 py-3">
-                        <div className="flex items-center gap-2">
-                          <FileText size={14} className="text-gray-400 flex-shrink-0" />
-                          <span className="truncate max-w-xs text-gray-800">{doc.original_filename}</span>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-gray-500 text-xs">{DOC_TYPE_LABELS[doc.document_type] ?? doc.document_type}</td>
-                      <td className="px-4 py-3">
-                        <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium ${cfg.cls}`}>
-                          {cfg.icon} {cfg.label}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-gray-400 text-xs">
-                        {new Date(doc.uploaded_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
-                      </td>
-                      <td className="px-4 py-3">
-                        {doc.status === "review_required" && (
-                          <Link href={`/review/${doc.id}`} className="text-xs text-blue-600 hover:underline">Review →</Link>
-                        )}
-                        {canRetry && (
-                          <button
-                            onClick={() => retryExtraction(doc.id, doc.original_filename)}
-                            disabled={retrying === doc.id}
-                            className="inline-flex items-center gap-1 text-xs text-amber-600 hover:text-amber-800 disabled:opacity-50"
-                          >
-                            {retrying === doc.id
-                              ? <><Loader2 size={11} className="animate-spin" /> Retrying…</>
-                              : <><RefreshCw size={11} /> Retry</>
-                            }
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
-        </CardContent>
-      </Card>}
+
+            {/* Folder cards */}
+            <div className="grid grid-cols-5 gap-3">
+              {FOLDERS.map((f) => {
+                const count = documents.filter((d) => d.document_type === f.type).length;
+                const isActive = docFolder === f.type;
+                return (
+                  <button key={f.type} onClick={() => setDocFolder(isActive ? null : f.type)}
+                    className={`relative flex flex-col items-center gap-2 p-4 rounded-xl border-2 transition-all ${
+                      isActive ? folderColors[f.color] + " border-2 shadow-sm" : "border-gray-200 hover:border-gray-300 bg-white"
+                    }`}>
+                    <div className={`${isActive ? "" : "text-gray-400"}`}>{f.icon}</div>
+                    <span className="text-xs font-medium text-center leading-tight">{f.label}</span>
+                    <span className={`text-lg font-bold ${isActive ? "" : "text-gray-700"}`}>{count}</span>
+                    <Link href={`/upload?client=${clientId}&type=${f.type}`}
+                      onClick={(e) => e.stopPropagation()}
+                      className="absolute top-2 right-2 text-gray-300 hover:text-blue-500 transition-colors">
+                      <Upload size={12} />
+                    </Link>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Document list */}
+            <Card>
+              <CardHeader className="py-3 px-5 border-b flex flex-row items-center justify-between">
+                <div className="flex items-center gap-2">
+                  {docFolder ? (
+                    <>
+                      <button onClick={() => setDocFolder(null)} className="text-gray-400 hover:text-gray-600">
+                        <ChevronLeft size={16} />
+                      </button>
+                      <CardTitle className="text-sm text-gray-700">
+                        {FOLDERS.find((f) => f.type === docFolder)?.label} ({visibleDocs.length})
+                      </CardTitle>
+                    </>
+                  ) : (
+                    <CardTitle className="text-sm text-gray-700">All Documents ({documents.length})</CardTitle>
+                  )}
+                </div>
+                {docFolder && (
+                  <Link href={`/upload?client=${clientId}&type=${docFolder}`}
+                    className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800">
+                    <Upload size={12} /> Upload to this folder
+                  </Link>
+                )}
+              </CardHeader>
+              <CardContent className="p-0">
+                {visibleDocs.length === 0 ? (
+                  <div className="text-center py-12">
+                    <FolderOpen size={32} className="text-gray-300 mx-auto mb-2" />
+                    <p className="text-sm text-gray-500 mb-3">
+                      {docFolder ? "No documents in this folder yet." : "No documents yet."}
+                    </p>
+                    <Link href={`/upload?client=${clientId}${docFolder ? `&type=${docFolder}` : ""}`}
+                      className={`${buttonVariants()} inline-flex`}>
+                      <Upload size={14} className="mr-1.5" /> Upload documents
+                    </Link>
+                  </div>
+                ) : (
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b bg-gray-50">
+                        <th className="text-left text-xs font-medium text-gray-500 px-5 py-3">File</th>
+                        <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Type</th>
+                        <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Status</th>
+                        <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Uploaded</th>
+                        <th className="px-4 py-3"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {visibleDocs.map((doc) => {
+                        const cfg = STATUS_CONFIG[doc.status] ?? { label: doc.status, cls: "bg-gray-50 text-gray-600 border-gray-200", icon: null };
+                        const canRetry = RETRYABLE.has(doc.status);
+                        return (
+                          <tr key={doc.id} className="border-b last:border-0 hover:bg-gray-50/50">
+                            <td className="px-5 py-3">
+                              <div className="flex items-center gap-2">
+                                <FileText size={14} className="text-gray-400 flex-shrink-0" />
+                                <span className="truncate max-w-xs text-gray-800">{doc.original_filename}</span>
+                              </div>
+                            </td>
+                            <td className="px-4 py-3">
+                              {retagging === doc.id ? (
+                                <Loader2 size={12} className="animate-spin text-gray-400" />
+                              ) : (
+                                <select value={doc.document_type} onChange={(e) => retagDocument(doc.id, e.target.value)}
+                                  className="text-xs border border-gray-200 rounded px-1.5 py-0.5 bg-white text-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-400">
+                                  {RETAG_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                                </select>
+                              )}
+                            </td>
+                            <td className="px-4 py-3">
+                              <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium ${cfg.cls}`}>
+                                {cfg.icon} {cfg.label}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-gray-400 text-xs">
+                              {new Date(doc.uploaded_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
+                            </td>
+                            <td className="px-4 py-3">
+                              {doc.status === "review_required" && (
+                                <Link href={`/review/${doc.id}`} className="text-xs text-blue-600 hover:underline">Review →</Link>
+                              )}
+                              {canRetry && (
+                                <button onClick={() => retryExtraction(doc.id, doc.original_filename)} disabled={retrying === doc.id}
+                                  className="inline-flex items-center gap-1 text-xs text-amber-600 hover:text-amber-800 disabled:opacity-50">
+                                  {retrying === doc.id ? <><Loader2 size={11} className="animate-spin" /> Retrying…</> : <><RefreshCw size={11} /> Retry</>}
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        );
+      })()}
 
       {/* Reconciliation tab */}
       {activeTab === "reconciliation" && (
@@ -1013,11 +1132,19 @@ export default function ClientDetailPage() {
               <h2 className="text-sm font-semibold text-gray-900">Ledger Master</h2>
               <p className="text-xs text-gray-500 mt-0.5">Define Tally ledger names for this client. Used to auto-classify bank transactions.</p>
             </div>
-            <button onClick={seedLedgers} disabled={seedingLedgers}
-              className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
-              {seedingLedgers ? <Loader2 size={13} className="animate-spin" /> : <BookOpen size={13} />}
-              Load 25 common ledgers
-            </button>
+            <div className="flex items-center gap-2">
+              <input ref={ledgerImportRef} type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={importLedgers} />
+              <button onClick={() => ledgerImportRef.current?.click()} disabled={importingLedgers}
+                className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
+                {importingLedgers ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />}
+                Import from Tally
+              </button>
+              <button onClick={seedLedgers} disabled={seedingLedgers}
+                className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
+                {seedingLedgers ? <Loader2 size={13} className="animate-spin" /> : <BookOpen size={13} />}
+                Load 25 common ledgers
+              </button>
+            </div>
           </div>
 
           {/* Add ledger form */}

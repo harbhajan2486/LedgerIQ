@@ -38,6 +38,7 @@ export default function UploadPage() {
 function UploadPageInner() {
   const searchParams = useSearchParams();
   const preselectedClientId = searchParams.get("client");
+  const lockedType = searchParams.get("type"); // pre-locks document type when uploading from a folder
 
   const [files, setFiles] = useState<FileItem[]>([]);
   const [dragging, setDragging] = useState(false);
@@ -55,10 +56,13 @@ function UploadPageInner() {
   }, []);
 
   function addFiles(newFiles: File[]) {
+    const defaultType = lockedType && DOCUMENT_TYPES.find((t) => t.value === lockedType)
+      ? lockedType
+      : "purchase_invoice";
     const items: FileItem[] = newFiles.map((f) => ({
       id: crypto.randomUUID(),
       file: f,
-      documentType: "purchase_invoice",
+      documentType: defaultType,
       status: "pending",
       progress: 0,
     }));
@@ -154,7 +158,9 @@ function UploadPageInner() {
       <div>
         <h1 className="text-2xl font-semibold text-gray-900">Upload Documents</h1>
         <p className="text-sm text-gray-500 mt-1">
-          Upload invoices, expense bills, or bank statements. AI reads them automatically.
+          {lockedType
+            ? `Uploading to: ${DOCUMENT_TYPES.find((t) => t.value === lockedType)?.label ?? lockedType} — all files will be tagged automatically.`
+            : "Upload invoices, expense bills, or bank statements. AI reads them automatically."}
         </p>
       </div>
 
@@ -249,7 +255,7 @@ function UploadPageInner() {
                     </div>
                     <p className="text-xs text-gray-400 mt-0.5">{(item.file.size / 1024 / 1024).toFixed(2)} MB</p>
 
-                    {item.status === "pending" && (
+                    {item.status === "pending" && !lockedType && (
                       <select
                         value={item.documentType}
                         onChange={(e) => updateFile(item.id, { documentType: e.target.value })}
@@ -260,6 +266,11 @@ function UploadPageInner() {
                           <option key={t.value} value={t.value}>{t.label}</option>
                         ))}
                       </select>
+                    )}
+                    {item.status === "pending" && lockedType && (
+                      <p className="text-xs text-blue-600 mt-1.5 font-medium">
+                        {DOCUMENT_TYPES.find((t) => t.value === lockedType)?.label ?? lockedType}
+                      </p>
                     )}
                     {item.status === "pending" && item.documentType === "bank_statement" && (
                       <p className="text-xs text-amber-600 mt-1.5">
