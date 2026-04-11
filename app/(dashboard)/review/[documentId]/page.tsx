@@ -221,8 +221,22 @@ export default function ReviewDetailPage() {
     }
   }
 
-  const pendingCount = extractions.filter((e) => e.status === "pending").length;
-  const highConfidenceCount = extractions.filter((e) => e.confidence >= 0.8 && e.status === "pending").length;
+  // GST mutual exclusivity — compute once here so count and render agree
+  const cgstAmt = parseFloat(extractions.find(e => e.field_name === "cgst_amount")?.extracted_value ?? "0") || 0;
+  const igstAmt = parseFloat(extractions.find(e => e.field_name === "igst_amount")?.extracted_value ?? "0") || 0;
+  const hideIgstFields   = cgstAmt > 0;
+  const hideCgstSgstFields = igstAmt > 0 && cgstAmt === 0;
+  const hiddenGstFields = hideIgstFields
+    ? ["igst_rate", "igst_amount"]
+    : hideCgstSgstFields ? ["cgst_rate", "cgst_amount", "sgst_rate", "sgst_amount"] : [];
+
+  // Null-value fields have nothing to review; hidden GST fields are not applicable — exclude both from count
+  const reviewableExtractions = extractions.filter((e) =>
+    e.extracted_value !== null && e.extracted_value !== "" &&
+    !hiddenGstFields.includes(e.field_name)
+  );
+  const pendingCount = reviewableExtractions.filter((e) => e.status === "pending").length;
+  const highConfidenceCount = reviewableExtractions.filter((e) => e.confidence >= 0.8 && e.status === "pending").length;
   const allDone = pendingCount === 0;
 
   if (loading) return (
@@ -319,18 +333,11 @@ export default function ReviewDetailPage() {
             <div className="text-center py-12 text-sm text-gray-400">No fields extracted yet.</div>
           ) : (
             FIELD_GROUPS.map((group) => {
-              // GST mutual exclusivity: hide IGST rows when CGST is present, and vice versa
-              const cgstAmt = parseFloat(extractions.find(e => e.field_name === "cgst_amount")?.extracted_value ?? "0") || 0;
-              const igstAmt = parseFloat(extractions.find(e => e.field_name === "igst_amount")?.extracted_value ?? "0") || 0;
-              const hideIgst = cgstAmt > 0;
-              const hideCgstSgst = igstAmt > 0 && cgstAmt === 0;
-
               const groupExtractions = group.fields
                 .map((f) => extractions.find((e) => e.field_name === f))
                 .filter((e): e is Extraction => {
                   if (!e) return false;
-                  if (hideIgst    && ["igst_rate","igst_amount"].includes(e.field_name)) return false;
-                  if (hideCgstSgst && ["cgst_rate","cgst_amount","sgst_rate","sgst_amount"].includes(e.field_name)) return false;
+                  if (hiddenGstFields.includes(e.field_name)) return false;
                   return true;
                 });
               if (groupExtractions.length === 0) return null;
