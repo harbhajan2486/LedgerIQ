@@ -241,7 +241,10 @@ export default function ReviewDetailPage() {
     e.extracted_value !== null && e.extracted_value !== "" &&
     !hiddenGstFields.includes(e.field_name)
   );
-  const pendingCount = reviewableExtractions.filter((e) => e.status === "pending").length;
+  const pendingCount      = reviewableExtractions.filter((e) => e.status === "pending").length;
+  const highConfCount     = reviewableExtractions.filter((e) => e.confidence >= 0.8).length;
+  const medConfCount      = reviewableExtractions.filter((e) => e.confidence >= 0.5 && e.confidence < 0.8).length;
+  const lowConfCount      = reviewableExtractions.filter((e) => e.confidence < 0.5 && e.extracted_value).length;
   const highConfidenceCount = reviewableExtractions.filter((e) => e.confidence >= 0.8 && e.status === "pending").length;
   const allDone = pendingCount === 0;
 
@@ -278,11 +281,26 @@ export default function ReviewDetailPage() {
                   )}
                 </>
               ) : (
-                <>
-                  {extractions.length} fields · {pendingCount} pending review
-                  <span className="ml-2 text-gray-300">|</span>
-                  <span className="ml-2">Tab = next field · Enter = accept · Type to correct</span>
-                </>
+                <span className="flex items-center gap-3 mt-0.5">
+                  <span className="flex items-center gap-1 text-green-600">
+                    <span className="inline-block w-2 h-2 rounded-full bg-green-500"></span>
+                    {highConfCount} high ≥80%
+                  </span>
+                  {medConfCount > 0 && (
+                    <span className="flex items-center gap-1 text-amber-600">
+                      <span className="inline-block w-2 h-2 rounded-full bg-amber-400"></span>
+                      {medConfCount} medium 50–79%
+                    </span>
+                  )}
+                  {lowConfCount > 0 && (
+                    <span className="flex items-center gap-1 text-red-500">
+                      <span className="inline-block w-2 h-2 rounded-full bg-red-400"></span>
+                      {lowConfCount} low &lt;50%
+                    </span>
+                  )}
+                  <span className="text-gray-300">·</span>
+                  <span className="text-gray-400">{pendingCount} pending · Tab=next · Enter=accept</span>
+                </span>
               )}
             </p>
           </div>
