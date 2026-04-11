@@ -28,7 +28,7 @@ interface Document {
   status: string;
   uploaded_at: string;
   ai_model_used: string | null;
-  conf_pct: number | null;
+  conf: { high: number; medium: number; low: number } | null;
 }
 
 interface BankTxn {
@@ -710,9 +710,11 @@ export default function ClientDetailPage() {
                               </span>
                             </td>
                             <td className="px-4 py-3">
-                              {doc.conf_pct !== null && doc.conf_pct !== undefined ? (
-                                <span className={`text-xs font-medium ${doc.conf_pct >= 80 ? "text-green-600" : doc.conf_pct >= 50 ? "text-amber-600" : "text-red-500"}`}>
-                                  {doc.conf_pct}% high
+                              {doc.conf ? (
+                                <span className="inline-flex items-center gap-1.5 text-xs">
+                                  <span className="text-green-600 font-medium">H:{doc.conf.high}</span>
+                                  <span className="text-amber-500 font-medium">M:{doc.conf.medium}</span>
+                                  <span className="text-red-500 font-medium">L:{doc.conf.low}</span>
                                 </span>
                               ) : (
                                 <span className="text-xs text-gray-300">—</span>

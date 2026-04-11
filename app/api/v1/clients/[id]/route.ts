@@ -44,9 +44,9 @@ export async function GET(
       .order("uploaded_at", { ascending: false })
       .limit(50);
 
-    // Per-doc confidence: % of fields with confidence >= 0.8 (non-null, non-rejected)
+    // Per-doc confidence breakdown: high (≥0.8), medium (0.5–0.8), low (<0.5)
     const docIds = (documents ?? []).map((d) => d.id);
-    const confMap: Record<string, { high: number; total: number }> = {};
+    const confMap: Record<string, { high: number; medium: number; low: number }> = {};
     if (docIds.length > 0) {
       const { data: confRows } = await supabase
         .from("extractions")
@@ -55,17 +55,17 @@ export async function GET(
         .not("status", "eq", "rejected")
         .not("extracted_value", "is", null);
       for (const row of confRows ?? []) {
-        if (!confMap[row.document_id]) confMap[row.document_id] = { high: 0, total: 0 };
-        confMap[row.document_id].total++;
-        if ((row.confidence ?? 0) >= 0.8) confMap[row.document_id].high++;
+        if (!confMap[row.document_id]) confMap[row.document_id] = { high: 0, medium: 0, low: 0 };
+        const c = row.confidence ?? 0;
+        if (c >= 0.8) confMap[row.document_id].high++;
+        else if (c >= 0.5) confMap[row.document_id].medium++;
+        else confMap[row.document_id].low++;
       }
     }
 
     const docsWithConf = (documents ?? []).map((d) => ({
       ...d,
-      conf_pct: confMap[d.id]
-        ? Math.round((confMap[d.id].high / confMap[d.id].total) * 100)
-        : null,
+      conf: confMap[d.id] ?? null,
     }));
 
     return NextResponse.json({ client, documents: docsWithConf });
