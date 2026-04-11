@@ -113,7 +113,7 @@ export default function ReviewDetailPage() {
         // Fetch file and convert to data URL — works in all browsers, no CSP issues
         if (d.document?.id) {
           fetch(`/api/v1/documents/${d.document.id}/file`)
-            .then((r) => r.blob())
+            .then((r) => { if (!r.ok) throw new Error("not_found"); return r.blob(); })
             .then((blob) => new Promise<string>((resolve, reject) => {
               const reader = new FileReader();
               reader.onload = () => resolve(reader.result as string);

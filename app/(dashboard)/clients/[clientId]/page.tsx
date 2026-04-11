@@ -27,6 +27,7 @@ interface Document {
   document_type: string;
   status: string;
   uploaded_at: string;
+  processed_at: string | null;
   ai_model_used: string | null;
   conf: { high: number; medium: number; low: number } | null;
 }
@@ -678,7 +679,7 @@ export default function ClientDetailPage() {
                         <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Type</th>
                         <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Status</th>
                         <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Confidence</th>
-                        <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Uploaded</th>
+                        <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Uploaded / Last run</th>
                         <th className="px-4 py-3"></th>
                       </tr>
                     </thead>
@@ -720,8 +721,14 @@ export default function ClientDetailPage() {
                                 <span className="text-xs text-gray-300">—</span>
                               )}
                             </td>
-                            <td className="px-4 py-3 text-gray-400 text-xs">
-                              {new Date(doc.uploaded_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
+                            <td className="px-4 py-3 text-xs">
+                              <div className="text-gray-400">{new Date(doc.uploaded_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</div>
+                              {doc.processed_at && (
+                                <div className="text-gray-400 mt-0.5">
+                                  Run: {new Date(doc.processed_at).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}{" "}
+                                  {new Date(doc.processed_at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
+                                </div>
+                              )}
                             </td>
                             <td className="px-4 py-3">
                               <div className="flex items-center gap-3">

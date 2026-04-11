@@ -38,7 +38,7 @@ export async function GET(
 
     const { data: documents } = await supabase
       .from("documents")
-      .select("id, original_filename, document_type, status, uploaded_at, ai_model_used")
+      .select("id, original_filename, document_type, status, uploaded_at, processed_at, ai_model_used")
       .eq("client_id", id)
       .eq("tenant_id", profile.tenant_id)
       .order("uploaded_at", { ascending: false })
