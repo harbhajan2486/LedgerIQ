@@ -22,7 +22,7 @@ export async function GET(
   // RLS ensures tenant isolation
   const { data: doc, error: docError } = await supabase
     .from("documents")
-    .select("id, original_filename, document_type, status, storage_path, doc_fingerprint")
+    .select("id, original_filename, document_type, status, storage_path, doc_fingerprint, processed_at")
     .eq("id", documentId)
     .eq("tenant_id", profile?.tenant_id)
     .single();

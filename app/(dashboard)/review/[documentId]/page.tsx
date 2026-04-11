@@ -27,6 +27,8 @@ interface DocumentData {
   id: string;
   file_name: string;
   type: string;
+  status: string;
+  processed_at?: string;
   signedUrl?: string;
 }
 
@@ -78,7 +80,11 @@ export default function ReviewDetailPage() {
   const searchParams = useSearchParams();
   const documentId = params.documentId as string;
   const fromClientId = searchParams.get("clientId");
-  const backHref = fromClientId ? `/clients/${fromClientId}` : "/review";
+  const fromFolder   = searchParams.get("folder");
+  const isReadonly   = searchParams.get("readonly") === "1";
+  const backHref = fromClientId
+    ? `/clients/${fromClientId}${fromFolder ? `?folder=${fromFolder}` : ""}`
+    : "/review";
 
   const [document, setDocument] = useState<DocumentData | null>(null);
   const [extractions, setExtractions] = useState<Extraction[]>([]);
@@ -264,14 +270,25 @@ export default function ReviewDetailPage() {
               {document?.file_name}
             </h1>
             <p className="text-xs text-gray-400 mt-0.5">
-              {extractions.length} fields · {pendingCount} pending review
-              <span className="ml-2 text-gray-300">|</span>
-              <span className="ml-2 text-gray-400">Tab = next field · Enter = accept · Type to correct</span>
+              {isReadonly ? (
+                <>
+                  <span className="text-green-600 font-medium">Reviewed</span>
+                  {document?.processed_at && (
+                    <span className="ml-2">· {new Date(document.processed_at).toLocaleDateString("en-IN", { day:"2-digit", month:"short", year:"numeric" })}</span>
+                  )}
+                </>
+              ) : (
+                <>
+                  {extractions.length} fields · {pendingCount} pending review
+                  <span className="ml-2 text-gray-300">|</span>
+                  <span className="ml-2">Tab = next field · Enter = accept · Type to correct</span>
+                </>
+              )}
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <button
+          {!isReadonly && <button
             onClick={rerunExtraction}
             disabled={rerunning}
             title="Re-run AI extraction with latest rules (TDS inference, ledger suggestion)"
@@ -279,8 +296,8 @@ export default function ReviewDetailPage() {
           >
             {rerunning ? <Loader2 size={14} className="mr-2 animate-spin" /> : <RotateCcw size={14} className="mr-2" />}
             Re-run extraction
-          </button>
-          {highConfidenceCount > 0 && (
+          </button>}
+          {!isReadonly && highConfidenceCount > 0 && (
             <button
               onClick={bulkAcceptHighConfidence}
               className={buttonVariants({ variant: "outline" })}
@@ -288,14 +305,16 @@ export default function ReviewDetailPage() {
               Accept {highConfidenceCount} high-confidence fields
             </button>
           )}
-          <button
-            onClick={completeReview}
-            disabled={completing}
-            className={buttonVariants({ variant: "default" })}
-          >
-            {completing && <Loader2 size={14} className="mr-2 animate-spin" />}
-            {pendingCount > 0 ? `Mark as reviewed (${pendingCount} unreviewed)` : "Mark as reviewed"}
-          </button>
+          {!isReadonly && (
+            <button
+              onClick={completeReview}
+              disabled={completing}
+              className={buttonVariants({ variant: "default" })}
+            >
+              {completing && <Loader2 size={14} className="mr-2 animate-spin" />}
+              {pendingCount > 0 ? `Mark as reviewed (${pendingCount} unreviewed)` : "Mark as reviewed"}
+            </button>
+          )}
         </div>
       </div>
 

@@ -612,6 +612,14 @@ Return JSON in this exact format:
     }
 
     // ----------------------------------------------------------------
+    // REVERSE CHARGE — default to "No" if not extracted
+    // Most B2B domestic supplies are NOT under RCM; AI often returns null
+    // ----------------------------------------------------------------
+    if (!parsed["reverse_charge"]?.value || (parsed["reverse_charge"].confidence ?? 0) < 0.5) {
+      parsed["reverse_charge"] = { value: "No", confidence: 0.80 };
+    }
+
+    // ----------------------------------------------------------------
     // ITC ELIGIBILITY — auto-infer for purchase invoices
     // Blocked categories under CGST Act S.17(5): food, club, health, cab, personal use
     // Everything else is eligible by default for a registered business

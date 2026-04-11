@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Building2, ChevronLeft, FileText, Loader2, Upload,
@@ -134,6 +134,7 @@ const RETRYABLE = new Set(["extracting", "queued", "failed"]);
 
 export default function ClientDetailPage() {
   const params = useParams();
+  const searchParams = useSearchParams();
   const clientId = params.clientId as string;
 
   const [client, setClient] = useState<Client | null>(null);
@@ -142,7 +143,7 @@ export default function ClientDetailPage() {
   const [retrying, setRetrying] = useState<string | null>(null);
   const [retagging, setRetagging] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"documents" | "bank" | "reconciliation" | "ledgers" | "gst">("documents");
-  const [docFolder, setDocFolder] = useState<string | null>(null); // active folder filter
+  const [docFolder, setDocFolder] = useState<string | null>(() => searchParams.get("folder")); // restore folder from back-navigation
   const [bankTxns, setBankTxns] = useState<BankTxn[]>([]);
   const [bankSummary, setBankSummary] = useState<BankSummary | null>(null);
   const [bankLoading, setBankLoading] = useState(false);
@@ -694,7 +695,10 @@ export default function ClientDetailPage() {
                             <td className="px-4 py-3">
                               <div className="flex items-center gap-3">
                                 {doc.status === "review_required" && (
-                                  <Link href={`/review/${doc.id}?clientId=${clientId}`} className="text-xs text-blue-600 hover:underline">Review →</Link>
+                                  <Link href={`/review/${doc.id}?clientId=${clientId}${docFolder ? `&folder=${docFolder}` : ""}`} className="text-xs text-blue-600 hover:underline">Review →</Link>
+                                )}
+                                {["reviewed", "reconciled", "posted"].includes(doc.status) && (
+                                  <Link href={`/review/${doc.id}?clientId=${clientId}${docFolder ? `&folder=${docFolder}` : ""}&readonly=1`} className="text-xs text-gray-500 hover:text-blue-600 hover:underline">View fields →</Link>
                                 )}
                                 {canRetry && (
                                   <button onClick={() => retryExtraction(doc.id, doc.original_filename)} disabled={retrying === doc.id}
