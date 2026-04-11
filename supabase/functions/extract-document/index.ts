@@ -34,7 +34,7 @@ const EXTRACTION_FIELDS = [
   "vendor_name", "vendor_gstin", "buyer_gstin", "invoice_number", "invoice_date",
   "due_date", "taxable_value", "cgst_rate", "cgst_amount", "sgst_rate", "sgst_amount",
   "igst_rate", "igst_amount", "total_amount", "tds_section", "tds_rate", "tds_amount",
-  "payment_reference", "reverse_charge", "place_of_supply", "suggested_ledger",
+  "reverse_charge", "place_of_supply", "suggested_ledger",
   "hsn_sac_code", "itc_eligible",
 ];
 
@@ -370,7 +370,6 @@ Return JSON in this exact format:
   "tds_section": {"value": "194C", "confidence": 0.80},
   "tds_rate": {"value": "1", "confidence": 0.80},
   "tds_amount": {"value": "500", "confidence": 0.75},
-  "payment_reference": {"value": null, "confidence": 0.0},  // cheque no. or bank ref printed ON the invoice (not a UTR — UTR is on bank statements only)
   "reverse_charge": {"value": "No", "confidence": 0.95},
   "place_of_supply": {"value": "Maharashtra", "confidence": 0.90},
   "hsn_sac_code": {"value": "998313", "confidence": 0.80},
