@@ -43,3 +43,43 @@ export async function PATCH(
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ ok: true });
 }
+
+export async function DELETE(
+  _request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+
+  const { data: profile } = await supabase.from("users").select("tenant_id").eq("id", user.id).single();
+  if (!profile?.tenant_id) return NextResponse.json({ error: "Tenant not found" }, { status: 400 });
+
+  const { id: documentId } = await params;
+
+  // Fetch storage path before deleting the row
+  const { data: doc } = await supabase
+    .from("documents")
+    .select("storage_path")
+    .eq("id", documentId)
+    .eq("tenant_id", profile.tenant_id)
+    .single();
+
+  if (!doc) return NextResponse.json({ error: "Document not found" }, { status: 404 });
+
+  // Delete DB row first (extractions cascade automatically)
+  const { error } = await supabase
+    .from("documents")
+    .delete()
+    .eq("id", documentId)
+    .eq("tenant_id", profile.tenant_id);
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // Best-effort: remove file from storage (don't fail if already missing)
+  if (doc.storage_path) {
+    await supabase.storage.from("documents").remove([doc.storage_path]);
+  }
+
+  return NextResponse.json({ ok: true });
+}

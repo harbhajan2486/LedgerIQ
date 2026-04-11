@@ -143,6 +143,7 @@ export default function ClientDetailPage() {
   const [loading, setLoading] = useState(true);
   const [retrying, setRetrying] = useState<string | null>(null);
   const [retagging, setRetagging] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"documents" | "bank" | "reconciliation" | "ledgers" | "gst">("documents");
   const [docFolder, setDocFolder] = useState<string | null>(() => searchParams.get("folder")); // restore folder from back-navigation
   const [bankTxns, setBankTxns] = useState<BankTxn[]>([]);
@@ -443,6 +444,23 @@ export default function ClientDetailPage() {
     }
   }
 
+  async function deleteDocument(docId: string, fileName: string) {
+    if (!window.confirm(`Delete "${fileName}"?\n\nThis will permanently remove the document and all extracted fields. This cannot be undone.`)) return;
+    setDeleting(docId);
+    try {
+      const res = await fetch(`/api/v1/documents/${docId}`, { method: "DELETE" });
+      if (res.ok) {
+        setDocuments((prev) => prev.filter((d) => d.id !== docId));
+        toast.success(`"${fileName}" deleted.`);
+      } else {
+        const data = await res.json();
+        toast.error(data.error ?? "Delete failed.");
+      }
+    } finally {
+      setDeleting(null);
+    }
+  }
+
   async function retagDocument(docId: string, newType: string) {
     setRetagging(docId);
     const res = await fetch(`/api/v1/documents/${docId}`, {
@@ -724,6 +742,11 @@ export default function ClientDetailPage() {
                                     <RefreshCw size={11} /> Re-run
                                   </button>
                                 )}
+                                <button onClick={() => deleteDocument(doc.id, doc.original_filename)} disabled={deleting === doc.id}
+                                  className="inline-flex items-center gap-1 text-xs text-gray-300 hover:text-red-500 disabled:opacity-50"
+                                  title="Delete document">
+                                  {deleting === doc.id ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
+                                </button>
                               </div>
                             </td>
                           </tr>
