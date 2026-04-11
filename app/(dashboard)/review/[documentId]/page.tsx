@@ -110,17 +110,12 @@ export default function ReviewDetailPage() {
           }))
         );
         setLoading(false);
-        // Fetch file and convert to data URL — works in all browsers, no CSP issues
+        // Fetch file and create a blob: URL — data: URIs are blocked for PDFs in Safari/Chrome
         if (d.document?.id) {
           fetch(`/api/v1/documents/${d.document.id}/file`)
             .then((r) => { if (!r.ok) throw new Error("not_found"); return r.blob(); })
-            .then((blob) => new Promise<string>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onload = () => resolve(reader.result as string);
-              reader.onerror = reject;
-              reader.readAsDataURL(blob);
-            }))
-            .then((dataUrl) => setFileDataUrl(dataUrl))
+            .then((blob) => URL.createObjectURL(blob))
+            .then((blobUrl) => setFileDataUrl(blobUrl))
             .catch(() => setFileError(true));
         }
       })
