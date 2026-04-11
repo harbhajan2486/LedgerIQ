@@ -290,11 +290,11 @@ export default function ReviewDetailPage() {
           )}
           <button
             onClick={completeReview}
-            disabled={!allDone || completing}
-            className={buttonVariants({ variant: allDone ? "default" : "outline" })}
+            disabled={completing}
+            className={buttonVariants({ variant: "default" })}
           >
             {completing && <Loader2 size={14} className="mr-2 animate-spin" />}
-            {allDone ? "Mark as reviewed" : `${pendingCount} fields left`}
+            {pendingCount > 0 ? `Mark as reviewed (${pendingCount} unreviewed)` : "Mark as reviewed"}
           </button>
         </div>
       </div>

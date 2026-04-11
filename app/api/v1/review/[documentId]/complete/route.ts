@@ -20,20 +20,14 @@ export async function POST(
     .eq("id", user.id)
     .single();
 
-  // Check all extractions are resolved
-  const { data: pending } = await supabase
+  // Auto-accept any remaining pending fields — the human has seen the document,
+  // that is the review. Field-level accept UI is a helper, not a hard gate.
+  await supabase
     .from("extractions")
-    .select("id")
+    .update({ status: "accepted" })
     .eq("document_id", documentId)
     .eq("tenant_id", profile?.tenant_id)
     .eq("status", "pending");
-
-  if (pending && pending.length > 0) {
-    return NextResponse.json(
-      { error: `${pending.length} field(s) still need review. Accept or correct all fields before marking as done.` },
-      { status: 400 }
-    );
-  }
 
   // Move document to reconciliation queue
   const { error } = await supabase
