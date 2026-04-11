@@ -80,6 +80,7 @@ export default function ReviewDetailPage() {
   const [extractions, setExtractions] = useState<Extraction[]>([]);
   const [loading, setLoading] = useState(true);
   const [completing, setCompleting] = useState(false);
+  const [rerunning, setRerunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fileDataUrl, setFileDataUrl] = useState<string | null>(null);
   const fieldRefs = useRef<Record<string, HTMLInputElement | null>>({});
@@ -202,6 +203,20 @@ export default function ReviewDetailPage() {
     router.push("/review");
   }
 
+  async function rerunExtraction() {
+    if (!window.confirm("This will re-run AI extraction and clear all current field values. Any accepted/corrected fields will be reset. Continue?")) return;
+    setRerunning(true);
+    try {
+      const res = await fetch(`/api/v1/documents/${documentId}/reextract`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) { toast.error(data.error ?? "Re-extraction failed"); return; }
+      toast.success("Re-extraction started. This page will refresh in 30 seconds.");
+      setTimeout(() => window.location.reload(), 30000);
+    } finally {
+      setRerunning(false);
+    }
+  }
+
   const pendingCount = extractions.filter((e) => e.status === "pending").length;
   const highConfidenceCount = extractions.filter((e) => e.confidence >= 0.8 && e.status === "pending").length;
   const allDone = pendingCount === 0;
@@ -238,6 +253,15 @@ export default function ReviewDetailPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            onClick={rerunExtraction}
+            disabled={rerunning}
+            title="Re-run AI extraction with latest rules (TDS inference, ledger suggestion)"
+            className={buttonVariants({ variant: "outline" }) + " text-amber-600 border-amber-300 hover:bg-amber-50"}
+          >
+            {rerunning ? <Loader2 size={14} className="mr-2 animate-spin" /> : <RotateCcw size={14} className="mr-2" />}
+            Re-run extraction
+          </button>
           {highConfidenceCount > 0 && (
             <button
               onClick={bulkAcceptHighConfidence}

@@ -424,6 +424,23 @@ export default function ClientDetailPage() {
     }
   }
 
+  async function reExtract(docId: string, fileName: string) {
+    if (!window.confirm(`Re-run AI extraction for "${fileName}"? This will clear existing extracted fields and re-process with the latest rules (TDS inference, ledger suggestion).`)) return;
+    setRetrying(docId);
+    try {
+      const res = await fetch(`/api/v1/documents/${docId}/reextract`, { method: "POST" });
+      const data = await res.json();
+      if (res.ok) {
+        toast.success(`Re-extraction started for "${fileName}". Review it again in 30–60 seconds.`);
+        setDocuments((prev) => prev.map((d) => d.id === docId ? { ...d, status: "extracting" } : d));
+      } else {
+        toast.error(data.error ?? "Re-extraction failed.");
+      }
+    } finally {
+      setRetrying(null);
+    }
+  }
+
   async function retagDocument(docId: string, newType: string) {
     setRetagging(docId);
     const res = await fetch(`/api/v1/documents/${docId}`, {
@@ -675,15 +692,24 @@ export default function ClientDetailPage() {
                               {new Date(doc.uploaded_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
                             </td>
                             <td className="px-4 py-3">
-                              {doc.status === "review_required" && (
-                                <Link href={`/review/${doc.id}`} className="text-xs text-blue-600 hover:underline">Review →</Link>
-                              )}
-                              {canRetry && (
-                                <button onClick={() => retryExtraction(doc.id, doc.original_filename)} disabled={retrying === doc.id}
-                                  className="inline-flex items-center gap-1 text-xs text-amber-600 hover:text-amber-800 disabled:opacity-50">
-                                  {retrying === doc.id ? <><Loader2 size={11} className="animate-spin" /> Retrying…</> : <><RefreshCw size={11} /> Retry</>}
-                                </button>
-                              )}
+                              <div className="flex items-center gap-3">
+                                {doc.status === "review_required" && (
+                                  <Link href={`/review/${doc.id}`} className="text-xs text-blue-600 hover:underline">Review →</Link>
+                                )}
+                                {canRetry && (
+                                  <button onClick={() => retryExtraction(doc.id, doc.original_filename)} disabled={retrying === doc.id}
+                                    className="inline-flex items-center gap-1 text-xs text-amber-600 hover:text-amber-800 disabled:opacity-50">
+                                    {retrying === doc.id ? <><Loader2 size={11} className="animate-spin" /> Retrying…</> : <><RefreshCw size={11} /> Retry</>}
+                                  </button>
+                                )}
+                                {["reviewed", "reconciled", "posted", "review_required"].includes(doc.status) && (
+                                  <button onClick={() => reExtract(doc.id, doc.original_filename)} disabled={retrying === doc.id}
+                                    className="inline-flex items-center gap-1 text-xs text-gray-400 hover:text-amber-600 disabled:opacity-50"
+                                    title="Re-run AI extraction with latest rules">
+                                    <RefreshCw size={11} /> Re-run
+                                  </button>
+                                )}
+                              </div>
                             </td>
                           </tr>
                         );
