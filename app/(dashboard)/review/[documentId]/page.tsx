@@ -93,6 +93,7 @@ export default function ReviewDetailPage() {
   const [rerunning, setRerunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fileDataUrl, setFileDataUrl] = useState<string | null>(null);
+  const [fileError, setFileError] = useState(false);
   const fieldRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   useEffect(() => {
@@ -120,7 +121,7 @@ export default function ReviewDetailPage() {
               reader.readAsDataURL(blob);
             }))
             .then((dataUrl) => setFileDataUrl(dataUrl))
-            .catch(() => {});
+            .catch(() => setFileError(true));
         }
       })
       .catch(() => { setError("Failed to load document."); setLoading(false); });
@@ -358,8 +359,17 @@ export default function ReviewDetailPage() {
                 />
               )
             ) : (
-              <div className="flex items-center justify-center h-full text-gray-400 text-sm">
-                {document ? "Loading preview…" : "Preview not available"}
+              <div className="flex items-center justify-center h-full text-sm text-center px-6">
+                {fileError ? (
+                  <div className="text-red-400">
+                    <p className="font-medium">File could not be loaded</p>
+                    <p className="text-xs mt-1 text-gray-400">The original file may be missing from storage.<br/>Extracted fields are still available on the right.</p>
+                  </div>
+                ) : document ? (
+                  <span className="text-gray-400">Loading preview…</span>
+                ) : (
+                  <span className="text-gray-400">Preview not available</span>
+                )}
               </div>
             )}
           </CardContent>
