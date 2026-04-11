@@ -22,7 +22,7 @@ export async function GET(
   // RLS ensures tenant isolation
   const { data: doc, error: docError } = await supabase
     .from("documents")
-    .select("id, original_filename, document_type, status, storage_path, doc_fingerprint, processed_at")
+    .select("id, original_filename, document_type, status, storage_path, doc_fingerprint, processed_at, client_id")
     .eq("id", documentId)
     .eq("tenant_id", profile?.tenant_id)
     .single();
@@ -56,9 +56,23 @@ export async function GET(
     .from("documents")
     .createSignedUrl(doc.storage_path, 900);
 
+  // Misclassification check: if vendor_name ≈ client's own name on a purchase invoice
+  let possibleMisclassification = false;
+  if (doc.client_id && doc.document_type === "purchase_invoice") {
+    const { data: clientRecord } = await supabase
+      .from("clients").select("client_name").eq("id", doc.client_id).single();
+    const vendorName = (extractions.find(e => e.field_name === "vendor_name")?.extracted_value ?? "").toLowerCase();
+    const clientName = (clientRecord?.client_name ?? "").toLowerCase();
+    if (vendorName && clientName) {
+      const clientWords = clientName.split(/\s+/).filter((w: string) => w.length > 3);
+      possibleMisclassification = clientWords.some((word: string) => vendorName.includes(word));
+    }
+  }
+
   return NextResponse.json({
     document: { ...doc, signedUrl: signedUrl?.signedUrl },
     extractions,
+    possibleMisclassification,
   });
   } catch (err) {
     console.error("[review/document] Unhandled error:", err);

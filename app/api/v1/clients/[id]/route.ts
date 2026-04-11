@@ -63,9 +63,27 @@ export async function GET(
       }
     }
 
+    // Misclassification detection: flag purchase invoices where vendor_name ≈ client name
+    const purchaseDocIds = (documents ?? [])
+      .filter((d) => d.document_type === "purchase_invoice")
+      .map((d) => d.id);
+    const mismatchSet = new Set<string>();
+    if (purchaseDocIds.length > 0) {
+      const { data: vendorExts } = await supabase
+        .from("extractions").select("document_id, extracted_value")
+        .in("document_id", purchaseDocIds).eq("field_name", "vendor_name")
+        .not("status", "eq", "rejected").not("extracted_value", "is", null);
+      const clientWords = client.client_name.toLowerCase().split(/\s+/).filter((w: string) => w.length > 3);
+      for (const ext of vendorExts ?? []) {
+        const v = (ext.extracted_value ?? "").toLowerCase();
+        if (clientWords.some((word: string) => v.includes(word))) mismatchSet.add(ext.document_id);
+      }
+    }
+
     const docsWithConf = (documents ?? []).map((d) => ({
       ...d,
       conf: confMap[d.id] ?? null,
+      possible_misclassification: mismatchSet.has(d.id),
     }));
 
     return NextResponse.json({ client, documents: docsWithConf });

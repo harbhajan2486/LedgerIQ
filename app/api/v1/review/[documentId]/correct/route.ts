@@ -58,22 +58,113 @@ export async function POST(
     .single();
 
   if (action === "accept") {
-    // Mark field as accepted
-    await supabase
-      .from("extractions")
-      .update({ status: "accepted" })
-      .eq("id", extractionId);
+    await supabase.from("extractions").update({ status: "accepted" }).eq("id", extractionId);
 
-    // Audit log
+    // ── Acceptance learning ────────────────────────────────────────────────────
+    // After 7 acceptances of the same vendor+field+value, promote to vendor profile.
+    // But first check for L1/L2 conflicts — if the accepted value opposes a global
+    // rule, flag it instead of silently learning a potentially wrong value.
+    const VENDOR_LEARNABLE_FIELDS = new Set([
+      "vendor_gstin", "tds_section", "tds_rate", "reverse_charge",
+      "place_of_supply", "cgst_rate", "sgst_rate", "igst_rate", "suggested_ledger",
+    ]);
+
+    let acceptanceWarning: string | null = null;
+
+    if (VENDOR_LEARNABLE_FIELDS.has(extraction.field_name) && extraction.extracted_value) {
+      // Get vendor name for this document
+      const { data: vendorExt } = await supabase
+        .from("extractions").select("extracted_value")
+        .eq("document_id", documentId).eq("field_name", "vendor_name")
+        .eq("tenant_id", profile?.tenant_id).maybeSingle();
+      const vendorName = vendorExt?.extracted_value;
+
+      if (vendorName) {
+        // Find all documents for this vendor
+        const { data: vendorDocExts } = await supabase
+          .from("extractions").select("document_id")
+          .eq("tenant_id", profile?.tenant_id).eq("field_name", "vendor_name")
+          .ilike("extracted_value", `%${vendorName.split(" ").slice(0, 2).join("%")}%`);
+        const vendorDocIds = [...new Set((vendorDocExts ?? []).map((e: { document_id: string }) => e.document_id))];
+
+        if (vendorDocIds.length > 0) {
+          const { count: priorAcceptCount } = await supabase
+            .from("extractions").select("*", { count: "exact", head: true })
+            .eq("tenant_id", profile?.tenant_id).eq("field_name", extraction.field_name)
+            .eq("extracted_value", extraction.extracted_value).eq("status", "accepted")
+            .in("document_id", vendorDocIds);
+
+          // +1 for current acceptance — threshold is 7
+          if ((priorAcceptCount ?? 0) + 1 >= 7) {
+            // Check L1 / L2 conflict before promoting
+            const { data: globalRules } = await supabase
+              .from("global_rules").select("layer, rule_type, rule_json")
+              .in("layer", [1, 2]).eq("is_active", true);
+
+            let conflictLayer: number | null = null;
+            for (const rule of globalRules ?? []) {
+              const rj = rule.rule_json as Record<string, unknown>;
+              // L2 correction pattern for same field on this doc fingerprint with different value
+              if (rule.rule_type === "correction_pattern" &&
+                  rj.field_name === extraction.field_name &&
+                  rj.correct_value !== extraction.extracted_value &&
+                  rj.doc_fingerprint === doc?.doc_fingerprint) {
+                conflictLayer = 2; break;
+              }
+              // L1 TDS rule specifying a different section for this field
+              if (rule.rule_type === "tds_section" && extraction.field_name === "tds_section") {
+                const ruleSection = rj.section as string | undefined;
+                if (ruleSection && ruleSection !== extraction.extracted_value) {
+                  conflictLayer = 1; break;
+                }
+              }
+            }
+
+            if (conflictLayer !== null) {
+              // Red-flag: log conflict, do NOT promote to vendor profile
+              await supabase.from("audit_log").insert({
+                tenant_id: profile?.tenant_id, user_id: user.id,
+                action: "acceptance_conflicts_global_rule",
+                entity_type: "extraction", entity_id: extractionId,
+                new_value: {
+                  vendor: vendorName, field: extraction.field_name,
+                  accepted_value: extraction.extracted_value,
+                  conflict_layer: conflictLayer,
+                  note: `7 acceptances reached but conflicts with Layer ${conflictLayer} knowledge`,
+                },
+              });
+              acceptanceWarning = `Accepted value conflicts with a Layer ${conflictLayer} global rule — flagged for admin review. Vendor profile not updated.`;
+            } else {
+              // No conflict — promote accepted value to vendor profile
+              const { data: existingProfile } = await supabase
+                .from("vendor_profiles").select("id, invoice_quirks, tds_category")
+                .eq("tenant_id", profile?.tenant_id).ilike("vendor_name", vendorName).maybeSingle();
+              const quirks = { ...(existingProfile?.invoice_quirks as Record<string, string> ?? {}), [extraction.field_name]: extraction.extracted_value };
+              if (existingProfile) {
+                await supabase.from("vendor_profiles").update({
+                  invoice_quirks: quirks,
+                  tds_category: extraction.field_name === "tds_section" ? extraction.extracted_value : existingProfile.tds_category,
+                  last_updated: new Date().toISOString(),
+                }).eq("id", existingProfile.id);
+              } else {
+                await supabase.from("vendor_profiles").insert({
+                  tenant_id: profile?.tenant_id, vendor_name: vendorName,
+                  tds_category: extraction.field_name === "tds_section" ? extraction.extracted_value : null,
+                  invoice_quirks: quirks, last_updated: new Date().toISOString(),
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
     await supabase.from("audit_log").insert({
-      tenant_id: profile?.tenant_id,
-      user_id: user.id,
-      action: "accept_extraction",
-      entity_type: "extraction",
-      entity_id: extractionId,
+      tenant_id: profile?.tenant_id, user_id: user.id,
+      action: "accept_extraction", entity_type: "extraction", entity_id: extractionId,
     });
 
-    return NextResponse.json({ success: true, action: "accepted" });
+    return NextResponse.json({ success: true, action: "accepted", ...(acceptanceWarning ? { warning: acceptanceWarning } : {}) });
   }
 
   if (action === "correct") {

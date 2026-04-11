@@ -30,6 +30,7 @@ interface Document {
   processed_at: string | null;
   ai_model_used: string | null;
   conf: { high: number; medium: number; low: number } | null;
+  possible_misclassification: boolean;
 }
 
 interface BankTxn {
@@ -717,6 +718,9 @@ export default function ClientDetailPage() {
                               <div className="flex items-center gap-2">
                                 <FileText size={14} className="text-gray-400 flex-shrink-0" />
                                 <span className="truncate max-w-xs text-gray-800">{doc.original_filename}</span>
+                              {doc.possible_misclassification && (
+                                <span className="flex-shrink-0 text-xs px-1.5 py-0.5 rounded bg-amber-50 border border-amber-300 text-amber-700 font-medium" title="Vendor name matches this client — may be a Sales Invoice">⚠ wrong folder?</span>
+                              )}
                               </div>
                             </td>
                             <td className="px-4 py-3">

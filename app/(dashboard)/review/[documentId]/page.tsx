@@ -95,6 +95,8 @@ export default function ReviewDetailPage() {
   const [fileDataUrl, setFileDataUrl] = useState<string | null>(null);
   const [fileError, setFileError] = useState(false);
   const [ledgerOptions, setLedgerOptions] = useState<string[]>([]);
+  const [possibleMisclassification, setPossibleMisclassification] = useState(false);
+  const [reclassifying, setReclassifying] = useState(false);
   const fieldRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   useEffect(() => {
@@ -102,6 +104,7 @@ export default function ReviewDetailPage() {
       .then((r) => r.json())
       .then((d) => {
         setDocument(d.document);
+        if (d.possibleMisclassification) setPossibleMisclassification(true);
         setExtractions(
           (d.extractions ?? []).map((e: Extraction) => ({
             ...e,
@@ -180,6 +183,7 @@ export default function ReviewDetailPage() {
             isEditing: false, saving: false }
         : e
     ));
+    if (data.warning) toast.warning(data.warning, { duration: 6000 });
   }
 
   function acceptField(extractionId: string) {
@@ -230,6 +234,28 @@ export default function ReviewDetailPage() {
       setTimeout(() => window.location.reload(), 30000);
     } finally {
       setRerunning(false);
+    }
+  }
+
+  async function reclassifyAsSales() {
+    if (!window.confirm("Move this document to Sales Invoice? This will change its type and remove it from the purchase invoice folder.")) return;
+    setReclassifying(true);
+    try {
+      const res = await fetch(`/api/v1/documents/${documentId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_type: "sales_invoice" }),
+      });
+      if (res.ok) {
+        toast.success("Reclassified as Sales Invoice.");
+        setPossibleMisclassification(false);
+        if (backHref) router.push(backHref);
+      } else {
+        const d = await res.json();
+        toast.error(d.error ?? "Reclassification failed.");
+      }
+    } finally {
+      setReclassifying(false);
     }
   }
 
@@ -382,6 +408,20 @@ export default function ReviewDetailPage() {
 
         {/* Right — extracted fields grouped */}
         <div className="overflow-y-auto space-y-3 pr-1">
+          {/* Misclassification warning */}
+          {possibleMisclassification && (
+            <div className="flex items-start gap-3 px-3 py-2.5 rounded-lg border border-amber-300 bg-amber-50 text-sm">
+              <span className="text-amber-500 mt-0.5 flex-shrink-0">⚠</span>
+              <div className="flex-1">
+                <p className="font-medium text-amber-800">Possible wrong folder</p>
+                <p className="text-amber-700 text-xs mt-0.5">Vendor name matches this client — this looks like a Sales Invoice uploaded in the Purchase Invoice folder.</p>
+              </div>
+              <button onClick={reclassifyAsSales} disabled={reclassifying}
+                className="flex-shrink-0 text-xs px-2.5 py-1 rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+                {reclassifying ? "Moving…" : "Move to Sales →"}
+              </button>
+            </div>
+          )}
           {extractions.length === 0 ? (
             <div className="text-center py-12 text-sm text-gray-400">No fields extracted yet.</div>
           ) : (
