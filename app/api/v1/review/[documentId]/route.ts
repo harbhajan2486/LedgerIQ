@@ -35,13 +35,12 @@ export async function GET(
     .eq("document_id", documentId)
     .order("created_at", { ascending: false }); // newest first
 
-  // Deduplicate: one row per field. Priority: pending (human hasn't reviewed yet)
-  // over accepted/corrected, and within same status pick newest row.
-  const seen = new Set<string>();
-  const pendingByField = new Map<string, typeof allExtractions extends null ? never : (typeof allExtractions)[0]>();
-  const resolvedByField = new Map<string, typeof allExtractions extends null ? never : (typeof allExtractions)[0]>();
+  // Deduplicate: one row per field. Newest pending wins; fall back to newest resolved.
+  type ExtractionRow = { id: string; field_name: string; extracted_value: string | null; confidence: number; status: string; created_at: string };
+  const pendingByField = new Map<string, ExtractionRow>();
+  const resolvedByField = new Map<string, ExtractionRow>();
 
-  for (const row of allExtractions ?? []) {
+  for (const row of (allExtractions ?? []) as ExtractionRow[]) {
     if (row.status === "pending" && !pendingByField.has(row.field_name)) {
       pendingByField.set(row.field_name, row);
     } else if (row.status !== "pending" && !resolvedByField.has(row.field_name)) {
@@ -49,9 +48,8 @@ export async function GET(
     }
   }
 
-  // Prefer pending over resolved (pending = fresh extraction, needs review)
-  const extractions = [...new Set([...pendingByField.keys(), ...resolvedByField.keys()])]
-    .map(field => pendingByField.get(field) ?? resolvedByField.get(field)!);
+  const allFields = new Set([...pendingByField.keys(), ...resolvedByField.keys()]);
+  const extractions = [...allFields].map(f => pendingByField.get(f) ?? resolvedByField.get(f)!);
 
   // Generate signed URL for the original document (15-minute expiry)
   const { data: signedUrl } = await supabase.storage
