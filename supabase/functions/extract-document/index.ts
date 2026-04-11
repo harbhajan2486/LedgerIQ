@@ -38,6 +38,10 @@ const EXTRACTION_FIELDS = [
   "hsn_sac_code", "itc_eligible",
 ];
 
+// ─── Vendors/services that are explicitly NOT subject to TDS ─────────────────
+// These are set to "No TDS" when the AI leaves the field blank
+const NO_TDS_KEYWORDS = /\b(hotel|inn|resort|lodge|hospitality|guest.house|makemytrip|cleartrip|yatra|goibibo|irctc|airline|indigo|spicejet|air.india|vistara|goair|air.asia|flight.ticket|train.ticket|petrol|fuel|electricity|telephone|internet|broadband|utility|water.bill|municipal|insurance|stamp.duty|registration|government.fee|challan|gst.payment|tds.payment|advance.tax)\b/i;
+
 // ─── TDS Keyword → Section mapping (deterministic Layer 1 post-processing) ───
 interface TdsRule {
   section: string;
@@ -79,7 +83,7 @@ const INVOICE_LEDGER_RULES: LedgerRule[] = [
   { keywords: /\b(salary|salaries|payroll|wages|stipend|hr|payslip)\b/i,         ledger: "Salary Expenses" },
   { keywords: /\b(rent|rental|lease.rent|premises|office.rent)\b/i,               ledger: "Rent" },
   { keywords: /\b(advocate|lawyer|legal|ca.firm|chartered|audit|consultant|advisory|architect|doctor|clinic|hospital|it.service|software|technical)\b/i, ledger: "Professional Fees" },
-  { keywords: /\b(transport|courier|logistics|freight|cargo|delivery)\b/i,        ledger: "Travelling Expenses" },
+  { keywords: /\b(transport|courier|logistics|freight|cargo|delivery|travel|flight|airline|hotel|accommodation|makemytrip|cleartrip|yatra|goibibo|expedia|booking\.com|airbnb|irctc|indigo|spicejet|air.india|vistara|goair|air.asia|cab|taxi|uber|ola|rapido|train|bus.ticket|boarding.pass)\b/i, ledger: "Travelling Expenses" },
   { keywords: /\b(drone|aerial|videograph|cinematograph|photo.shoot|filming|aerial.survey|content.produc)\b/i, ledger: "Photography / Videography Charges" },
   { keywords: /\b(advertis|marketing|media|promotion|campaign|pr.agency)\b/i,     ledger: "Advertising & Marketing" },
   { keywords: /\b(electricity|power|mseb|bescom|tneb|discom)\b/i,                 ledger: "Electricity Expenses" },
@@ -565,6 +569,14 @@ Return JSON in this exact format:
           }
           break; // first matching rule wins
         }
+      }
+    }
+
+    // If TDS still blank after all rules, check no-TDS vendor list
+    if (!parsed["tds_section"]?.value) {
+      if (NO_TDS_KEYWORDS.test(vendorForTds)) {
+        parsed["tds_section"] = { value: "No TDS", confidence: 0.75 };
+        parsed["tds_rate"]    = { value: "0",       confidence: 0.75 };
       }
     }
 

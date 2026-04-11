@@ -94,6 +94,7 @@ export default function ReviewDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [fileDataUrl, setFileDataUrl] = useState<string | null>(null);
   const [fileError, setFileError] = useState(false);
+  const [ledgerOptions, setLedgerOptions] = useState<string[]>([]);
   const fieldRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   useEffect(() => {
@@ -122,6 +123,15 @@ export default function ReviewDetailPage() {
       .catch(() => { setError("Failed to load document."); setLoading(false); });
   }, [documentId]);
 
+
+  // Fetch ledger list for dropdown
+  useEffect(() => {
+    if (!fromClientId) return;
+    fetch(`/api/v1/clients/${fromClientId}/ledgers`)
+      .then((r) => r.json())
+      .then((d) => setLedgerOptions((d.ledgers ?? []).map((l: { ledger_name: string }) => l.ledger_name)))
+      .catch(() => {});
+  }, [fromClientId]);
 
   // Keyboard navigation: Tab moves to next field, Enter accepts current field
   const handleKeyDown = useCallback((e: React.KeyboardEvent, extractionId: string, index: number) => {
@@ -459,30 +469,50 @@ export default function ReviewDetailPage() {
                               )}
                             </div>
                           ) : (
-                            /* Standard text input */
+                            /* Ledger: dropdown from master; everything else: text input */
                             <div className="flex items-center gap-2">
-                              <input
-                                ref={(el) => { fieldRefs.current[extraction.id] = el; }}
-                                type="text"
-                                value={extraction.editingValue ?? extraction.extracted_value ?? ""}
-                                onChange={(e) => setExtractions((prev) => prev.map((ex) =>
-                                  ex.id === extraction.id ? { ...ex, editingValue: e.target.value, isEditing: true } : ex
-                                ))}
-                                onFocus={() => setExtractions((prev) => prev.map((ex) =>
-                                  ex.id === extraction.id ? { ...ex, isEditing: true } : ex
-                                ))}
-                                onBlur={() => onBlur(extraction)}
-                                onKeyDown={(e) => handleKeyDown(e, extraction.id, idx)}
-                                disabled={extraction.saving}
-                                placeholder={isLedger ? "e.g. Professional Fees, Rent…" : ""}
-                                className={`flex-1 text-sm px-2 py-1.5 rounded border outline-none focus:ring-2 focus:ring-blue-500 transition-colors
-                                  ${extraction.status === "accepted"  ? "bg-green-50 border-green-200 text-green-800" : ""}
-                                  ${extraction.status === "corrected" ? "bg-blue-50 border-blue-200 text-blue-800" : ""}
-                                  ${extraction.status === "pending"   ? "bg-white border-gray-200 text-gray-900" : ""}
-                                  ${extraction.saving ? "opacity-50" : ""}
-                                  ${isLedger ? "font-medium" : ""}
-                                `}
-                              />
+                              {isLedger && ledgerOptions.length > 0 ? (
+                                <select
+                                  value={extraction.editingValue ?? extraction.extracted_value ?? ""}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setExtractions((prev) => prev.map((ex) =>
+                                      ex.id === extraction.id ? { ...ex, editingValue: val, isEditing: true } : ex
+                                    ));
+                                    saveCorrection(extraction.id, "correct", val);
+                                  }}
+                                  disabled={extraction.saving}
+                                  className={`flex-1 text-sm px-2 py-1.5 rounded border outline-none focus:ring-2 focus:ring-blue-500 ${
+                                    extraction.status === "accepted"  ? "bg-green-50 border-green-200 text-green-800" :
+                                    extraction.status === "corrected" ? "bg-blue-50 border-blue-200 text-blue-800" : "bg-white border-gray-200 text-gray-900"
+                                  }`}>
+                                  <option value="">— Select ledger —</option>
+                                  {ledgerOptions.map((l) => <option key={l} value={l}>{l}</option>)}
+                                </select>
+                              ) : (
+                                <input
+                                  ref={(el) => { fieldRefs.current[extraction.id] = el; }}
+                                  type="text"
+                                  value={extraction.editingValue ?? extraction.extracted_value ?? ""}
+                                  onChange={(e) => setExtractions((prev) => prev.map((ex) =>
+                                    ex.id === extraction.id ? { ...ex, editingValue: e.target.value, isEditing: true } : ex
+                                  ))}
+                                  onFocus={() => setExtractions((prev) => prev.map((ex) =>
+                                    ex.id === extraction.id ? { ...ex, isEditing: true } : ex
+                                  ))}
+                                  onBlur={() => onBlur(extraction)}
+                                  onKeyDown={(e) => handleKeyDown(e, extraction.id, idx)}
+                                  disabled={extraction.saving}
+                                  placeholder={isLedger ? "e.g. Professional Fees, Rent…" : ""}
+                                  className={`flex-1 text-sm px-2 py-1.5 rounded border outline-none focus:ring-2 focus:ring-blue-500 transition-colors
+                                    ${extraction.status === "accepted"  ? "bg-green-50 border-green-200 text-green-800" : ""}
+                                    ${extraction.status === "corrected" ? "bg-blue-50 border-blue-200 text-blue-800" : ""}
+                                    ${extraction.status === "pending"   ? "bg-white border-gray-200 text-gray-900" : ""}
+                                    ${extraction.saving ? "opacity-50" : ""}
+                                    ${isLedger ? "font-medium" : ""}
+                                  `}
+                                />
+                              )}
                               {extraction.status === "pending" && !extraction.saving && (
                                 <button onClick={() => acceptField(extraction.id)}
                                   className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded bg-green-50 hover:bg-green-100 text-green-600"
