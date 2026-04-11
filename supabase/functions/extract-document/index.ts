@@ -346,7 +346,8 @@ RULES:
 - For GST rates, return the percentage number (e.g. 18, not "18%")
 - For dates, use DD/MM/YYYY format
 - For GSTIN, return the 15-character alphanumeric code exactly
-- For TDS section, return e.g. "194C", "194J", "194I"`;
+- For TDS section, return e.g. "194C", "194J", "194I"
+- GST is MUTUALLY EXCLUSIVE: intra-state invoices have CGST + SGST only (IGST = null). Inter-state invoices have IGST only (CGST = SGST = null). NEVER set all three.`;
 
     const userPrompt = `Extract all fields from this ${documentType.replace(/_/g, " ")} document.
 
@@ -541,6 +542,43 @@ Return JSON in this exact format:
           break; // first matching rule wins
         }
       }
+    }
+
+    // ----------------------------------------------------------------
+    // TDS AMOUNT — calculate from rate if missing or low-confidence
+    // Runs after all TDS processing (both AI extraction and keyword inference)
+    // ----------------------------------------------------------------
+    const finalTdsSection = parsed["tds_section"]?.value;
+    const finalTdsRate    = parsed["tds_rate"]?.value;
+    if (finalTdsSection && finalTdsRate) {
+      if (!parsed["tds_amount"]?.value || (parsed["tds_amount"].confidence ?? 0) < 0.5) {
+        const base = parseFloat(parsed["taxable_value"]?.value ?? "0")
+                  || parseFloat(parsed["total_amount"]?.value ?? "0");
+        const rate = parseFloat(finalTdsRate);
+        if (base > 0 && rate > 0) {
+          parsed["tds_amount"] = { value: (base * rate / 100).toFixed(2), confidence: 0.88 };
+        }
+      }
+    }
+
+    // ----------------------------------------------------------------
+    // GST MUTUAL EXCLUSIVITY — CGST+SGST vs IGST are mutually exclusive
+    // Intra-state: CGST + SGST; IGST must be null
+    // Inter-state: IGST only; CGST + SGST must be null
+    // If AI hallucinated both, trust whichever side has a higher amount
+    // ----------------------------------------------------------------
+    const cgstAmt = parseFloat(parsed["cgst_amount"]?.value ?? "0") || 0;
+    const igstAmt = parseFloat(parsed["igst_amount"]?.value ?? "0") || 0;
+    if (cgstAmt > 0 && igstAmt > 0) {
+      // Both set — pick CGST+SGST (intra-state is more common domestically), clear IGST
+      parsed["igst_rate"]   = { value: null, confidence: 1.0 };
+      parsed["igst_amount"] = { value: null, confidence: 1.0 };
+    } else if (igstAmt > 0 && cgstAmt === 0) {
+      // Inter-state — clear any leftover CGST/SGST the AI may have set
+      parsed["cgst_rate"]   = { value: null, confidence: 1.0 };
+      parsed["cgst_amount"] = { value: null, confidence: 1.0 };
+      parsed["sgst_rate"]   = { value: null, confidence: 1.0 };
+      parsed["sgst_amount"] = { value: null, confidence: 1.0 };
     }
 
     // ----------------------------------------------------------------
