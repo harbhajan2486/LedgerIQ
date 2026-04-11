@@ -20,14 +20,15 @@ export async function POST(
     .eq("id", user.id)
     .single();
 
-  // Auto-accept any remaining pending fields — the human has seen the document,
-  // that is the review. Field-level accept UI is a helper, not a hard gate.
+  // Auto-accept null-value pending fields (nothing to review on blank fields).
+  // Fields with actual values must be explicitly reviewed by the human — enforced in the UI.
   await supabase
     .from("extractions")
     .update({ status: "accepted" })
     .eq("document_id", documentId)
     .eq("tenant_id", profile?.tenant_id)
-    .eq("status", "pending");
+    .eq("status", "pending")
+    .or("extracted_value.is.null,extracted_value.eq.");
 
   // Move document to reconciliation queue
   const { error } = await supabase

@@ -326,11 +326,12 @@ export default function ReviewDetailPage() {
           {!isReadonly && (
             <button
               onClick={completeReview}
-              disabled={completing}
-              className={buttonVariants({ variant: "default" })}
+              disabled={pendingCount > 0 || completing}
+              title={pendingCount > 0 ? `${pendingCount} field${pendingCount > 1 ? "s" : ""} still need review — accept or correct before marking done` : ""}
+              className={buttonVariants({ variant: pendingCount === 0 ? "default" : "outline" })}
             >
               {completing && <Loader2 size={14} className="mr-2 animate-spin" />}
-              {pendingCount > 0 ? `Mark as reviewed (${pendingCount} unreviewed)` : "Mark as reviewed"}
+              {pendingCount > 0 ? `${pendingCount} field${pendingCount > 1 ? "s" : ""} need review` : "Mark as reviewed"}
             </button>
           )}
         </div>

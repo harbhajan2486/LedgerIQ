@@ -89,11 +89,29 @@ export async function GET(
     ])
     .not("status", "eq", "rejected");
 
-  // Build per-doc field map
+  // Build per-doc field map — deduplicate: one value per field per doc.
+  // Priority: accepted/corrected (human-verified) over pending, newest first.
+  // Handles duplicate rows from concurrent re-extractions.
+  type ExtRow = { document_id: string; field_name: string; extracted_value: string | null; status: string };
+  const verifiedMap: Record<string, Record<string, string>> = {}; // doc → field → value (human-verified)
+  const pendingMap:  Record<string, Record<string, string>> = {}; // doc → field → value (AI, not yet reviewed)
+
+  for (const ext of (extractions ?? []) as ExtRow[]) {
+    if (!ext.extracted_value) continue;
+    const isVerified = ext.status === "accepted" || ext.status === "corrected";
+    const target = isVerified ? verifiedMap : pendingMap;
+    if (!target[ext.document_id]) target[ext.document_id] = {};
+    // First write wins (newest first from Supabase default order)
+    if (!target[ext.document_id][ext.field_name]) {
+      target[ext.document_id][ext.field_name] = ext.extracted_value;
+    }
+  }
+
+  // Merge: verified value takes priority; fall back to pending AI value
   const fieldMap: Record<string, FieldMap> = {};
-  for (const ext of extractions ?? []) {
-    if (!fieldMap[ext.document_id]) fieldMap[ext.document_id] = {};
-    if (ext.extracted_value) (fieldMap[ext.document_id] as Record<string, string>)[ext.field_name] = ext.extracted_value;
+  const allDocIds = new Set([...Object.keys(verifiedMap), ...Object.keys(pendingMap)]);
+  for (const docId of allDocIds) {
+    fieldMap[docId] = { ...pendingMap[docId], ...verifiedMap[docId] } as FieldMap;
   }
 
   // ── Separate by doc type ─────────────────────────────────────────────────
