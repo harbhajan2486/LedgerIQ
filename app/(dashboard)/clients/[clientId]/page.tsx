@@ -419,14 +419,15 @@ export default function ClientDetailPage() {
         inFlight.map((d) =>
           fetch(`/api/v1/documents/${d.id}/status`)
             .then((r) => r.json())
-            .then((j) => ({ id: d.id, status: j.status as string }))
-            .catch(() => ({ id: d.id, status: d.status }))
+            .then((j) => ({ id: d.id, status: j.status as string, processed_at: j.processed_at as string | null }))
+            .catch(() => ({ id: d.id, status: d.status, processed_at: d.processed_at }))
         )
       );
       setDocuments((prev) =>
         prev.map((d) => {
           const u = updates.find((u) => u.id === d.id);
-          return u && u.status !== d.status ? { ...d, status: u.status } : d;
+          if (!u || u.status === d.status) return d;
+          return { ...d, status: u.status, processed_at: u.processed_at ?? d.processed_at };
         })
       );
     }, 5000);

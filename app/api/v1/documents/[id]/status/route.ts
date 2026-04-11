@@ -30,7 +30,7 @@ export async function GET(
     return NextResponse.json({ error: "Document not found" }, { status: 404 });
   }
 
-  return NextResponse.json({ status: doc.status });
+  return NextResponse.json({ status: doc.status, processed_at: doc.processed_at });
   } catch (err) {
     console.error("[documents/status] Unhandled error:", err);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
