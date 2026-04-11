@@ -478,6 +478,26 @@ Return JSON in this exact format:
     }
 
     // ----------------------------------------------------------------
+    // BUYER GSTIN — for purchase invoices/expenses, buyer is always the client.
+    // Fetch the client's GSTIN from DB and inject with 100% confidence so it
+    // is never blank regardless of what the AI read from the document.
+    // ----------------------------------------------------------------
+    if ((documentType === "purchase_invoice" || documentType === "expense") && clientId) {
+      try {
+        const { data: clientRecord } = await supabase
+          .from("clients")
+          .select("gstin, client_name")
+          .eq("id", clientId)
+          .maybeSingle();
+        if (clientRecord?.gstin) {
+          parsed["buyer_gstin"] = { value: clientRecord.gstin, confidence: 1.0 };
+        }
+      } catch {
+        // Non-fatal — continue without it
+      }
+    }
+
+    // ----------------------------------------------------------------
     // LAYER 3 POST-PROCESSING — Apply vendor profile overrides
     // If a vendor profile exists for the extracted vendor_name,
     // override fields defined in invoice_quirks with confidence=0.99
@@ -500,8 +520,8 @@ Return JSON in this exact format:
               parsed[field] = { value, confidence: 0.99 };
             }
           }
-          // Apply learned TDS category
-          if (vendorProfile.tds_category && !parsed["tds_section"]?.value) {
+          // Apply learned TDS category — override if not already extracted with high confidence
+          if (vendorProfile.tds_category && (parsed["tds_section"]?.confidence ?? 0) < 0.9) {
             parsed["tds_section"] = { value: vendorProfile.tds_category, confidence: 0.95 };
           }
           // Apply known GSTIN
@@ -521,7 +541,12 @@ Return JSON in this exact format:
     // ----------------------------------------------------------------
     const extractedTdsSection   = parsed["tds_section"]?.value;
     const extractedTdsConfidence = parsed["tds_section"]?.confidence ?? 0;
-    const vendorForTds = ((parsed["vendor_name"]?.value ?? "") + " " + (parsed["payment_reference"]?.value ?? "")).toLowerCase();
+    // Combine vendor name + hsn_sac_code description for broader keyword coverage
+    const vendorForTds = (
+      (parsed["vendor_name"]?.value ?? "") + " " +
+      (parsed["hsn_sac_code"]?.value ?? "") + " " +
+      (parsed["place_of_supply"]?.value ?? "")
+    ).toLowerCase();
     const totalAmountNum = parseFloat(parsed["total_amount"]?.value ?? "0") || 0;
 
     if (!extractedTdsSection || extractedTdsConfidence < 0.6) {
