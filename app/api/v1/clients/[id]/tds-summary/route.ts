@@ -47,11 +47,20 @@ export async function GET(
     .in("field_name", ["vendor_name", "invoice_number", "invoice_date", "total_amount", "taxable_value", "tds_section", "tds_rate", "tds_amount"])
     .not("status", "eq", "rejected");
 
-  // Build per-document field map
+  // Build per-document field map — deduplicated: accepted/corrected wins over pending, newest first
+  type ExtRow = { document_id: string; field_name: string; extracted_value: string | null; status: string };
+  const verifiedMap: Record<string, Record<string, string>> = {};
+  const pendingMap:  Record<string, Record<string, string>> = {};
+  for (const ext of (extractions ?? []) as ExtRow[]) {
+    if (!ext.extracted_value) continue;
+    const isVerified = ext.status === "accepted" || ext.status === "corrected";
+    const target = isVerified ? verifiedMap : pendingMap;
+    if (!target[ext.document_id]) target[ext.document_id] = {};
+    if (!target[ext.document_id][ext.field_name]) target[ext.document_id][ext.field_name] = ext.extracted_value;
+  }
   const fieldMap: Record<string, Record<string, string>> = {};
-  for (const ext of extractions ?? []) {
-    if (!fieldMap[ext.document_id]) fieldMap[ext.document_id] = {};
-    if (ext.extracted_value) fieldMap[ext.document_id][ext.field_name] = ext.extracted_value;
+  for (const docId of docIds) {
+    fieldMap[docId] = { ...pendingMap[docId], ...verifiedMap[docId] };
   }
 
   // Aggregate by vendor + section for 26Q summary
@@ -61,13 +70,18 @@ export async function GET(
   for (const doc of docs) {
     const f = fieldMap[doc.id] ?? {};
     const vendor  = f.vendor_name   ?? "Unknown Vendor";
-    const section = f.tds_section   ?? "Not Set";
-    const rate    = f.tds_rate      ?? "—";
+    const section = f.tds_section   ?? "";
+    const rate    = f.tds_rate      ?? "0";
     const payment = parseFloat(f.taxable_value ?? f.total_amount ?? "0") || 0;
-    const tds     = parseFloat(f.tds_amount ?? "0") || 0;
     const invNo   = f.invoice_number ?? doc.original_filename;
 
-    if (section === "Not Set" || section === "No TDS" || tds === 0) continue;
+    if (!section || section === "No TDS") continue;
+
+    // Calculate TDS amount: use extracted value if available, else derive from rate × payment
+    const extractedTds = parseFloat(f.tds_amount ?? "0") || 0;
+    const tds = extractedTds > 0 ? extractedTds : (payment * parseFloat(rate) / 100);
+
+    if (payment === 0) continue; // skip docs with no payment value at all
 
     const key = `${vendor}||${section}`;
     if (!aggregated[key]) {
@@ -126,23 +140,29 @@ export async function GET(
   const detailRows = docs
     .filter((doc) => {
       const f = fieldMap[doc.id] ?? {};
-      return f.tds_section && f.tds_section !== "No TDS" && parseFloat(f.tds_amount ?? "0") > 0;
+      if (!f.tds_section || f.tds_section === "No TDS") return false;
+      const payment = parseFloat(f.taxable_value ?? f.total_amount ?? "0") || 0;
+      return payment > 0;
     })
     .map((doc, i) => {
       const f = fieldMap[doc.id] ?? {};
+      const payment  = parseFloat(f.taxable_value ?? f.total_amount ?? "0") || 0;
+      const rate     = parseFloat(f.tds_rate ?? "0") || 0;
+      const extractedTds = parseFloat(f.tds_amount ?? "0") || 0;
+      const tdsAmt   = extractedTds > 0 ? extractedTds : (payment * rate / 100);
+      const total    = parseFloat(f.total_amount ?? "0") || 0;
       return {
         "Sr.":                i + 1,
         "Invoice Date":       f.invoice_date ?? "",
         "Invoice No":         f.invoice_number ?? "",
         "Vendor Name":        f.vendor_name ?? "",
         "Document Type":      doc.document_type.replace(/_/g, " "),
-        "Total Amount (₹)":   f.total_amount ? parseFloat(f.total_amount).toFixed(2) : "",
-        "Taxable Value (₹)":  f.taxable_value ? parseFloat(f.taxable_value).toFixed(2) : "",
+        "Total Amount (₹)":   total > 0 ? total.toFixed(2) : "",
+        "Taxable Value (₹)":  payment > 0 ? payment.toFixed(2) : "",
         "TDS Section":        f.tds_section ?? "",
         "TDS Rate (%)":       f.tds_rate ?? "",
-        "TDS Amount (₹)":     f.tds_amount ? parseFloat(f.tds_amount).toFixed(2) : "",
-        "Net Payment (₹)":    f.total_amount && f.tds_amount
-          ? (parseFloat(f.total_amount) - parseFloat(f.tds_amount)).toFixed(2) : "",
+        "TDS Amount (₹)":     tdsAmt > 0 ? tdsAmt.toFixed(2) : "",
+        "Net Payment (₹)":    total > 0 ? (total - tdsAmt).toFixed(2) : "",
       };
     });
 

@@ -32,6 +32,7 @@ interface FieldMap {
   reverse_charge?: string;
   itc_eligible?: string;
   tds_section?: string;
+  tds_rate?: string;
   tds_amount?: string;
 }
 
@@ -85,7 +86,7 @@ export async function GET(
       "invoice_number", "invoice_date", "total_amount", "taxable_value",
       "cgst_amount", "sgst_amount", "igst_amount", "gst_rate",
       "hsn_sac_code", "place_of_supply", "reverse_charge", "itc_eligible",
-      "tds_section", "tds_amount",
+      "tds_section", "tds_rate", "tds_amount",
     ])
     .not("status", "eq", "rejected");
 
