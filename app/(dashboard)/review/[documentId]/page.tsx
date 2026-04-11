@@ -42,6 +42,7 @@ const FIELD_LABELS: Record<string, string> = {
   tds_amount: "TDS Amount (₹)", payment_reference: "Payment Reference (UTR)",
   reverse_charge: "Reverse Charge (RCM)", place_of_supply: "Place of Supply",
   suggested_ledger: "Suggested Tally Ledger",
+  hsn_sac_code: "HSN / SAC Code", itc_eligible: "ITC Eligible",
 };
 
 // Field grouping for display
@@ -49,7 +50,7 @@ const FIELD_GROUPS = [
   { label: "Invoice Details",    fields: ["vendor_name","vendor_gstin","buyer_gstin","invoice_number","invoice_date","due_date","place_of_supply","reverse_charge","payment_reference"] },
   { label: "Amounts & GST",      fields: ["taxable_value","cgst_rate","cgst_amount","sgst_rate","sgst_amount","igst_rate","igst_amount","total_amount"] },
   { label: "TDS Deduction",      fields: ["tds_section","tds_rate","tds_amount"] },
-  { label: "Ledger / Posting",   fields: ["suggested_ledger"] },
+  { label: "Ledger / Posting",   fields: ["suggested_ledger","hsn_sac_code","itc_eligible"] },
 ];
 
 const TDS_SECTIONS = ["194C","194J","194I","194H","194A","194D","194O","194Q","192","193","194B","194G","195","No TDS"];

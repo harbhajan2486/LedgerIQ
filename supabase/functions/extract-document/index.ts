@@ -35,6 +35,7 @@ const EXTRACTION_FIELDS = [
   "due_date", "taxable_value", "cgst_rate", "cgst_amount", "sgst_rate", "sgst_amount",
   "igst_rate", "igst_amount", "total_amount", "tds_section", "tds_rate", "tds_amount",
   "payment_reference", "reverse_charge", "place_of_supply", "suggested_ledger",
+  "hsn_sac_code", "itc_eligible",
 ];
 
 // ─── TDS Keyword → Section mapping (deterministic Layer 1 post-processing) ───
@@ -52,7 +53,7 @@ const TDS_KEYWORD_RULES: TdsRule[] = [
   },
   {
     section: "194C", rate: "2", threshold: 30000,
-    keywords: /\b(transport|courier|logistics|freight|cargo|delivery|shipping|contractor|sub.contractor|construction|civil.work|builder|fabricat|manufactur|printing|advertis|media|broadcast|catering|housekeeping|security.guard|manpower|labour|labour.supply|event.management|pest.control|cleaning.service)\b/i,
+    keywords: /\b(transport|courier|logistics|freight|cargo|delivery|shipping|contractor|sub.contractor|construction|civil.work|builder|fabricat|manufactur|printing|advertis|media|broadcast|catering|housekeeping|security.guard|manpower|labour|labour.supply|event.management|pest.control|cleaning.service|drone|aerial.photo|aerial.video|videograph|cinematograph|photo.shoot|video.shoot|filming|aerial.survey|media.production|content.produc|photo.produc)\b/i,
   },
   {
     section: "194I", rate: "10", threshold: 240000,
@@ -79,6 +80,7 @@ const INVOICE_LEDGER_RULES: LedgerRule[] = [
   { keywords: /\b(rent|rental|lease.rent|premises|office.rent)\b/i,               ledger: "Rent" },
   { keywords: /\b(advocate|lawyer|legal|ca.firm|chartered|audit|consultant|advisory|architect|doctor|clinic|hospital|it.service|software|technical)\b/i, ledger: "Professional Fees" },
   { keywords: /\b(transport|courier|logistics|freight|cargo|delivery)\b/i,        ledger: "Travelling Expenses" },
+  { keywords: /\b(drone|aerial|videograph|cinematograph|photo.shoot|filming|aerial.survey|content.produc)\b/i, ledger: "Photography / Videography Charges" },
   { keywords: /\b(advertis|marketing|media|promotion|campaign|pr.agency)\b/i,     ledger: "Advertising & Marketing" },
   { keywords: /\b(electricity|power|mseb|bescom|tneb|discom)\b/i,                 ledger: "Electricity Expenses" },
   { keywords: /\b(telephone|internet|broadband|wifi|jio|airtel|bsnl|vodafone|idea|mobile.bill)\b/i, ledger: "Telephone / Internet Expenses" },
@@ -369,7 +371,9 @@ Return JSON in this exact format:
   "tds_amount": {"value": "500", "confidence": 0.75},
   "payment_reference": {"value": null, "confidence": 0.0},
   "reverse_charge": {"value": "No", "confidence": 0.95},
-  "place_of_supply": {"value": "Maharashtra", "confidence": 0.90}
+  "place_of_supply": {"value": "Maharashtra", "confidence": 0.90},
+  "hsn_sac_code": {"value": "998313", "confidence": 0.80},
+  "itc_eligible": {"value": "Yes", "confidence": 0.80}
 }`;
 
     // ----------------------------------------------------------------
@@ -536,6 +540,52 @@ Return JSON in this exact format:
           }
           break; // first matching rule wins
         }
+      }
+    }
+
+    // ----------------------------------------------------------------
+    // HSN/SAC INFERENCE — if not extracted, infer from vendor name + doc type
+    // ----------------------------------------------------------------
+    if (!parsed["hsn_sac_code"]?.value || (parsed["hsn_sac_code"].confidence ?? 0) < 0.5) {
+      const vendorForSac = (parsed["vendor_name"]?.value ?? "").toLowerCase();
+      // Drone / aerial photography → SAC 998313
+      if (/drone|aerial.photo|aerial.video|videograph|cinematograph|photo.shoot|filming/.test(vendorForSac)) {
+        parsed["hsn_sac_code"] = { value: "998313", confidence: 0.80 };
+      }
+      // IT / software services → SAC 998314 (information technology services)
+      else if (/software|it.service|saas|technology|data.process|cloud/.test(vendorForSac)) {
+        parsed["hsn_sac_code"] = { value: "998314", confidence: 0.75 };
+      }
+      // Legal / CA / consulting → SAC 998212
+      else if (/advocate|lawyer|ca.firm|chartered|consultant|advisory/.test(vendorForSac)) {
+        parsed["hsn_sac_code"] = { value: "998212", confidence: 0.75 };
+      }
+      // Transport / GTA → SAC 9965
+      else if (/transport|courier|logistics|freight|cargo/.test(vendorForSac)) {
+        parsed["hsn_sac_code"] = { value: "9965", confidence: 0.75 };
+      }
+      // Advertising / media → SAC 998361
+      else if (/advertis|marketing|media.agency|pr.agency|promotion/.test(vendorForSac)) {
+        parsed["hsn_sac_code"] = { value: "998361", confidence: 0.72 };
+      }
+      // Rent / lease → SAC 997212
+      else if (/rent|lease.rent|office.rent|premises/.test(vendorForSac)) {
+        parsed["hsn_sac_code"] = { value: "997212", confidence: 0.75 };
+      }
+    }
+
+    // ----------------------------------------------------------------
+    // ITC ELIGIBILITY — auto-infer for purchase invoices
+    // Blocked categories under CGST Act S.17(5): food, club, health, cab, personal use
+    // Everything else is eligible by default for a registered business
+    // ----------------------------------------------------------------
+    if (documentType === "purchase_invoice" || documentType === "expense") {
+      if (!parsed["itc_eligible"]?.value || (parsed["itc_eligible"].confidence ?? 0) < 0.5) {
+        const vendorForItc = (parsed["vendor_name"]?.value ?? "").toLowerCase();
+        const isBlocked = /\b(restaurant|hotel|club|gym|health.club|cab|uber|ola|beauty|salon|personal|gift|food.delivery|zomato|swiggy)\b/.test(vendorForItc);
+        parsed["itc_eligible"] = isBlocked
+          ? { value: "Blocked", confidence: 0.78 }
+          : { value: "Yes", confidence: 0.80 };
       }
     }
 
