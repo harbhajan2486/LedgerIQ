@@ -79,7 +79,7 @@ export async function GET(
 
   const { data: extractions } = await supabase
     .from("extractions")
-    .select("document_id, field_name, extracted_value")
+    .select("document_id, field_name, extracted_value, status")
     .in("document_id", docIds)
     .in("field_name", [
       "vendor_name", "vendor_gstin", "buyer_gstin", "party_gstin",
@@ -88,7 +88,8 @@ export async function GET(
       "hsn_sac_code", "place_of_supply", "reverse_charge", "itc_eligible",
       "tds_section", "tds_rate", "tds_amount",
     ])
-    .not("status", "eq", "rejected");
+    .not("status", "eq", "rejected")
+    .order("created_at", { ascending: false });
 
   // Build per-doc field map — deduplicate: one value per field per doc.
   // Priority: accepted/corrected (human-verified) over pending, newest first.
