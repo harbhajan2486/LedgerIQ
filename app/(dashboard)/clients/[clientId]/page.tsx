@@ -141,7 +141,7 @@ export default function ClientDetailPage() {
   const [loading, setLoading] = useState(true);
   const [retrying, setRetrying] = useState<string | null>(null);
   const [retagging, setRetagging] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"documents" | "bank" | "reconciliation" | "ledgers">("documents");
+  const [activeTab, setActiveTab] = useState<"documents" | "bank" | "reconciliation" | "ledgers" | "gst">("documents");
   const [docFolder, setDocFolder] = useState<string | null>(null); // active folder filter
   const [bankTxns, setBankTxns] = useState<BankTxn[]>([]);
   const [bankSummary, setBankSummary] = useState<BankSummary | null>(null);
@@ -175,6 +175,33 @@ export default function ClientDetailPage() {
   const [reapplying, setReapplying] = useState(false);
   const [importingLedgers, setImportingLedgers] = useState(false);
   const ledgerImportRef = useRef<HTMLInputElement>(null);
+
+  // GST Filing tab state
+  interface Gstr3b {
+    outward_taxable: { taxable: number; igst: number; cgst: number; sgst: number };
+    itc_available: { igst: number; cgst: number; sgst: number };
+    output_tax: { igst: number; cgst: number; sgst: number };
+    net_payable: { igst: number; cgst: number; sgst: number };
+    total_output: number;
+    total_itc: number;
+    total_net_payable: number;
+    client_name: string;
+    client_gstin: string;
+  }
+  const [gstData, setGstData] = useState<Gstr3b | null>(null);
+  const [gstLoading, setGstLoading] = useState(false);
+  const [gstPeriodFrom, setGstPeriodFrom] = useState(() => {
+    const d = new Date(); d.setDate(1); return d.toISOString().slice(0, 10);
+  });
+  const [gstPeriodTo, setGstPeriodTo] = useState(() => new Date().toISOString().slice(0, 10));
+
+  function loadGstData() {
+    setGstLoading(true);
+    fetch(`/api/v1/clients/${clientId}/gst-filing?from=${gstPeriodFrom}&to=${gstPeriodTo}`)
+      .then((r) => r.json())
+      .then((d) => setGstData(d.gstr3b ?? null))
+      .finally(() => setGstLoading(false));
+  }
 
   function loadData() {
     fetch(`/api/v1/clients/${clientId}`)
@@ -377,6 +404,7 @@ export default function ClientDetailPage() {
   useEffect(() => { if (activeTab === "bank") { loadBankTxns(); loadLedgers(); } }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "reconciliation") loadRecon(); }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "ledgers") loadLedgers(); }, [activeTab, clientId]);
+  useEffect(() => { if (activeTab === "gst") loadGstData(); }, [activeTab, clientId, gstPeriodFrom, gstPeriodTo]);
 
   async function retryExtraction(docId: string, fileName: string) {
     setRetrying(docId);
@@ -484,6 +512,7 @@ export default function ClientDetailPage() {
           { key: "bank", label: "Bank Statements", icon: <Landmark size={14} />, count: bankSummary?.total ?? null },
           { key: "reconciliation", label: "Reconciliation", icon: <Link2 size={14} />, count: reconData?.summary.matched ?? null },
           { key: "ledgers", label: "Ledger Master", icon: <BookOpen size={14} />, count: ledgers.length || null },
+          { key: "gst", label: "GST Filing", icon: <Receipt size={14} />, count: null },
         ] as const).map((tab) => (
           <button
             key={tab.key}
@@ -1225,6 +1254,147 @@ export default function ClientDetailPage() {
               )}
             </CardContent>
           </Card>
+        </div>
+      )}
+
+      {/* ── GST FILING TAB ─────────────────────────────────────────────── */}
+      {activeTab === "gst" && (
+        <div className="space-y-4">
+          {/* Period picker + download */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-gray-500">Period:</label>
+              <input type="date" value={gstPeriodFrom} onChange={(e) => setGstPeriodFrom(e.target.value)}
+                className="text-xs border border-gray-300 rounded px-2 py-1" />
+              <span className="text-xs text-gray-400">to</span>
+              <input type="date" value={gstPeriodTo} onChange={(e) => setGstPeriodTo(e.target.value)}
+                className="text-xs border border-gray-300 rounded px-2 py-1" />
+            </div>
+            <a
+              href={`/api/v1/clients/${clientId}/gst-filing?from=${gstPeriodFrom}&to=${gstPeriodTo}&format=excel`}
+              className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded bg-green-600 text-white hover:bg-green-700"
+            >
+              <Download size={12} /> Download GST Filing Excel (GSTR-1 + 3B)
+            </a>
+          </div>
+
+          {gstLoading ? (
+            <div className="flex items-center gap-2 text-sm text-gray-500 py-8">
+              <Loader2 className="w-4 h-4 animate-spin" /> Loading GST data…
+            </div>
+          ) : !gstData ? (
+            <Card>
+              <CardContent className="py-12 text-center text-gray-400 text-sm">
+                No reviewed invoices found for this period. Upload and review sales/purchase invoices first.
+              </CardContent>
+            </Card>
+          ) : (
+            <>
+              {/* GSTR-3B Pre-filled Numbers */}
+              <div>
+                <div className="flex items-center gap-2 mb-3">
+                  <h2 className="text-base font-semibold text-gray-900">GSTR-3B Filing Numbers</h2>
+                  <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded">Copy these into the GST portal</span>
+                </div>
+                <div className="grid grid-cols-3 gap-4">
+                  {/* Output Tax */}
+                  <Card className="border-blue-200">
+                    <CardHeader className="py-2 px-4 border-b bg-blue-50/50">
+                      <CardTitle className="text-xs font-semibold text-blue-700 uppercase tracking-wide">3.1(a) — Output Tax</CardTitle>
+                    </CardHeader>
+                    <CardContent className="py-3 px-4 space-y-1.5">
+                      {[
+                        { label: "Taxable Value", value: gstData.outward_taxable.taxable },
+                        { label: "Integrated Tax (IGST)", value: gstData.output_tax.igst },
+                        { label: "Central Tax (CGST)", value: gstData.output_tax.cgst },
+                        { label: "State Tax (SGST)", value: gstData.output_tax.sgst },
+                      ].map(({ label, value }) => (
+                        <div key={label} className="flex justify-between text-xs">
+                          <span className="text-gray-500">{label}</span>
+                          <span className="font-mono font-medium text-gray-900">₹{value.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</span>
+                        </div>
+                      ))}
+                      <div className="border-t pt-1.5 flex justify-between text-xs font-semibold">
+                        <span className="text-blue-700">Total Output Tax</span>
+                        <span className="font-mono text-blue-700">₹{gstData.total_output.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</span>
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  {/* ITC Available */}
+                  <Card className="border-green-200">
+                    <CardHeader className="py-2 px-4 border-b bg-green-50/50">
+                      <CardTitle className="text-xs font-semibold text-green-700 uppercase tracking-wide">4(A) — ITC Available</CardTitle>
+                    </CardHeader>
+                    <CardContent className="py-3 px-4 space-y-1.5">
+                      {[
+                        { label: "Integrated Tax (IGST)", value: gstData.itc_available.igst },
+                        { label: "Central Tax (CGST)", value: gstData.itc_available.cgst },
+                        { label: "State Tax (SGST)", value: gstData.itc_available.sgst },
+                      ].map(({ label, value }) => (
+                        <div key={label} className="flex justify-between text-xs">
+                          <span className="text-gray-500">{label}</span>
+                          <span className="font-mono font-medium text-gray-900">₹{value.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</span>
+                        </div>
+                      ))}
+                      <div className="border-t pt-1.5 flex justify-between text-xs font-semibold">
+                        <span className="text-green-700">Total ITC</span>
+                        <span className="font-mono text-green-700">₹{gstData.total_itc.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</span>
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  {/* Net Payable */}
+                  <Card className="border-orange-200 bg-orange-50/20">
+                    <CardHeader className="py-2 px-4 border-b bg-orange-50/50">
+                      <CardTitle className="text-xs font-semibold text-orange-700 uppercase tracking-wide">Net Tax Payable</CardTitle>
+                    </CardHeader>
+                    <CardContent className="py-3 px-4 space-y-1.5">
+                      {[
+                        { label: "IGST Payable", value: gstData.net_payable.igst },
+                        { label: "CGST Payable", value: gstData.net_payable.cgst },
+                        { label: "SGST Payable", value: gstData.net_payable.sgst },
+                      ].map(({ label, value }) => (
+                        <div key={label} className="flex justify-between text-xs">
+                          <span className="text-gray-500">{label}</span>
+                          <span className="font-mono font-medium text-gray-900">₹{value.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</span>
+                        </div>
+                      ))}
+                      <div className="border-t pt-1.5 flex justify-between text-sm font-bold">
+                        <span className="text-orange-700">TOTAL PAYABLE</span>
+                        <span className="font-mono text-orange-700">₹{gstData.total_net_payable.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</span>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+              </div>
+
+              {/* What's in the Excel */}
+              <Card className="border-dashed">
+                <CardContent className="py-4 px-5">
+                  <p className="text-xs font-medium text-gray-600 mb-2">The Excel download contains 6 sheets:</p>
+                  <div className="grid grid-cols-3 gap-2 text-xs text-gray-500">
+                    {[
+                      ["GSTR-3B Summary", "Pre-filled filing numbers for the GST portal"],
+                      ["GSTR-1 B2B", "Invoice-wise list for registered buyers (with GSTIN)"],
+                      ["GSTR-1 B2C Large", "Interstate invoices > ₹2.5L without GSTIN"],
+                      ["GSTR-1 B2C Small", "Aggregated rate-wise totals for small B2C"],
+                      ["HSN Summary", "HSN/SAC-wise summary (GSTR-1 Table 12)"],
+                      ["ITC Register", "Purchase invoices with eligible input tax credit"],
+                    ].map(([title, desc]) => (
+                      <div key={title} className="flex gap-1.5">
+                        <span className="text-green-500 mt-0.5">▸</span>
+                        <div>
+                          <p className="font-medium text-gray-700">{title}</p>
+                          <p className="text-gray-400">{desc}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            </>
+          )}
         </div>
       )}
     </div>
