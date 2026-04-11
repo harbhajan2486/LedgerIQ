@@ -178,7 +178,7 @@ Deno.serve(async (req) => {
         // Check if this pattern is already in the promotion queue
         const { data: existing } = await supabase
           .from("global_rules")
-          .select("id, tenant_count")
+          .select("id, rule_json")
           .eq("layer", 2)
           .eq("rule_type", "correction_pattern")
           .filter("rule_json->>doc_fingerprint", "eq", docFingerprint)
@@ -186,10 +186,17 @@ Deno.serve(async (req) => {
           .single();
 
         if (existing) {
-          // Update tenant count
+          // Update tenant count inside rule_json
           await supabase
             .from("global_rules")
-            .update({ tenant_count: uniqueTenants.size })
+            .update({
+              rule_json: {
+                doc_fingerprint: docFingerprint,
+                field_name: fieldName,
+                correct_value: correctValue,
+                tenant_count: uniqueTenants.size,
+              },
+            })
             .eq("id", existing.id);
         } else {
           // Add to Layer 2 promotion queue (inactive until super-admin approves)
@@ -202,8 +209,7 @@ Deno.serve(async (req) => {
               correct_value: correctValue,
               tenant_count: uniqueTenants.size,
             },
-            tenant_count: uniqueTenants.size,
-            active: false, // super-admin must review and activate
+            is_active: false, // super-admin must review and activate
           });
         }
       }

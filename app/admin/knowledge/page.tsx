@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Loader2, Brain, CheckCircle2, XCircle, Clock, Shield, Users, Building2 } from "lucide-react";
+import { Loader2, Brain, CheckCircle2, XCircle, Clock, Shield, Users, Plus, X } from "lucide-react";
 
 interface PendingRule {
   id: string;
@@ -55,6 +55,10 @@ export default function AdminKnowledgePage() {
   const [approvedCount, setApprovedCount] = useState(0);
   const [rejectedCount, setRejectedCount] = useState(0);
   const [activeTab, setActiveTab] = useState<"layer1" | "layer2" | "layer3">("layer2");
+  const [showAddRule, setShowAddRule] = useState(false);
+  const [addRuleForm, setAddRuleForm] = useState({ rule_type: "tds_section", section: "", description: "", keywords: "", rate: "", threshold: "", source_ref: "" });
+  const [addRuleLoading, setAddRuleLoading] = useState(false);
+  const [addRuleError, setAddRuleError] = useState("");
 
   useEffect(() => {
     Promise.all([
@@ -79,6 +83,35 @@ export default function AdminKnowledgePage() {
       }
     } finally {
       setActioningId(null);
+    }
+  }
+
+  async function addRule() {
+    setAddRuleLoading(true);
+    setAddRuleError("");
+    try {
+      const res = await fetch("/api/v1/admin/knowledge/layer1", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rule_type: addRuleForm.rule_type,
+          section: addRuleForm.section,
+          description: addRuleForm.description,
+          keywords: addRuleForm.keywords,
+          rate: addRuleForm.rate ? parseFloat(addRuleForm.rate) : undefined,
+          threshold: addRuleForm.threshold ? parseFloat(addRuleForm.threshold) : undefined,
+          source_ref: addRuleForm.source_ref,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setAddRuleError(data.error ?? "Failed"); return; }
+      // Refresh layer1
+      const l1 = await fetch("/api/v1/admin/knowledge/layer1").then((r) => r.json());
+      setLayer1(l1.rules ?? []);
+      setShowAddRule(false);
+      setAddRuleForm({ rule_type: "tds_section", section: "", description: "", keywords: "", rate: "", threshold: "", source_ref: "" });
+    } finally {
+      setAddRuleLoading(false);
     }
   }
 
@@ -182,9 +215,113 @@ export default function AdminKnowledgePage() {
           {/* LAYER 1 */}
           {activeTab === "layer1" && (
             <div className="space-y-3">
-              <p className="text-sm text-gray-500">
-                These rules come from Indian tax law (CGST Act, Income Tax Act). They are loaded by the LedgerIQ team and apply to every firm from day one. Only a super-admin can modify them.
-              </p>
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-gray-500">
+                  These rules come from Indian tax law (CGST Act, Income Tax Act). They apply to every firm from day one. Only a super-admin can add or modify them.
+                </p>
+                <button
+                  onClick={() => setShowAddRule(true)}
+                  className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded bg-blue-600 text-white hover:bg-blue-700 shrink-0 ml-4"
+                >
+                  <Plus className="w-3 h-3" /> Add Rule
+                </button>
+              </div>
+
+              {/* Add Rule Modal */}
+              {showAddRule && (
+                <Card className="border-blue-300 bg-blue-50/30">
+                  <CardHeader className="py-3 px-4 border-b flex-row items-center justify-between">
+                    <CardTitle className="text-sm text-blue-700">Add New Global Rule (Layer 1)</CardTitle>
+                    <button onClick={() => setShowAddRule(false)} className="text-gray-400 hover:text-gray-600"><X size={14} /></button>
+                  </CardHeader>
+                  <CardContent className="p-4 space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-xs font-medium text-gray-600 block mb-1">Rule Type</label>
+                        <select
+                          value={addRuleForm.rule_type}
+                          onChange={(e) => setAddRuleForm((f) => ({ ...f, rule_type: e.target.value }))}
+                          className="w-full text-xs border border-gray-300 rounded px-2 py-1.5"
+                        >
+                          <option value="tds_section">TDS Section</option>
+                          <option value="sac_gst_rate">GST Rate (SAC)</option>
+                          <option value="hsn_gst_rate">GST Rate (HSN)</option>
+                          <option value="reverse_charge">Reverse Charge (RCM)</option>
+                          <option value="itc_eligibility">ITC Eligibility</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium text-gray-600 block mb-1">Section / Code *</label>
+                        <input
+                          value={addRuleForm.section}
+                          onChange={(e) => setAddRuleForm((f) => ({ ...f, section: e.target.value }))}
+                          placeholder="e.g. 194J, 9983"
+                          className="w-full text-xs border border-gray-300 rounded px-2 py-1.5"
+                        />
+                      </div>
+                      <div className="col-span-2">
+                        <label className="text-xs font-medium text-gray-600 block mb-1">Description</label>
+                        <input
+                          value={addRuleForm.description}
+                          onChange={(e) => setAddRuleForm((f) => ({ ...f, description: e.target.value }))}
+                          placeholder="e.g. Professional or technical services"
+                          className="w-full text-xs border border-gray-300 rounded px-2 py-1.5"
+                        />
+                      </div>
+                      <div className="col-span-2">
+                        <label className="text-xs font-medium text-gray-600 block mb-1">Keywords (comma-separated)</label>
+                        <input
+                          value={addRuleForm.keywords}
+                          onChange={(e) => setAddRuleForm((f) => ({ ...f, keywords: e.target.value }))}
+                          placeholder="e.g. consultant, advisory, legal, doctor"
+                          className="w-full text-xs border border-gray-300 rounded px-2 py-1.5"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium text-gray-600 block mb-1">Rate (%)</label>
+                        <input
+                          type="number"
+                          value={addRuleForm.rate}
+                          onChange={(e) => setAddRuleForm((f) => ({ ...f, rate: e.target.value }))}
+                          placeholder="e.g. 10"
+                          className="w-full text-xs border border-gray-300 rounded px-2 py-1.5"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium text-gray-600 block mb-1">Threshold (₹)</label>
+                        <input
+                          type="number"
+                          value={addRuleForm.threshold}
+                          onChange={(e) => setAddRuleForm((f) => ({ ...f, threshold: e.target.value }))}
+                          placeholder="e.g. 30000"
+                          className="w-full text-xs border border-gray-300 rounded px-2 py-1.5"
+                        />
+                      </div>
+                      <div className="col-span-2">
+                        <label className="text-xs font-medium text-gray-600 block mb-1">Legal Reference / Source</label>
+                        <input
+                          value={addRuleForm.source_ref}
+                          onChange={(e) => setAddRuleForm((f) => ({ ...f, source_ref: e.target.value }))}
+                          placeholder="e.g. Income Tax Act 1961, Section 194J"
+                          className="w-full text-xs border border-gray-300 rounded px-2 py-1.5"
+                        />
+                      </div>
+                    </div>
+                    {addRuleError && <p className="text-xs text-red-600">{addRuleError}</p>}
+                    <div className="flex items-center gap-2 pt-1">
+                      <button
+                        onClick={addRule}
+                        disabled={addRuleLoading || !addRuleForm.section}
+                        className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+                      >
+                        {addRuleLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                        Add to Global Rules
+                      </button>
+                      <button onClick={() => setShowAddRule(false)} className="text-xs text-gray-500 hover:text-gray-700 px-2">Cancel</button>
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
               {layer1.length === 0 ? (
                 <Card><CardContent className="py-8 text-center text-sm text-gray-400">No Layer 1 rules loaded yet. Run migration 007 in Supabase SQL editor.</CardContent></Card>
               ) : (

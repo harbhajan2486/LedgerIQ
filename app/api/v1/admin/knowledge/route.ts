@@ -19,7 +19,7 @@ export async function GET() {
   // Pending rules = global_rules where is_active = false (awaiting super_admin approval)
   const { data: rules } = await sb
     .from("global_rules")
-    .select("id, rule_type, pattern, action, confidence, source, created_at")
+    .select("id, rule_type, rule_json, pattern, action, confidence, source, created_at")
     .eq("is_active", false)
     .order("created_at", { ascending: false });
 
@@ -28,11 +28,11 @@ export async function GET() {
   const pending = (rules ?? []).map((r) => ({
     id: r.id,
     rule_type: r.rule_type,
-    pattern: r.pattern,
-    action: r.action,
-    confidence: r.confidence,
-    tenant_count: r.source?.tenant_count ?? 10,
-    example_tenants: r.source?.example_tenants ?? [],
+    pattern: r.pattern ?? r.rule_json,
+    action: r.action ?? {},
+    confidence: r.confidence ?? 0.8,
+    tenant_count: (r.rule_json as Record<string, unknown>)?.tenant_count ?? 0,
+    example_tenants: (r.rule_json as Record<string, unknown>)?.example_tenants ?? [],
     created_at: r.created_at,
   }));
 
