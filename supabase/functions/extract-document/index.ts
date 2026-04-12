@@ -836,6 +836,10 @@ Return JSON in this exact format:
             } else if (chapter >= 1 && chapter <= 24) {
               parsed["suggested_ledger"] = { value: "Purchase Account", confidence: 0.65 };
               ledgerReasoning = `HSN ${hsnClean} → Chapter ${chapter} (food & agricultural produce) → Purchase Account`;
+            } else {
+              // Unrecognised goods chapter — generic fallback
+              parsed["suggested_ledger"] = { value: "Purchase Account", confidence: 0.55 };
+              ledgerReasoning = `HSN ${hsnClean} → Chapter ${chapter} → Purchase Account (please verify)`;
             }
           }
         }
