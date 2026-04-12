@@ -287,10 +287,15 @@ export default function ReviewDetailPage() {
   }
 
   // GST mutual exclusivity — compute once here so count and render agree
-  const cgstAmt = parseFloat(extractions.find(e => e.field_name === "cgst_amount")?.extracted_value ?? "0") || 0;
-  const igstAmt = parseFloat(extractions.find(e => e.field_name === "igst_amount")?.extracted_value ?? "0") || 0;
-  const hideIgstFields   = cgstAmt > 0;
-  const hideCgstSgstFields = igstAmt > 0 && cgstAmt === 0;
+  const cgstAmt  = parseFloat(extractions.find(e => e.field_name === "cgst_amount")?.extracted_value ?? "0") || 0;
+  const cgstRate = parseFloat(extractions.find(e => e.field_name === "cgst_rate")?.extracted_value  ?? "0") || 0;
+  const igstAmt  = parseFloat(extractions.find(e => e.field_name === "igst_amount")?.extracted_value ?? "0") || 0;
+  const igstRate = parseFloat(extractions.find(e => e.field_name === "igst_rate")?.extracted_value  ?? "0") || 0;
+  // Inter-state if IGST amount OR rate is present and CGST is absent
+  const hasIgst  = igstAmt > 0 || igstRate > 0;
+  const hasCgst  = cgstAmt > 0 || cgstRate > 0;
+  const hideIgstFields     = hasCgst;
+  const hideCgstSgstFields = hasIgst && !hasCgst;
   const hiddenGstFields = hideIgstFields
     ? ["igst_rate", "igst_amount"]
     : hideCgstSgstFields ? ["cgst_rate", "cgst_amount", "sgst_rate", "sgst_amount"] : [];
