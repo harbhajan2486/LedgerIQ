@@ -656,6 +656,19 @@ Return JSON in this exact format:
       }
     }
 
+    // HSN-based TDS inference: goods purchases (non-SAC HSN codes) are generally
+    // exempt from TDS. TDS u/s 194Q applies only if buyer's annual turnover > ₹10 Cr
+    // AND purchases from the same vendor exceed ₹50L/year — rare for most clients.
+    if (!parsed["tds_section"]?.value || (parsed["tds_section"].confidence ?? 0) < 0.6) {
+      const hsnForTds = (parsed["hsn_sac_code"]?.value ?? "").replace(/[\s-]/g, "");
+      if (hsnForTds && !hsnForTds.startsWith("99")) {
+        const ch = parseInt(hsnForTds.substring(0, 2), 10);
+        parsed["tds_section"] = { value: "No TDS", confidence: 0.82 };
+        parsed["tds_rate"]    = { value: "0",       confidence: 0.82 };
+        tdsReasoning = `No TDS: goods purchase (HSN ${hsnForTds}, Chapter ${ch}) — TDS u/s 194Q applies only if buyer turnover > ₹10 Cr`;
+      }
+    }
+
     // ----------------------------------------------------------------
     // TAXABLE VALUE — back-calculate from GST if AI left it blank
     // MakeMyTrip-style invoices show "Base Fare" not "Taxable Value"
