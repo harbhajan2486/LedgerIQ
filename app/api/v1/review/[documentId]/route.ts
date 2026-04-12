@@ -56,32 +56,16 @@ export async function GET(
     .from("documents")
     .createSignedUrl(doc.storage_path, 900);
 
-  // Misclassification check: if vendor_name ≈ client's own name on a purchase invoice
-  // GSTIN-first: if vendor_gstin is present, use it to disambiguate definitively.
-  // Only fall back to name-matching when vendor_gstin is absent.
-  // Third-party category guard: hotels, airlines, telecom etc. can never be the client's own firm.
-  const THIRD_PARTY_VENDOR = /\b(hotel|inn|resort|lodge|hospitality|suites|palace|grand|haveli|inn|makemytrip|cleartrip|yatra|goibibo|irctc|airline|indigo|spicejet|air.india|vistara|goair|uber|ola|rapido|taxi|cab|petrol|fuel|electricity|telecom|mobile|broadband|internet|jio|airtel|bsnl|vodafone|insurance|clinic|hospital|pharmacy)\b/i;
-
+  // Misclassification check: vendor GSTIN = client's own GSTIN → purchase invoice is in wrong folder
+  // Only GSTIN equality is a reliable signal. Name-based heuristics produce false positives.
   let possibleMisclassification = false;
   if (doc.client_id && doc.document_type === "purchase_invoice") {
     const { data: clientRecord } = await supabase
-      .from("clients").select("client_name, gstin").eq("id", doc.client_id).single();
-    const vendorName = (extractions.find(e => e.field_name === "vendor_name")?.extracted_value ?? "").toLowerCase();
+      .from("clients").select("gstin").eq("id", doc.client_id).single();
     const vendorGstin = (extractions.find(e => e.field_name === "vendor_gstin")?.extracted_value ?? "").trim().toUpperCase();
     const clientGstin = (clientRecord?.gstin ?? "").trim().toUpperCase();
-    const clientName = (clientRecord?.client_name ?? "").toLowerCase();
-
-    // If vendor name is clearly a third-party category, skip entirely
-    if (!THIRD_PARTY_VENDOR.test(vendorName)) {
-      if (vendorGstin && clientGstin) {
-        // Definitive: vendor GSTIN matches client's own GSTIN → it IS the client
-        possibleMisclassification = vendorGstin === clientGstin;
-      } else if (!vendorGstin && vendorName && clientName) {
-        // No GSTIN — fall back to name-word overlap
-        const clientWords = clientName.split(/\s+/).filter((w: string) => w.length > 3);
-        possibleMisclassification = clientWords.some((word: string) => vendorName.includes(word));
-      }
-      // vendorGstin present but ≠ clientGstin → definitely different entity, never flag
+    if (vendorGstin && clientGstin) {
+      possibleMisclassification = vendorGstin === clientGstin;
     }
   }
 

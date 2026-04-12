@@ -69,45 +69,21 @@ export async function GET(
       }
     }
 
-    // Misclassification detection: flag purchase invoices where vendor IS the client.
-    // GSTIN-first: if vendor_gstin matches client's own GSTIN → definitive flag.
-    // Fall back to name-word overlap only when vendor_gstin is absent.
-    // Third-party guard: hotels, airlines, telecom etc. can never be the client's own firm.
-    const THIRD_PARTY_VENDOR = /\b(hotel|inn|resort|lodge|hospitality|suites|palace|grand|haveli|makemytrip|cleartrip|yatra|goibibo|irctc|airline|indigo|spicejet|air.india|vistara|goair|uber|ola|rapido|taxi|cab|petrol|fuel|electricity|telecom|mobile|broadband|internet|jio|airtel|bsnl|vodafone|insurance|clinic|hospital|pharmacy)\b/i;
-
+    // Misclassification detection: vendor GSTIN = client's own GSTIN → wrong folder.
+    // Only GSTIN equality is a reliable signal — name heuristics produce false positives.
     const purchaseDocIds = (documents ?? [])
       .filter((d) => d.document_type === "purchase_invoice")
       .map((d) => d.id);
     const mismatchSet = new Set<string>();
-    if (purchaseDocIds.length > 0) {
-      const { data: vendorExts } = await supabase
-        .from("extractions").select("document_id, extracted_value")
-        .in("document_id", purchaseDocIds).eq("field_name", "vendor_name")
-        .not("status", "eq", "rejected").not("extracted_value", "is", null);
+    if (purchaseDocIds.length > 0 && client.gstin) {
+      const clientGstin = client.gstin.trim().toUpperCase();
       const { data: gstinExts } = await supabase
         .from("extractions").select("document_id, extracted_value")
         .in("document_id", purchaseDocIds).eq("field_name", "vendor_gstin")
         .not("status", "eq", "rejected").not("extracted_value", "is", null);
-
-      // Build a map: document_id → vendor_gstin
-      const vendorGstinMap: Record<string, string> = {};
       for (const ext of gstinExts ?? []) {
-        vendorGstinMap[ext.document_id] = (ext.extracted_value ?? "").trim().toUpperCase();
-      }
-      const clientGstin = (client.gstin ?? "").trim().toUpperCase();
-      const clientWords = client.client_name.toLowerCase().split(/\s+/).filter((w: string) => w.length > 3);
-
-      for (const ext of vendorExts ?? []) {
-        const v = (ext.extracted_value ?? "").toLowerCase();
-        // Skip if vendor name is clearly a third-party category
-        if (THIRD_PARTY_VENDOR.test(v)) continue;
-
-        const vendorGstin = vendorGstinMap[ext.document_id] ?? "";
-        if (vendorGstin && clientGstin) {
-          if (vendorGstin === clientGstin) mismatchSet.add(ext.document_id);
-        } else if (!vendorGstin) {
-          if (clientWords.some((word: string) => v.includes(word))) mismatchSet.add(ext.document_id);
-        }
+        const vendorGstin = (ext.extracted_value ?? "").trim().toUpperCase();
+        if (vendorGstin && vendorGstin === clientGstin) mismatchSet.add(ext.document_id);
       }
     }
 
