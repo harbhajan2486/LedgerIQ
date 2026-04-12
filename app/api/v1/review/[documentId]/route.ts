@@ -59,6 +59,9 @@ export async function GET(
   // Misclassification check: if vendor_name ≈ client's own name on a purchase invoice
   // GSTIN-first: if vendor_gstin is present, use it to disambiguate definitively.
   // Only fall back to name-matching when vendor_gstin is absent.
+  // Third-party category guard: hotels, airlines, telecom etc. can never be the client's own firm.
+  const THIRD_PARTY_VENDOR = /\b(hotel|inn|resort|lodge|hospitality|suites|palace|grand|haveli|inn|makemytrip|cleartrip|yatra|goibibo|irctc|airline|indigo|spicejet|air.india|vistara|goair|uber|ola|rapido|taxi|cab|petrol|fuel|electricity|telecom|mobile|broadband|internet|jio|airtel|bsnl|vodafone|insurance|clinic|hospital|pharmacy)\b/i;
+
   let possibleMisclassification = false;
   if (doc.client_id && doc.document_type === "purchase_invoice") {
     const { data: clientRecord } = await supabase
@@ -68,15 +71,18 @@ export async function GET(
     const clientGstin = (clientRecord?.gstin ?? "").trim().toUpperCase();
     const clientName = (clientRecord?.client_name ?? "").toLowerCase();
 
-    if (vendorGstin && clientGstin) {
-      // Definitive check: vendor GSTIN matches client's own GSTIN → it IS the client
-      possibleMisclassification = vendorGstin === clientGstin;
-    } else if (!vendorGstin && vendorName && clientName) {
-      // No GSTIN available — fall back to name-word overlap (uncertain)
-      const clientWords = clientName.split(/\s+/).filter((w: string) => w.length > 3);
-      possibleMisclassification = clientWords.some((word: string) => vendorName.includes(word));
+    // If vendor name is clearly a third-party category, skip entirely
+    if (!THIRD_PARTY_VENDOR.test(vendorName)) {
+      if (vendorGstin && clientGstin) {
+        // Definitive: vendor GSTIN matches client's own GSTIN → it IS the client
+        possibleMisclassification = vendorGstin === clientGstin;
+      } else if (!vendorGstin && vendorName && clientName) {
+        // No GSTIN — fall back to name-word overlap
+        const clientWords = clientName.split(/\s+/).filter((w: string) => w.length > 3);
+        possibleMisclassification = clientWords.some((word: string) => vendorName.includes(word));
+      }
+      // vendorGstin present but ≠ clientGstin → definitely different entity, never flag
     }
-    // If vendorGstin present but ≠ clientGstin → definitely a different entity, never flag
   }
 
   // Duplicate invoice detection: same invoice_number + vendor_name in another document for same client

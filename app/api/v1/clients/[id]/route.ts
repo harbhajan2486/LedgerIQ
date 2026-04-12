@@ -72,6 +72,9 @@ export async function GET(
     // Misclassification detection: flag purchase invoices where vendor IS the client.
     // GSTIN-first: if vendor_gstin matches client's own GSTIN → definitive flag.
     // Fall back to name-word overlap only when vendor_gstin is absent.
+    // Third-party guard: hotels, airlines, telecom etc. can never be the client's own firm.
+    const THIRD_PARTY_VENDOR = /\b(hotel|inn|resort|lodge|hospitality|suites|palace|grand|haveli|makemytrip|cleartrip|yatra|goibibo|irctc|airline|indigo|spicejet|air.india|vistara|goair|uber|ola|rapido|taxi|cab|petrol|fuel|electricity|telecom|mobile|broadband|internet|jio|airtel|bsnl|vodafone|insurance|clinic|hospital|pharmacy)\b/i;
+
     const purchaseDocIds = (documents ?? [])
       .filter((d) => d.document_type === "purchase_invoice")
       .map((d) => d.id);
@@ -95,14 +98,14 @@ export async function GET(
       const clientWords = client.client_name.toLowerCase().split(/\s+/).filter((w: string) => w.length > 3);
 
       for (const ext of vendorExts ?? []) {
+        const v = (ext.extracted_value ?? "").toLowerCase();
+        // Skip if vendor name is clearly a third-party category
+        if (THIRD_PARTY_VENDOR.test(v)) continue;
+
         const vendorGstin = vendorGstinMap[ext.document_id] ?? "";
         if (vendorGstin && clientGstin) {
-          // Definitive: vendor GSTIN matches client's own GSTIN
           if (vendorGstin === clientGstin) mismatchSet.add(ext.document_id);
-          // If present but different → not a mismatch, skip
         } else if (!vendorGstin) {
-          // No GSTIN — fall back to name-word overlap
-          const v = (ext.extracted_value ?? "").toLowerCase();
           if (clientWords.some((word: string) => v.includes(word))) mismatchSet.add(ext.document_id);
         }
       }
