@@ -658,18 +658,36 @@ Return JSON in this exact format:
     // ----------------------------------------------------------------
     // TAXABLE VALUE — back-calculate from GST if AI left it blank
     // MakeMyTrip-style invoices show "Base Fare" not "Taxable Value"
+    // Three tiers of fallback in decreasing precision:
+    //   1. igst_amount ÷ igst_rate  (exact — amount and rate both known)
+    //   2. cgst_amount ÷ cgst_rate  (exact — intra-state equivalent)
+    //   3. total_amount ÷ (1 + rate) (derived — only rate and total known)
     // ----------------------------------------------------------------
     if (!parsed["taxable_value"]?.value || (parsed["taxable_value"].confidence ?? 0) < 0.4) {
-      const igstAmt2  = parseFloat(parsed["igst_amount"]?.value ?? "0") || 0;
-      const igstRate2 = parseFloat(parsed["igst_rate"]?.value  ?? "0") || 0;
-      const cgstAmt2  = parseFloat(parsed["cgst_amount"]?.value ?? "0") || 0;
-      const cgstRate2 = parseFloat(parsed["cgst_rate"]?.value  ?? "0") || 0;
+      const igstAmt2  = parseFloat(parsed["igst_amount"]?.value  ?? "0") || 0;
+      const igstRate2 = parseFloat(parsed["igst_rate"]?.value    ?? "0") || 0;
+      const cgstAmt2  = parseFloat(parsed["cgst_amount"]?.value  ?? "0") || 0;
+      const cgstRate2 = parseFloat(parsed["cgst_rate"]?.value    ?? "0") || 0;
+      const totalAmt2 = parseFloat(parsed["total_amount"]?.value ?? "0") || 0;
+
       if (igstAmt2 > 0 && igstRate2 > 0) {
-        const tv = (igstAmt2 / (igstRate2 / 100)).toFixed(2);
-        parsed["taxable_value"] = { value: tv, confidence: 0.82 };
+        // Tier 1a: taxable = igst_amount ÷ rate
+        parsed["taxable_value"] = { value: (igstAmt2 / (igstRate2 / 100)).toFixed(2), confidence: 0.88 };
       } else if (cgstAmt2 > 0 && cgstRate2 > 0) {
-        const tv = (cgstAmt2 / (cgstRate2 / 100)).toFixed(2);
-        parsed["taxable_value"] = { value: tv, confidence: 0.82 };
+        // Tier 1b: taxable = cgst_amount ÷ cgst_rate (CGST is half total GST)
+        parsed["taxable_value"] = { value: (cgstAmt2 / (cgstRate2 / 100)).toFixed(2), confidence: 0.88 };
+      } else if (totalAmt2 > 0 && igstRate2 > 0) {
+        // Tier 2a: total = taxable × (1 + rate/100)  →  taxable = total ÷ (1 + rate/100)
+        const tv = totalAmt2 / (1 + igstRate2 / 100);
+        parsed["taxable_value"] = { value: tv.toFixed(2), confidence: 0.78 };
+        // Also derive igst_amount since we have both pieces now
+        if (!parsed["igst_amount"]?.value) {
+          parsed["igst_amount"] = { value: (totalAmt2 - tv).toFixed(2), confidence: 0.78 };
+        }
+      } else if (totalAmt2 > 0 && cgstRate2 > 0) {
+        // Tier 2b: intra-state — total = taxable × (1 + 2×cgst_rate/100)
+        const tv = totalAmt2 / (1 + 2 * cgstRate2 / 100);
+        parsed["taxable_value"] = { value: tv.toFixed(2), confidence: 0.78 };
       }
     }
 
