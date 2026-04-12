@@ -656,15 +656,45 @@ Return JSON in this exact format:
       }
     }
 
-    // HSN-based TDS inference: goods purchases (non-SAC HSN codes) are generally
-    // exempt from TDS. TDS u/s 194Q applies only if buyer's annual turnover > ₹10 Cr
-    // AND purchases from the same vendor exceed ₹50L/year — rare for most clients.
-    if (!parsed["tds_section"]?.value || (parsed["tds_section"].confidence ?? 0) < 0.6) {
-      const hsnForTds = (parsed["hsn_sac_code"]?.value ?? "").replace(/[\s-]/g, "");
-      if (hsnForTds && !hsnForTds.startsWith("99")) {
+    // ── HSN / SAC → TDS (deterministic code-based rules) ───────────────────────
+    // These override keyword rules (confidence 0.78) and AI guesses below 0.9.
+    // Threshold 0.85 deliberately beats keyword rule confidence (0.78) so that
+    // e.g. a transport vendor selling machinery doesn't stay stuck on 194C.
+    const hsnForTds = (parsed["hsn_sac_code"]?.value ?? "").replace(/[\s-]/g, "");
+    if (hsnForTds && (!parsed["tds_section"]?.value || (parsed["tds_section"].confidence ?? 0) < 0.85)) {
+
+      if (hsnForTds.startsWith("99")) {
+        // ── SAC codes (services) → deterministic TDS section ──────────────────
+        // Lookup by 6-digit SAC, fall back to 4-digit
+        interface SacTdsEntry { section: string; rate: string; desc: string }
+        const SAC_TDS_MAP: Record<string, SacTdsEntry> = {
+          "998313": { section: "194C", rate: "2",  desc: "photography / video production" },
+          "998314": { section: "194J", rate: "10", desc: "information technology services" },
+          "998311": { section: "194J", rate: "10", desc: "architectural & engineering services" },
+          "998212": { section: "194J", rate: "10", desc: "legal & accounting services" },
+          "998361": { section: "194C", rate: "2",  desc: "advertising services" },
+          "997212": { section: "194I", rate: "10", desc: "rental of immovable property" },
+          "998522": { section: "194C", rate: "2",  desc: "security guard services" },
+          "9954":   { section: "194C", rate: "2",  desc: "construction services" },
+          "9965":   { section: "194C", rate: "2",  desc: "goods transport (GTA)" },
+          "998536": { section: "194J", rate: "10", desc: "management consulting services" },
+          "998532": { section: "194J", rate: "10", desc: "HR / staffing services" },
+        };
+        const sacEntry = SAC_TDS_MAP[hsnForTds.substring(0, 6)] ?? SAC_TDS_MAP[hsnForTds.substring(0, 4)];
+        if (sacEntry && totalAmountNum >= 30000) {
+          parsed["tds_section"] = { value: sacEntry.section, confidence: 0.85 };
+          parsed["tds_rate"]    = { value: sacEntry.rate,    confidence: 0.85 };
+          tdsReasoning = `SAC ${hsnForTds.substring(0, 6)} (${sacEntry.desc}) → ${sacEntry.section} at ${sacEntry.rate}%`;
+        }
+
+      } else {
+        // ── Goods HSN codes → No TDS ───────────────────────────────────────────
+        // Goods purchases are exempt from TDS for most businesses.
+        // TDS u/s 194Q applies only if buyer's annual turnover > ₹10 Cr AND
+        // purchases from the same vendor > ₹50L/year — rare for most clients.
         const ch = parseInt(hsnForTds.substring(0, 2), 10);
-        parsed["tds_section"] = { value: "No TDS", confidence: 0.82 };
-        parsed["tds_rate"]    = { value: "0",       confidence: 0.82 };
+        parsed["tds_section"] = { value: "No TDS", confidence: 0.85 };
+        parsed["tds_rate"]    = { value: "0",       confidence: 0.85 };
         tdsReasoning = `No TDS: goods purchase (HSN ${hsnForTds}, Chapter ${ch}) — TDS u/s 194Q applies only if buyer turnover > ₹10 Cr`;
       }
     }
