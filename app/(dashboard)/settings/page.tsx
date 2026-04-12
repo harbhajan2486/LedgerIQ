@@ -37,7 +37,7 @@ interface TeamMember {
   created_at: string;
 }
 
-type Tab = "team" | "tally" | "subscription";
+type Tab = "team" | "tally" | "coa" | "subscription";
 
 export default function SettingsPage() {
   const supabase = createClient();
@@ -227,9 +227,10 @@ export default function SettingsPage() {
   }
 
   const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
-    { id: "team", label: "Team", icon: <Users className="w-4 h-4" /> },
-    { id: "tally", label: "Tally & Ledgers", icon: <Plug className="w-4 h-4" /> },
-    { id: "subscription", label: "Subscription", icon: <CreditCard className="w-4 h-4" /> },
+    { id: "team",         label: "Team",              icon: <Users className="w-4 h-4" /> },
+    { id: "tally",        label: "Tally & Ledgers",   icon: <Plug className="w-4 h-4" /> },
+    { id: "coa",          label: "Chart of Accounts", icon: <BookOpen className="w-4 h-4" /> },
+    { id: "subscription", label: "Subscription",      icon: <CreditCard className="w-4 h-4" /> },
   ];
 
   return (
@@ -499,6 +500,47 @@ export default function SettingsPage() {
                   )}
                 </div>
               </form>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* ======================== CHART OF ACCOUNTS TAB ======================== */}
+      {activeTab === "coa" && (
+        <div className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Standard Chart of Accounts</CardTitle>
+              <p className="text-sm text-gray-500 mt-1">
+                Define your firm&apos;s standard ledger names. The AI will match its suggestions to these names first,
+                ensuring consistent naming across all clients and invoices.
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {[
+                { category: "Purchase & Expense", accounts: ["Purchase Account","Professional Fees","Rent","Travelling Expenses","Electricity Expenses","Telephone / Internet Expenses","Printing & Stationery","Repair & Maintenance","Staff Welfare Expenses","Advertising & Marketing","Petrol / Vehicle Expenses","Insurance Expenses","Computer / IT Expenses","Bank Charges","Miscellaneous Expenses"] },
+                { category: "Capital Accounts",   accounts: ["Plant & Machinery","Furniture & Fixtures","Electrical Equipment","Vehicle Expenses","Tools & Equipment","Lab / Scientific Equipment"] },
+                { category: "GST Ledgers",        accounts: ["Input CGST","Input SGST","Input IGST","Output CGST","Output SGST","Output IGST"] },
+                { category: "TDS Ledgers",        accounts: ["TDS Payable","TDS Receivable"] },
+                { category: "Parties",            accounts: ["Sundry Creditors","Sundry Debtors"] },
+                { category: "Sales",              accounts: ["Sales Account"] },
+              ].map((group) => (
+                <div key={group.category}>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">{group.category}</p>
+                  <div className="flex flex-wrap gap-2">
+                    {group.accounts.map((acct) => (
+                      <span key={acct} className="text-xs px-2.5 py-1 rounded-full bg-gray-100 text-gray-700 border border-gray-200">
+                        {acct}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              <div className="mt-4 p-3 rounded-lg bg-blue-50 border border-blue-100 text-xs text-blue-700">
+                <strong>How this works:</strong> When AI suggests a ledger (e.g. &quot;Travelling Expenses&quot;), it checks
+                your Tally master first, then falls back to these standard names. To customise ledger names for a
+                specific client, go to that client&apos;s <strong>Ledgers</strong> tab and import your Tally master.
+              </div>
             </CardContent>
           </Card>
         </div>

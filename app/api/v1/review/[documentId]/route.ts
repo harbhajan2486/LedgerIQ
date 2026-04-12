@@ -69,10 +69,56 @@ export async function GET(
     }
   }
 
+  // Duplicate invoice detection: same invoice_number + vendor_name in another document for same client
+  let possibleDuplicate = false;
+  let duplicateDocId: string | null = null;
+  if (doc.client_id) {
+    const invoiceNumber = extractions.find(e => e.field_name === "invoice_number")?.extracted_value;
+    const vendorNameRaw = extractions.find(e => e.field_name === "vendor_name")?.extracted_value;
+    if (invoiceNumber && vendorNameRaw) {
+      // Find other documents for same client with same invoice number
+      const { data: otherDocs } = await supabase
+        .from("documents")
+        .select("id")
+        .eq("client_id", doc.client_id)
+        .neq("id", documentId)
+        .in("status", ["review_required", "reviewed", "reconciled", "posted"]);
+      const otherDocIds = (otherDocs ?? []).map((d: { id: string }) => d.id);
+      if (otherDocIds.length > 0) {
+        const { data: dupCheck } = await supabase
+          .from("extractions")
+          .select("document_id")
+          .in("document_id", otherDocIds)
+          .eq("field_name", "invoice_number")
+          .eq("extracted_value", invoiceNumber)
+          .not("status", "eq", "rejected")
+          .limit(1)
+          .maybeSingle();
+        if (dupCheck) {
+          // Verify vendor also matches
+          const { data: vendorCheck } = await supabase
+            .from("extractions")
+            .select("document_id")
+            .eq("document_id", dupCheck.document_id)
+            .eq("field_name", "vendor_name")
+            .ilike("extracted_value", `%${vendorNameRaw.split(" ")[0]}%`)
+            .not("status", "eq", "rejected")
+            .maybeSingle();
+          if (vendorCheck) {
+            possibleDuplicate = true;
+            duplicateDocId = dupCheck.document_id;
+          }
+        }
+      }
+    }
+  }
+
   return NextResponse.json({
     document: { ...doc, signedUrl: signedUrl?.signedUrl },
     extractions,
     possibleMisclassification,
+    possibleDuplicate,
+    duplicateDocId,
   });
   } catch (err) {
     console.error("[review/document] Unhandled error:", err);

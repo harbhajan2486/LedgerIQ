@@ -95,12 +95,52 @@ export async function GET(
 
   const summary = Object.values(aggregated).sort((a, b) => b.tdsAmount - a.tdsAmount);
 
+  // TDS payable running balance: amount deposited to govt (from tally_postings with TDS vouchers)
+  const { data: tdsPostings } = await supabase
+    .from("tally_postings")
+    .select("voucher_xml, posted_at")
+    .eq("tenant_id", profile.tenant_id)
+    .eq("status", "success")
+    .not("posted_at", "is", null);
+
+  // Simple heuristic: count postings for documents in our set as "deposited"
+  let totalDeposited = 0;
+  const postedDocIds = new Set(
+    (tdsPostings ?? []).map(() => "").filter(Boolean)
+  );
+  // A proper implementation would track TDS payment vouchers separately.
+  // For now, sum TDS from documents that have been posted to Tally.
+  const { data: postedExtractions } = await supabase
+    .from("tally_postings")
+    .select("document_id")
+    .eq("tenant_id", profile.tenant_id)
+    .eq("status", "success")
+    .in("document_id", docIds);
+
+  const postedSet = new Set((postedExtractions ?? []).map((p: { document_id: string }) => p.document_id));
+  for (const doc of docs) {
+    const f = fieldMap[doc.id] ?? {};
+    if (!f.tds_section || f.tds_section === "No TDS") continue;
+    if (postedSet.has(doc.id)) {
+      const extractedTds = parseFloat(f.tds_amount ?? "0") || 0;
+      const payment = parseFloat(f.taxable_value ?? f.total_amount ?? "0") || 0;
+      const rate = parseFloat(f.tds_rate ?? "0") || 0;
+      totalDeposited += extractedTds > 0 ? extractedTds : (payment * rate / 100);
+    }
+  }
+  const totalTdsDeducted = summary.reduce((s, r) => s + r.tdsAmount, 0);
+
   // Return JSON for API use
   if (url.searchParams.get("format") !== "excel") {
     return NextResponse.json({
       summary,
-      total_tds: summary.reduce((s, r) => s + r.tdsAmount, 0),
+      total_tds: totalTdsDeducted,
       total_payment: summary.reduce((s, r) => s + r.totalPayment, 0),
+      tds_payable: {
+        deducted: totalTdsDeducted,
+        deposited: totalDeposited,
+        outstanding: Math.max(0, totalTdsDeducted - totalDeposited),
+      },
     });
   }
 

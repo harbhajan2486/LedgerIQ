@@ -99,7 +99,7 @@ export async function POST(request: NextRequest) {
   for (const ext of extractions ?? []) fields[ext.field_name] = ext.extracted_value;
 
   // Build invoice fields
-  const invoiceFields = {
+  let invoiceFields = {
     vendor_name: fields.vendor_name ?? "Unknown Vendor",
     invoice_number: fields.invoice_number ?? null,
     invoice_date: fields.invoice_date ?? null,
@@ -112,8 +112,28 @@ export async function POST(request: NextRequest) {
     tds_section: fields.tds_section ?? null,
   };
 
-  // Generate XML
+  // Look up bank reconciliation narration for this document
+  let bankNarration: string | null = null;
+  const { data: reconRow } = await supabase
+    .from("reconciliations")
+    .select("bank_transaction_id")
+    .eq("document_id", documentId)
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  if (reconRow?.bank_transaction_id) {
+    const { data: bankTxn } = await supabase
+      .from("bank_transactions")
+      .select("narration")
+      .eq("id", reconRow.bank_transaction_id)
+      .maybeSingle();
+    bankNarration = bankTxn?.narration ?? null;
+  }
+
+  // Generate XML — include bank narration if available
+  const baseNarration = `Purchase invoice ${invoiceFields.invoice_number ?? ""} from ${invoiceFields.vendor_name}`;
+  if (bankNarration) invoiceFields = { ...invoiceFields, _narration: `${baseNarration} | Bank: ${bankNarration}` } as typeof invoiceFields & { _narration: string };
   const voucherParams = buildPurchaseVoucher(invoiceFields, ledgerMap as unknown as Parameters<typeof buildPurchaseVoucher>[1], tenant.tally_company_name ?? undefined);
+  if (bankNarration) voucherParams.narration = `${baseNarration} | Bank: ${bankNarration}`;
   const xml = generateVoucherXml(voucherParams);
 
   // Create a pending tally_postings record first (for idempotency)

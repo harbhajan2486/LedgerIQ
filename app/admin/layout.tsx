@@ -1,12 +1,13 @@
 import AdminGuard from "./AdminGuard";
 import Link from "next/link";
-import { LayoutDashboard, Building2, BarChart3, Brain, DollarSign, LogOut } from "lucide-react";
+import { LayoutDashboard, Building2, BarChart3, Brain, DollarSign, LogOut, SlidersHorizontal } from "lucide-react";
 
 const navItems = [
   { href: "/admin/tenants",   label: "Firms",         icon: Building2 },
   { href: "/admin/usage",     label: "Usage",         icon: BarChart3 },
   { href: "/admin/costs",     label: "AI Costs",      icon: DollarSign },
   { href: "/admin/knowledge", label: "Knowledge",     icon: Brain },
+  { href: "/admin/ai-config", label: "AI Config",     icon: SlidersHorizontal },
 ];
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {

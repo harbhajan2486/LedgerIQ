@@ -24,6 +24,9 @@ export async function GET(
     if (!profile?.tenant_id) return NextResponse.json({ error: "No tenant" }, { status: 400 });
 
     const { id } = await params;
+    const urlParams = new URL(_request.url).searchParams;
+    const fromDate = urlParams.get("from");
+    const toDate   = urlParams.get("to");
 
     const { data: client, error: clientError } = await supabase
       .from("clients")
@@ -36,13 +39,16 @@ export async function GET(
       return NextResponse.json({ error: "Client not found" }, { status: 404 });
     }
 
-    const { data: documents } = await supabase
+    let docQuery = supabase
       .from("documents")
       .select("id, original_filename, document_type, status, uploaded_at, processed_at, ai_model_used")
       .eq("client_id", id)
       .eq("tenant_id", profile.tenant_id)
       .order("uploaded_at", { ascending: false })
-      .limit(50);
+      .limit(200);
+    if (fromDate) docQuery = docQuery.gte("uploaded_at", fromDate);
+    if (toDate)   docQuery = docQuery.lte("uploaded_at", toDate + "T23:59:59");
+    const { data: documents } = await docQuery;
 
     // Per-doc confidence breakdown: high (≥0.8), medium (0.5–0.8), low (<0.5)
     const docIds = (documents ?? []).map((d) => d.id);

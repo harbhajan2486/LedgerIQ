@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
   CheckCircle2, AlertTriangle, Loader2, ChevronLeft,
-  RotateCcw, Check, AlertCircle
+  RotateCcw, Check, AlertCircle, Eye, Send, Copy
 } from "lucide-react";
 import { buttonVariants } from "@/components/ui/button-variants";
 import Link from "next/link";
@@ -96,7 +96,11 @@ export default function ReviewDetailPage() {
   const [fileError, setFileError] = useState(false);
   const [ledgerOptions, setLedgerOptions] = useState<string[]>([]);
   const [possibleMisclassification, setPossibleMisclassification] = useState(false);
+  const [possibleDuplicate, setPossibleDuplicate] = useState(false);
+  const [duplicateDocId, setDuplicateDocId] = useState<string | null>(null);
   const [reclassifying, setReclassifying] = useState(false);
+  const [showPostPreview, setShowPostPreview] = useState(false);
+  const [posting, setPosting] = useState(false);
   const fieldRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   useEffect(() => {
@@ -105,6 +109,7 @@ export default function ReviewDetailPage() {
       .then((d) => {
         setDocument(d.document);
         if (d.possibleMisclassification) setPossibleMisclassification(true);
+        if (d.possibleDuplicate) { setPossibleDuplicate(true); setDuplicateDocId(d.duplicateDocId ?? null); }
         setExtractions(
           (d.extractions ?? []).map((e: Extraction) => ({
             ...e,
@@ -259,6 +264,28 @@ export default function ReviewDetailPage() {
     }
   }
 
+  async function postToTally() {
+    setPosting(true);
+    try {
+      const res = await fetch("/api/v1/tally/post", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ documentId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error ?? "Tally post failed");
+      } else if (data.success) {
+        toast.success("Posted to Tally successfully.");
+        setShowPostPreview(false);
+      } else {
+        toast.error(data.error ?? "Tally post failed");
+      }
+    } finally {
+      setPosting(false);
+    }
+  }
+
   // GST mutual exclusivity — compute once here so count and render agree
   const cgstAmt = parseFloat(extractions.find(e => e.field_name === "cgst_amount")?.extracted_value ?? "0") || 0;
   const igstAmt = parseFloat(extractions.find(e => e.field_name === "igst_amount")?.extracted_value ?? "0") || 0;
@@ -279,6 +306,28 @@ export default function ReviewDetailPage() {
   const lowConfCount      = reviewableExtractions.filter((e) => e.confidence < 0.5 && e.extracted_value).length;
   const highConfidenceCount = reviewableExtractions.filter((e) => e.confidence >= 0.8 && e.status === "pending").length;
   const allDone = pendingCount === 0;
+
+  // Journal entry preview — compute Dr/Cr lines from extractions
+  function getVal(field: string) { return extractions.find(e => e.field_name === field)?.extracted_value ?? null; }
+  function getNum(field: string) { return parseFloat(getVal(field) ?? "0") || 0; }
+  const previewVendorLedger = getVal("vendor_name") ?? "Sundry Creditors";
+  const previewExpenseLedger = getVal("suggested_ledger") ?? "Purchase Account";
+  const previewTaxable  = getNum("taxable_value");
+  const previewCgst     = getNum("cgst_amount");
+  const previewSgst     = getNum("sgst_amount");
+  const previewIgst     = getNum("igst_amount");
+  const previewTds      = getNum("tds_amount");
+  const previewTdsSection = getVal("tds_section");
+  const previewTotal    = getNum("total_amount");
+  const previewVendorCredit = previewTotal - previewTds;
+  const journalLines: { side: "Dr" | "Cr"; ledger: string; amount: number; note?: string }[] = [
+    { side: "Dr", ledger: previewExpenseLedger, amount: previewTaxable },
+    ...(previewCgst > 0 ? [{ side: "Dr" as const, ledger: "Input CGST", amount: previewCgst }] : []),
+    ...(previewSgst > 0 ? [{ side: "Dr" as const, ledger: "Input SGST", amount: previewSgst }] : []),
+    ...(previewIgst > 0 ? [{ side: "Dr" as const, ledger: "Input IGST", amount: previewIgst }] : []),
+    { side: "Cr", ledger: previewVendorLedger, amount: previewVendorCredit, note: "Sundry Creditor" },
+    ...(previewTds > 0 ? [{ side: "Cr" as const, ledger: `TDS Payable (${previewTdsSection ?? "TDS"})`, amount: previewTds, note: "TDS Payable Liability" }] : []),
+  ];
 
   if (loading) return (
     <div className="flex items-center justify-center py-24">
@@ -366,6 +415,14 @@ export default function ReviewDetailPage() {
               {pendingCount > 0 ? `${pendingCount} field${pendingCount > 1 ? "s" : ""} need review` : "Mark as reviewed"}
             </button>
           )}
+          {allDone && !isReadonly && (
+            <button
+              onClick={() => setShowPostPreview(true)}
+              className={buttonVariants({ variant: "outline" }) + " text-purple-700 border-purple-300 hover:bg-purple-50"}
+            >
+              <Eye size={14} className="mr-2" /> Preview & Post to Tally
+            </button>
+          )}
         </div>
       </div>
 
@@ -408,6 +465,22 @@ export default function ReviewDetailPage() {
 
         {/* Right — extracted fields grouped */}
         <div className="overflow-y-auto space-y-3 pr-1">
+          {/* Duplicate invoice warning */}
+          {possibleDuplicate && (
+            <div className="flex items-start gap-3 px-3 py-2.5 rounded-lg border border-red-300 bg-red-50 text-sm">
+              <span className="text-red-500 mt-0.5 flex-shrink-0">⚠</span>
+              <div className="flex-1">
+                <p className="font-medium text-red-800">Possible duplicate invoice</p>
+                <p className="text-red-700 text-xs mt-0.5">Same invoice number and vendor already exists for this client. Verify before marking reviewed to avoid double-booking.</p>
+              </div>
+              {duplicateDocId && (
+                <a href={`/review/${duplicateDocId}?readonly=1`} target="_blank"
+                  className="flex-shrink-0 text-xs px-2.5 py-1 rounded bg-red-600 text-white hover:bg-red-700">
+                  View original →
+                </a>
+              )}
+            </div>
+          )}
           {/* Misclassification warning */}
           {possibleMisclassification && (
             <div className="flex items-start gap-3 px-3 py-2.5 rounded-lg border border-amber-300 bg-amber-50 text-sm">
@@ -583,6 +656,68 @@ export default function ReviewDetailPage() {
           )}
         </div>
       </div>
+
+      {/* Journal Entry Preview Modal */}
+      {showPostPreview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4">
+            <div className="px-5 py-4 border-b flex items-center justify-between">
+              <h2 className="text-base font-semibold text-gray-900">Journal Entry Preview</h2>
+              <button onClick={() => setShowPostPreview(false)} className="text-gray-400 hover:text-gray-600">✕</button>
+            </div>
+            <div className="px-5 py-4">
+              <p className="text-xs text-gray-500 mb-3">This is the double-entry that will be posted to Tally. Verify before confirming.</p>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b text-xs text-gray-400 uppercase">
+                    <th className="text-left pb-2 font-medium">Dr / Cr</th>
+                    <th className="text-left pb-2 font-medium">Ledger</th>
+                    <th className="text-right pb-2 font-medium">Amount (₹)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {journalLines.map((line, i) => (
+                    <tr key={i} className="border-b border-gray-50">
+                      <td className={`py-2 pr-3 font-semibold text-xs ${line.side === "Dr" ? "text-blue-700" : "text-green-700"}`}>
+                        {line.side}
+                      </td>
+                      <td className="py-2 pr-3 text-gray-800">
+                        {line.ledger}
+                        {line.note && <span className="ml-1 text-xs text-gray-400">({line.note})</span>}
+                      </td>
+                      <td className="py-2 text-right font-mono text-gray-900">
+                        {line.amount.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr className="text-xs text-gray-400">
+                    <td colSpan={2} className="pt-3 text-right font-medium text-gray-600">Total Dr / Total Cr</td>
+                    <td className="pt-3 text-right font-mono font-semibold text-gray-900">
+                      {journalLines.filter(l => l.side === "Dr").reduce((s, l) => s + l.amount, 0).toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                      {" / "}
+                      {journalLines.filter(l => l.side === "Cr").reduce((s, l) => s + l.amount, 0).toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+              <p className="text-xs text-gray-400 mt-3">Ledger names are taken from Tally mapping in Settings if configured, otherwise defaults above are used.</p>
+            </div>
+            <div className="px-5 py-3 border-t flex items-center justify-end gap-2">
+              <button onClick={() => setShowPostPreview(false)}
+                className={buttonVariants({ variant: "outline" })}>
+                Cancel
+              </button>
+              <button onClick={postToTally} disabled={posting}
+                className={buttonVariants({ variant: "default" }) + " bg-purple-700 hover:bg-purple-800"}>
+                {posting ? <Loader2 size={14} className="mr-2 animate-spin" /> : <Send size={14} className="mr-2" />}
+                Confirm & Post to Tally
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

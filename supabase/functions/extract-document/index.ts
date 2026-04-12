@@ -20,14 +20,52 @@ const anthropic = new Anthropic({ apiKey: Deno.env.get("ANTHROPIC_API_KEY")! });
 // Claude model IDs
 const HAIKU  = "claude-haiku-4-5-20251001";
 const SONNET = "claude-sonnet-4-6";
+const OPUS   = "claude-opus-4-6";
 
 // Cost per 1M tokens (USD) — used for tracking only
 const COST_PER_1M: Record<string, { input: number; output: number }> = {
-  [HAIKU]:  { input: 0.80, output: 4.00 },
-  [SONNET]: { input: 3.00, output: 15.00 },
+  [HAIKU]:  { input: 0.80,  output: 4.00  },
+  [SONNET]: { input: 3.00,  output: 15.00 },
+  [OPUS]:   { input: 15.00, output: 75.00 },
 };
 
 const BUDGET_LIMIT = Number(Deno.env.get("AI_MONTHLY_BUDGET_USD") ?? 50);
+
+// ─── Load AI config from DB (super-admin configurable) ───────────────────────
+interface AiConfig {
+  default_model: string;
+  upgrade_model: string;
+  confidence_upgrade_threshold: number;
+  temperature: number;
+  top_p: number;
+  max_tokens: number;
+  system_prompt: string;
+  user_prompt: string;
+  monthly_budget_usd: number;
+  alert_threshold_pct: number;
+}
+
+const DEFAULT_AI_CONFIG: AiConfig = {
+  default_model: HAIKU,
+  upgrade_model: SONNET,
+  confidence_upgrade_threshold: 0.70,
+  temperature: 0.1,
+  top_p: 0.95,
+  max_tokens: 1500,
+  system_prompt: "", // filled from prompt below when not in DB
+  user_prompt:   "", // filled from prompt below when not in DB
+  monthly_budget_usd: 50,
+  alert_threshold_pct: 80,
+};
+
+async function loadAiConfig(): Promise<AiConfig> {
+  try {
+    const { data } = await supabase
+      .from("ai_settings").select("config").eq("id", "global").maybeSingle();
+    if (data?.config) return { ...DEFAULT_AI_CONFIG, ...(data.config as Partial<AiConfig>) };
+  } catch { /* use defaults */ }
+  return DEFAULT_AI_CONFIG;
+}
 
 // Fields to extract from each document
 const EXTRACTION_FIELDS = [
@@ -101,6 +139,9 @@ const INVOICE_LEDGER_RULES: LedgerRule[] = [
 Deno.serve(async (req) => {
   let documentId: string | undefined;
   try {
+    // Load AI config from DB — super-admin configurable, falls back to defaults
+    const aiConfig = await loadAiConfig();
+
     const body = await req.json();
     documentId = body.documentId;
     const { tenantId, storagePath, documentType, monthlySpend, clientId, clientIndustry } = body;
@@ -337,10 +378,13 @@ ${profileLines.join("\n")}
       : "";
 
     // ----------------------------------------------------------------
-    // BUILD EXTRACTION PROMPT
+    // BUILD EXTRACTION PROMPT — base from DB config, injections appended
     // ----------------------------------------------------------------
-    const systemPrompt = `You are an expert Indian accounting document analyser. Extract structured data from the provided document.
-${fewShotExamples}${layer1Context}${layer3Context}${industryContext}
+    const injections = `${fewShotExamples}${layer1Context}${layer3Context}${industryContext}`;
+
+    // Use DB-configured system prompt; replace {INJECTIONS} placeholder
+    const baseSystemPrompt = aiConfig.system_prompt || `You are an expert Indian accounting document analyser. Extract structured data from the provided document.
+{INJECTIONS}
 RULES:
 - Return ONLY valid JSON, no markdown, no explanation
 - For each field, provide "value" and "confidence" (0.0 to 1.0)
@@ -351,9 +395,13 @@ RULES:
 - For dates, use DD/MM/YYYY format
 - For GSTIN, return the 15-character alphanumeric code exactly
 - For TDS section, return e.g. "194C", "194J", "194I"
-- GST is MUTUALLY EXCLUSIVE: intra-state invoices have CGST + SGST only (IGST = null). Inter-state invoices have IGST only (CGST = SGST = null). NEVER set all three.`;
+- GST is MUTUALLY EXCLUSIVE: intra-state invoices have CGST + SGST only (IGST = null). Inter-state invoices have IGST only (CGST = SGST = null). NEVER set all three.
+- For hsn_sac_code: HSN codes are for GOODS (4, 6, or 8 digits, e.g. "84212120", "9403", "94030001"). SAC codes are for SERVICES (6 digits starting with 99, e.g. "998313"). Extract whichever appears in the document line items or header. Goods invoices nearly always have HSN codes printed — look carefully in the line-item table.`;
 
-    const userPrompt = `Extract all fields from this ${documentType.replace(/_/g, " ")} document.
+    const systemPrompt = baseSystemPrompt.replace("{INJECTIONS}", injections);
+
+    const docTypeLabel = documentType.replace(/_/g, " ");
+    const baseUserPrompt = aiConfig.user_prompt || `Extract all fields from this {DOC_TYPE} document.
 
 Return JSON in this exact format:
 {
@@ -380,8 +428,10 @@ Return JSON in this exact format:
   "itc_eligible": {"value": "Yes", "confidence": 0.80}
 }`;
 
+    const userPrompt = baseUserPrompt.replace("{DOC_TYPE}", docTypeLabel);
+
     // ----------------------------------------------------------------
-    // CALL CLAUDE — try Haiku first, Sonnet if confidence too low
+    // CALL CLAUDE — try default model first, upgrade if confidence too low
     // ----------------------------------------------------------------
     const isPdf = mimeType === "application/pdf";
     // PDFs use type:"document", images use type:"image" — Anthropic API requires this distinction
@@ -392,7 +442,9 @@ Return JSON in this exact format:
     async function callClaude(model: string) {
       const response = await anthropic.messages.create({
         model,
-        max_tokens: 1500,
+        max_tokens: aiConfig.max_tokens,
+        temperature: aiConfig.temperature,
+        top_p: aiConfig.top_p,
         system: systemPrompt,
         messages: [{
           role: "user",
@@ -411,8 +463,11 @@ Return JSON in this exact format:
       return { response, tokensIn, tokensOut, costUsd };
     }
 
-    let result = await callClaude(HAIKU);
-    let modelUsed = HAIKU;
+    const defaultModel = aiConfig.default_model || HAIKU;
+    const upgradeModel = aiConfig.upgrade_model  || SONNET;
+
+    let result = await callClaude(defaultModel);
+    let modelUsed = defaultModel;
     let totalCost = result.costUsd;
 
     // Parse the response
@@ -431,33 +486,34 @@ Return JSON in this exact format:
       ? confidences.reduce((s, c) => s + c, 0) / confidences.length
       : 0;
 
-    // If average confidence < 70%, re-run with Sonnet (smarter model)
-    if (avgConfidence < 0.7 && (currentSpend + totalCost) < BUDGET_LIMIT) {
-      const sonnetResult = await callClaude(SONNET);
-      totalCost += sonnetResult.costUsd;
-      modelUsed = SONNET;
+    // If average confidence below threshold, re-run with upgrade model
+    const upgradeThreshold = aiConfig.confidence_upgrade_threshold ?? 0.70;
+    if (avgConfidence < upgradeThreshold && (currentSpend + totalCost) < BUDGET_LIMIT) {
+      const upgradeResult = await callClaude(upgradeModel);
+      totalCost += upgradeResult.costUsd;
+      modelUsed = upgradeModel;
       try {
-        const text = sonnetResult.response.content[0].type === "text" ? sonnetResult.response.content[0].text : "{}";
+        const text = upgradeResult.response.content[0].type === "text" ? upgradeResult.response.content[0].text : "{}";
         const jsonMatch = text.match(/\{[\s\S]*\}/);
         if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
-      } catch { /* keep haiku result */ }
+      } catch { /* keep default model result */ }
 
-      // Track Sonnet cost separately
+      // Track upgrade model cost separately
       await supabase.from("ai_usage").insert({
         tenant_id: tenantId,
         document_id: documentId,
-        model: SONNET,
-        tokens_in: sonnetResult.tokensIn,
-        tokens_out: sonnetResult.tokensOut,
-        cost_usd: sonnetResult.costUsd,
+        model: upgradeModel,
+        tokens_in: upgradeResult.tokensIn,
+        tokens_out: upgradeResult.tokensOut,
+        cost_usd: upgradeResult.costUsd,
       });
     }
 
-    // Track Haiku cost
+    // Track default model cost
     await supabase.from("ai_usage").insert({
       tenant_id: tenantId,
       document_id: documentId,
-      model: HAIKU,
+      model: defaultModel,
       tokens_in: result.tokensIn,
       tokens_out: result.tokensOut,
       cost_usd: result.costUsd,
@@ -692,9 +748,52 @@ Return JSON in this exact format:
         if (!parsed["suggested_ledger"]?.value && parsed["tds_section"]?.value === "194C") {
           parsed["suggested_ledger"] = { value: "Miscellaneous Expenses", confidence: 0.65 };
         }
+
+        // ── HSN chapter → Tally ledger fallback ──────────────────────────────
+        // For goods purchases the vendor name gives no signal; use HSN chapter prefix instead.
+        if (!parsed["suggested_ledger"]?.value && parsed["hsn_sac_code"]?.value) {
+          const hsnClean = (parsed["hsn_sac_code"].value ?? "").replace(/[\s-]/g, "");
+          // Skip SAC codes (start with 99) — those are service codes handled above
+          if (!hsnClean.startsWith("99")) {
+            const chapter = parseInt(hsnClean.substring(0, 2), 10);
+            if (chapter === 94) {
+              // Ch 94: Furniture, bedding, lamps — capital asset
+              parsed["suggested_ledger"] = { value: "Furniture & Fixtures", confidence: 0.78 };
+            } else if (chapter === 84 || chapter === 82 || chapter === 83) {
+              // Ch 84: Machinery & mechanical appliances; Ch 82-83: tools & hardware
+              parsed["suggested_ledger"] = { value: "Plant & Machinery", confidence: 0.75 };
+            } else if (chapter === 85) {
+              // Ch 85: Electrical machinery, computers, phones
+              parsed["suggested_ledger"] = { value: "Electrical Equipment", confidence: 0.75 };
+            } else if (chapter >= 86 && chapter <= 89) {
+              // Ch 86-89: Vehicles, aircraft, vessels
+              parsed["suggested_ledger"] = { value: "Vehicle Expenses", confidence: 0.72 };
+            } else if (chapter === 90) {
+              // Ch 90: Optical, measuring, medical instruments
+              parsed["suggested_ledger"] = { value: "Lab / Scientific Equipment", confidence: 0.72 };
+            } else if (chapter === 73 || chapter === 72) {
+              // Ch 72-73: Iron, steel, metal articles
+              parsed["suggested_ledger"] = { value: "Tools & Equipment", confidence: 0.70 };
+            } else if (chapter === 30) {
+              // Ch 30: Pharmaceutical products
+              parsed["suggested_ledger"] = { value: "Medical Supplies", confidence: 0.72 };
+            } else if (chapter >= 1 && chapter <= 24) {
+              // Ch 1-24: Food, beverages, agricultural produce
+              parsed["suggested_ledger"] = { value: "Purchase Account", confidence: 0.65 };
+            }
+          }
+        }
       } else if (documentType === "sales_invoice") {
         parsed["suggested_ledger"] = { value: "Sales Account", confidence: 0.85 };
       }
+    }
+
+    // ----------------------------------------------------------------
+    // ITC ELIGIBILITY — expenses cannot claim input credit; force Blocked
+    // Section 17(5) of CGST Act: most expense categories are blocked credit
+    // ----------------------------------------------------------------
+    if (documentType === "expense") {
+      parsed["itc_eligible"] = { value: "Blocked", confidence: 1.0 };
     }
 
     // ----------------------------------------------------------------

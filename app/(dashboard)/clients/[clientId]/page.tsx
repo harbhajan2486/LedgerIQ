@@ -146,7 +146,7 @@ export default function ClientDetailPage() {
   const [retrying, setRetrying] = useState<string | null>(null);
   const [retagging, setRetagging] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"documents" | "bank" | "reconciliation" | "ledgers" | "gst">("documents");
+  const [activeTab, setActiveTab] = useState<"documents" | "bank" | "reconciliation" | "ledgers" | "gst" | "expected">("documents");
   const [docFolder, setDocFolder] = useState<string | null>(() => searchParams.get("folder")); // restore folder from back-navigation
   const [bankTxns, setBankTxns] = useState<BankTxn[]>([]);
   const [bankSummary, setBankSummary] = useState<BankSummary | null>(null);
@@ -181,6 +181,46 @@ export default function ClientDetailPage() {
   const [importingLedgers, setImportingLedgers] = useState(false);
   const ledgerImportRef = useRef<HTMLInputElement>(null);
 
+  // Expected invoices state
+  interface ExpectedInvoice { id: string; vendor_name: string; approx_amount: number | null; expected_by: string | null; notes: string | null; status: string; created_at: string; }
+  const [expectedInvoices, setExpectedInvoices] = useState<ExpectedInvoice[]>([]);
+  const [expectedLoading, setExpectedLoading] = useState(false);
+  const [newExpVendor, setNewExpVendor] = useState("");
+  const [newExpAmount, setNewExpAmount] = useState("");
+  const [newExpDate, setNewExpDate] = useState("");
+  const [newExpNotes, setNewExpNotes] = useState("");
+  const [addingExpected, setAddingExpected] = useState(false);
+
+  function loadExpected() {
+    setExpectedLoading(true);
+    fetch(`/api/v1/clients/${clientId}/expected-invoices`)
+      .then(r => r.json())
+      .then(d => setExpectedInvoices(d.expected ?? []))
+      .finally(() => setExpectedLoading(false));
+  }
+
+  async function addExpected() {
+    if (!newExpVendor.trim()) return;
+    setAddingExpected(true);
+    await fetch(`/api/v1/clients/${clientId}/expected-invoices`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vendor_name: newExpVendor.trim(), approx_amount: newExpAmount ? parseFloat(newExpAmount) : null, expected_by: newExpDate || null, notes: newExpNotes || null }),
+    });
+    setNewExpVendor(""); setNewExpAmount(""); setNewExpDate(""); setNewExpNotes("");
+    setAddingExpected(false);
+    loadExpected();
+  }
+
+  async function updateExpected(id: string, action: "received" | "delete") {
+    await fetch(`/api/v1/clients/${clientId}/expected-invoices`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedId: id, action }),
+    });
+    loadExpected();
+  }
+
   // GST Filing tab state
   interface Gstr3b {
     outward_taxable: { taxable: number; igst: number; cgst: number; sgst: number };
@@ -208,8 +248,28 @@ export default function ClientDetailPage() {
       .finally(() => setGstLoading(false));
   }
 
-  function loadData() {
-    fetch(`/api/v1/clients/${clientId}`)
+  // Financial year filter — defaults to current FY (Apr–Mar)
+  function currentFY() {
+    const now = new Date();
+    const year = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+    return { from: `${year}-04-01`, to: `${year + 1}-03-31`, label: `FY ${year}-${String(year + 1).slice(2)}` };
+  }
+  const [fyFrom, setFyFrom] = useState(currentFY().from);
+  const [fyTo,   setFyTo]   = useState(currentFY().to);
+
+  const FY_OPTIONS = (() => {
+    const now = new Date();
+    const curYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+    return [
+      { label: `FY ${curYear}-${String(curYear + 1).slice(2)}`,     from: `${curYear}-04-01`,     to: `${curYear + 1}-03-31` },
+      { label: `FY ${curYear - 1}-${String(curYear).slice(2)}`,     from: `${curYear - 1}-04-01`, to: `${curYear}-03-31` },
+      { label: "All time", from: "", to: "" },
+    ];
+  })();
+
+  function loadData(from = fyFrom, to = fyTo) {
+    const q = from ? `?from=${from}&to=${to}` : "";
+    fetch(`/api/v1/clients/${clientId}${q}`)
       .then((r) => r.json())
       .then((d) => {
         setClient(d.client);
@@ -410,6 +470,7 @@ export default function ClientDetailPage() {
   useEffect(() => { if (activeTab === "reconciliation") loadRecon(); }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "ledgers") loadLedgers(); }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "gst") loadGstData(); }, [activeTab, clientId, gstPeriodFrom, gstPeriodTo]);
+  useEffect(() => { if (activeTab === "expected") loadExpected(); }, [activeTab, clientId]);
 
   // Poll status for any documents currently extracting/queued
   useEffect(() => {
@@ -572,6 +633,7 @@ export default function ClientDetailPage() {
       <div className="flex border-b border-gray-200 gap-1">
         {([
           { key: "documents", label: "Documents", icon: <FileText size={14} />, count: documents.length },
+          { key: "expected", label: "Expected Invoices", icon: <Clock size={14} />, count: expectedInvoices.filter(e => e.status === "pending").length || null },
           { key: "bank", label: "Bank Statements", icon: <Landmark size={14} />, count: bankSummary?.total ?? null },
           { key: "reconciliation", label: "Reconciliation", icon: <Link2 size={14} />, count: reconData?.summary.matched ?? null },
           { key: "ledgers", label: "Ledger Master", icon: <BookOpen size={14} />, count: ledgers.length || null },
@@ -621,6 +683,24 @@ export default function ClientDetailPage() {
 
         return (
           <div className="space-y-4">
+            {/* FY filter */}
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-500 font-medium">Financial Year:</span>
+              <div className="flex gap-1">
+                {FY_OPTIONS.map((fy) => (
+                  <button key={fy.label}
+                    onClick={() => { setFyFrom(fy.from); setFyTo(fy.to); setLoading(true); loadData(fy.from, fy.to); }}
+                    className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                      fyFrom === fy.from
+                        ? "bg-blue-600 text-white border-blue-600"
+                        : "bg-white text-gray-600 border-gray-200 hover:border-blue-300"
+                    }`}>{fy.label}
+                  </button>
+                ))}
+              </div>
+              <span className="text-xs text-gray-400 ml-auto">{documents.length} document{documents.length !== 1 ? "s" : ""}</span>
+            </div>
+
             {/* Register downloads */}
             <div className="flex items-center justify-end gap-3">
               <a href={`/api/v1/clients/${clientId}/tds-summary?format=excel`}
@@ -1496,6 +1576,106 @@ export default function ClientDetailPage() {
               </Card>
             </>
           )}
+        </div>
+      )}
+
+      {/* ── EXPECTED INVOICES TAB ──────────────────────────────────────── */}
+      {activeTab === "expected" && (
+        <div className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base flex items-center gap-2">
+                <Clock size={16} /> Expected Invoices — Pending from Client
+              </CardTitle>
+              <p className="text-sm text-gray-500">Track invoices you&apos;re waiting for. Mark as received when uploaded.</p>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {/* Add form */}
+              <div className="grid grid-cols-4 gap-2 p-3 rounded-lg bg-gray-50 border border-gray-200">
+                <div>
+                  <label className="text-xs text-gray-500 font-medium">Vendor Name *</label>
+                  <input value={newExpVendor} onChange={e => setNewExpVendor(e.target.value)}
+                    placeholder="e.g. Reliance Jio"
+                    className="mt-1 w-full text-sm px-2 py-1.5 rounded border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 font-medium">Approx Amount (₹)</label>
+                  <input type="number" value={newExpAmount} onChange={e => setNewExpAmount(e.target.value)}
+                    placeholder="Optional"
+                    className="mt-1 w-full text-sm px-2 py-1.5 rounded border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 font-medium">Expected by</label>
+                  <input type="date" value={newExpDate} onChange={e => setNewExpDate(e.target.value)}
+                    className="mt-1 w-full text-sm px-2 py-1.5 rounded border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <div className="flex items-end">
+                  <button onClick={addExpected} disabled={addingExpected || !newExpVendor.trim()}
+                    className="w-full text-sm px-3 py-1.5 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
+                    {addingExpected ? "Adding…" : "+ Add"}
+                  </button>
+                </div>
+              </div>
+
+              {expectedLoading ? (
+                <div className="flex items-center gap-2 text-sm text-gray-400 py-4">
+                  <Loader2 size={14} className="animate-spin" /> Loading…
+                </div>
+              ) : expectedInvoices.length === 0 ? (
+                <div className="text-center py-8 text-sm text-gray-400">
+                  No expected invoices. Add one above when you&apos;re waiting for an invoice from a vendor.
+                </div>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b text-xs text-gray-400 uppercase">
+                      <th className="text-left py-2 px-3 font-medium">Vendor</th>
+                      <th className="text-right py-2 px-3 font-medium">Amount</th>
+                      <th className="text-left py-2 px-3 font-medium">Expected by</th>
+                      <th className="text-left py-2 px-3 font-medium">Status</th>
+                      <th className="text-right py-2 px-3 font-medium">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {expectedInvoices.map((ei) => {
+                      const isOverdue = ei.status === "pending" && ei.expected_by && new Date(ei.expected_by) < new Date();
+                      return (
+                        <tr key={ei.id} className="border-b border-gray-50 hover:bg-gray-50">
+                          <td className="py-2.5 px-3 font-medium text-gray-900">{ei.vendor_name}</td>
+                          <td className="py-2.5 px-3 text-right text-gray-700">
+                            {ei.approx_amount ? `₹${ei.approx_amount.toLocaleString("en-IN")}` : "—"}
+                          </td>
+                          <td className={`py-2.5 px-3 text-xs ${isOverdue ? "text-red-600 font-medium" : "text-gray-500"}`}>
+                            {ei.expected_by ? new Date(ei.expected_by).toLocaleDateString("en-IN", { day:"2-digit", month:"short" }) : "—"}
+                            {isOverdue && " (overdue)"}
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                              ei.status === "received" ? "bg-green-50 text-green-700" : "bg-amber-50 text-amber-700"
+                            }`}>{ei.status === "received" ? "Received" : "Pending"}</span>
+                          </td>
+                          <td className="py-2.5 px-3 text-right">
+                            <div className="flex items-center justify-end gap-2">
+                              {ei.status === "pending" && (
+                                <button onClick={() => updateExpected(ei.id, "received")}
+                                  className="text-xs px-2 py-0.5 rounded bg-green-50 text-green-700 hover:bg-green-100">
+                                  Mark received
+                                </button>
+                              )}
+                              <button onClick={() => updateExpected(ei.id, "delete")}
+                                className="text-xs px-2 py-0.5 rounded bg-red-50 text-red-600 hover:bg-red-100">
+                                Delete
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </CardContent>
+          </Card>
         </div>
       )}
     </div>
