@@ -74,11 +74,13 @@ const EXTRACTION_FIELDS = [
   "igst_rate", "igst_amount", "total_amount", "tds_section", "tds_rate", "tds_amount",
   "reverse_charge", "place_of_supply", "suggested_ledger",
   "hsn_sac_code", "itc_eligible",
+  // Reasoning fields — stored alongside their parent, displayed as tooltip/caption in review UI
+  "tds_section_reasoning", "suggested_ledger_reasoning",
 ];
 
 // ─── Vendors/services that are explicitly NOT subject to TDS ─────────────────
 // These are set to "No TDS" when the AI leaves the field blank
-const NO_TDS_KEYWORDS = /\b(hotel|inn|resort|lodge|hospitality|guest.house|makemytrip|cleartrip|yatra|goibibo|irctc|airline|indigo|spicejet|air.india|vistara|goair|air.asia|flight.ticket|train.ticket|petrol|fuel|electricity|telephone|internet|broadband|utility|water.bill|municipal|insurance|stamp.duty|registration|government.fee|challan|gst.payment|tds.payment|advance.tax)\b/i;
+const NO_TDS_KEYWORDS = /\b(hotel|inn|resort|lodge|hospitality|guest.house|makemytrip|cleartrip|yatra|goibibo|irctc|airline|indigo|spicejet|air.india|vistara|goair|air.asia|flight.ticket|train.ticket|petrol|fuel|electricity|telephone|telecom|mobile|cellular|jio|airtel|vodafone|vi|bsnl|mtnl|idea|internet|broadband|utility|water.bill|municipal|insurance|stamp.duty|registration|government.fee|challan|gst.payment|tds.payment|advance.tax)\b/i;
 
 // ─── TDS Keyword → Section mapping (deterministic Layer 1 post-processing) ───
 interface TdsRule {
@@ -444,7 +446,7 @@ Return JSON in this exact format:
         model,
         max_tokens: aiConfig.max_tokens,
         temperature: aiConfig.temperature,
-        top_p: aiConfig.top_p,
+        // top_p intentionally omitted: Anthropic API rejects requests with both temperature and top_p set
         system: systemPrompt,
         messages: [{
           role: "user",
@@ -558,6 +560,18 @@ Return JSON in this exact format:
     }
 
     // ----------------------------------------------------------------
+    // REASONING TRACKING — populated throughout post-processing
+    // Stored as tds_section_reasoning / suggested_ledger_reasoning
+    // ----------------------------------------------------------------
+    let tdsReasoning = "";
+    let ledgerReasoning = "";
+
+    // Seed TDS reasoning from AI extraction confidence
+    if ((parsed["tds_section"]?.confidence ?? 0) >= 0.6) {
+      tdsReasoning = `AI extracted from document (confidence ${Math.round((parsed["tds_section"]!.confidence) * 100)}%)`;
+    }
+
+    // ----------------------------------------------------------------
     // LAYER 3 POST-PROCESSING — Apply vendor profile overrides
     // If a vendor profile exists for the extracted vendor_name,
     // override fields defined in invoice_quirks with confidence=0.99
@@ -583,6 +597,7 @@ Return JSON in this exact format:
           // Apply learned TDS category — override if not already extracted with high confidence
           if (vendorProfile.tds_category && (parsed["tds_section"]?.confidence ?? 0) < 0.9) {
             parsed["tds_section"] = { value: vendorProfile.tds_category, confidence: 0.95 };
+            tdsReasoning = `Learned from vendor profile (${vendorProfile.tds_category} applied from past corrections)`;
           }
           // Apply known GSTIN
           if (vendorProfile.gstin && (!parsed["vendor_gstin"]?.value || parsed["vendor_gstin"].confidence < 0.9)) {
@@ -616,6 +631,7 @@ Return JSON in this exact format:
           if (!parsed["tds_section"]?.value || (parsed["tds_section"].confidence ?? 0) < inferenceConfidence) {
             parsed["tds_section"] = { value: rule.section,           confidence: inferenceConfidence };
             parsed["tds_rate"]    = { value: rule.rate,              confidence: inferenceConfidence };
+            tdsReasoning = `Auto-inferred: vendor/service keyword matched ${rule.section} (${rule.rate}% rate, applies on amounts ≥ ₹${rule.threshold.toLocaleString("en-IN")})`;
             // Calculate TDS amount if not already extracted with reasonable confidence
             if (!parsed["tds_amount"]?.value || (parsed["tds_amount"].confidence ?? 0) < 0.5) {
               const base = parseFloat(parsed["taxable_value"]?.value ?? "0") || totalAmountNum;
@@ -633,6 +649,7 @@ Return JSON in this exact format:
       if (NO_TDS_KEYWORDS.test(vendorForTds)) {
         parsed["tds_section"] = { value: "No TDS", confidence: 0.75 };
         parsed["tds_rate"]    = { value: "0",       confidence: 0.75 };
+        tdsReasoning = "No TDS: utility / travel / telecom vendor — not subject to TDS deduction";
       }
     }
 
@@ -734,58 +751,110 @@ Return JSON in this exact format:
     if (!parsed["suggested_ledger"]?.value || (parsed["suggested_ledger"].confidence ?? 0) < 0.5) {
       const vendorForLedger = (parsed["vendor_name"]?.value ?? "").toLowerCase();
       if (documentType === "purchase_invoice" || documentType === "expense") {
+
+        // 1. Vendor name keyword rules (highest priority)
         for (const rule of INVOICE_LEDGER_RULES) {
           if (rule.keywords.test(vendorForLedger)) {
             parsed["suggested_ledger"] = { value: rule.ledger, confidence: 0.75 };
+            ledgerReasoning = `Vendor name keyword match → ${rule.ledger}`;
             break;
           }
         }
-        // Fallback: if TDS section 194J was inferred, default to Professional Fees
+
+        // 2. TDS section 194J fallback → Professional Fees
         if (!parsed["suggested_ledger"]?.value && parsed["tds_section"]?.value === "194J") {
           parsed["suggested_ledger"] = { value: "Professional Fees", confidence: 0.70 };
-        }
-        // Fallback: if TDS section 194C was inferred, default to Purchase Account
-        if (!parsed["suggested_ledger"]?.value && parsed["tds_section"]?.value === "194C") {
-          parsed["suggested_ledger"] = { value: "Miscellaneous Expenses", confidence: 0.65 };
+          ledgerReasoning = "TDS section 194J inferred → Professional Fees (fees for technical/professional services)";
         }
 
-        // ── HSN chapter → Tally ledger fallback ──────────────────────────────
-        // For goods purchases the vendor name gives no signal; use HSN chapter prefix instead.
+        // 3. TDS section 194C fallback → Miscellaneous Expenses
+        if (!parsed["suggested_ledger"]?.value && parsed["tds_section"]?.value === "194C") {
+          parsed["suggested_ledger"] = { value: "Miscellaneous Expenses", confidence: 0.65 };
+          ledgerReasoning = "TDS section 194C inferred → Miscellaneous Expenses (contractor/work charges)";
+        }
+
+        // 4. HSN/SAC code → Tally ledger fallback
         if (!parsed["suggested_ledger"]?.value && parsed["hsn_sac_code"]?.value) {
           const hsnClean = (parsed["hsn_sac_code"].value ?? "").replace(/[\s-]/g, "");
-          // Skip SAC codes (start with 99) — those are service codes handled above
-          if (!hsnClean.startsWith("99")) {
+
+          if (hsnClean.startsWith("99")) {
+            // ── SAC codes (service codes) ──────────────────────────────────
+            const SAC_LEDGER_MAP: Record<string, { ledger: string; desc: string }> = {
+              "998313": { ledger: "Photography / Videography Charges", desc: "SAC 998313 — photography & video production services" },
+              "998314": { ledger: "Computer / IT Expenses",            desc: "SAC 998314 — information technology services" },
+              "998212": { ledger: "Professional Fees",                 desc: "SAC 998212 — legal & accounting services" },
+              "9965":   { ledger: "Freight / Transport Charges",       desc: "SAC 9965 — goods transport services" },
+              "998361": { ledger: "Advertising & Marketing",           desc: "SAC 998361 — advertising & related services" },
+              "997212": { ledger: "Rent",                              desc: "SAC 997212 — rental of immovable property" },
+              "998522": { ledger: "Security Services",                 desc: "SAC 998522 — security guard services" },
+              "998536": { ledger: "Support Services",                  desc: "SAC 998536 — management consulting" },
+              "9954":   { ledger: "Construction / Civil Work",         desc: "SAC 9954 — construction services" },
+              "998311": { ledger: "Professional Fees",                 desc: "SAC 998311 — architectural & engineering services" },
+            };
+            // Try 6-digit match first, then 4-digit
+            const entry = SAC_LEDGER_MAP[hsnClean.substring(0, 6)] ?? SAC_LEDGER_MAP[hsnClean.substring(0, 4)];
+            if (entry) {
+              parsed["suggested_ledger"] = { value: entry.ledger, confidence: 0.78 };
+              ledgerReasoning = `${entry.desc} → ${entry.ledger}`;
+            }
+          } else {
+            // ── HSN codes (goods) — map by chapter ───────────────────────
             const chapter = parseInt(hsnClean.substring(0, 2), 10);
             if (chapter === 94) {
-              // Ch 94: Furniture, bedding, lamps — capital asset
               parsed["suggested_ledger"] = { value: "Furniture & Fixtures", confidence: 0.78 };
+              ledgerReasoning = `HSN ${hsnClean} → Chapter 94 (furniture & fixtures) → Furniture & Fixtures`;
             } else if (chapter === 84 || chapter === 82 || chapter === 83) {
-              // Ch 84: Machinery & mechanical appliances; Ch 82-83: tools & hardware
               parsed["suggested_ledger"] = { value: "Plant & Machinery", confidence: 0.75 };
+              ledgerReasoning = `HSN ${hsnClean} → Chapter ${chapter} (machinery & tools) → Plant & Machinery`;
             } else if (chapter === 85) {
-              // Ch 85: Electrical machinery, computers, phones
-              parsed["suggested_ledger"] = { value: "Electrical Equipment", confidence: 0.75 };
+              const hsn6 = parseInt(hsnClean.substring(0, 6), 10);
+              if (hsn6 >= 851710 && hsn6 <= 851799) {
+                parsed["suggested_ledger"] = { value: "Computer / IT Expenses", confidence: 0.78 };
+                ledgerReasoning = `HSN ${hsnClean} → 8517xx (phones & networking equipment) → Computer / IT Expenses`;
+              } else if (hsn6 >= 847130 && hsn6 <= 847199) {
+                parsed["suggested_ledger"] = { value: "Computer / IT Expenses", confidence: 0.78 };
+                ledgerReasoning = `HSN ${hsnClean} → 8471xx (computers & laptops) → Computer / IT Expenses`;
+              } else if (hsn6 >= 852800 && hsn6 <= 852899) {
+                parsed["suggested_ledger"] = { value: "Computer / IT Expenses", confidence: 0.75 };
+                ledgerReasoning = `HSN ${hsnClean} → 8528xx (monitors & projectors) → Computer / IT Expenses`;
+              } else {
+                parsed["suggested_ledger"] = { value: "Electrical Equipment", confidence: 0.75 };
+                ledgerReasoning = `HSN ${hsnClean} → Chapter 85 (electrical equipment) → Electrical Equipment`;
+              }
             } else if (chapter >= 86 && chapter <= 89) {
-              // Ch 86-89: Vehicles, aircraft, vessels
               parsed["suggested_ledger"] = { value: "Vehicle Expenses", confidence: 0.72 };
+              ledgerReasoning = `HSN ${hsnClean} → Chapter ${chapter} (vehicles & transport) → Vehicle Expenses`;
             } else if (chapter === 90) {
-              // Ch 90: Optical, measuring, medical instruments
               parsed["suggested_ledger"] = { value: "Lab / Scientific Equipment", confidence: 0.72 };
+              ledgerReasoning = `HSN ${hsnClean} → Chapter 90 (optical & measuring instruments) → Lab / Scientific Equipment`;
             } else if (chapter === 73 || chapter === 72) {
-              // Ch 72-73: Iron, steel, metal articles
               parsed["suggested_ledger"] = { value: "Tools & Equipment", confidence: 0.70 };
+              ledgerReasoning = `HSN ${hsnClean} → Chapter ${chapter} (iron, steel & metal articles) → Tools & Equipment`;
             } else if (chapter === 30) {
-              // Ch 30: Pharmaceutical products
               parsed["suggested_ledger"] = { value: "Medical Supplies", confidence: 0.72 };
+              ledgerReasoning = `HSN ${hsnClean} → Chapter 30 (pharmaceutical products) → Medical Supplies`;
             } else if (chapter >= 1 && chapter <= 24) {
-              // Ch 1-24: Food, beverages, agricultural produce
               parsed["suggested_ledger"] = { value: "Purchase Account", confidence: 0.65 };
+              ledgerReasoning = `HSN ${hsnClean} → Chapter ${chapter} (food & agricultural produce) → Purchase Account`;
             }
           }
         }
+
       } else if (documentType === "sales_invoice") {
         parsed["suggested_ledger"] = { value: "Sales Account", confidence: 0.85 };
+        ledgerReasoning = "Sales invoice → Sales Account";
       }
+    } else {
+      // Ledger was AI-extracted with reasonable confidence
+      ledgerReasoning = `AI extracted from document (confidence ${Math.round((parsed["suggested_ledger"]?.confidence ?? 0) * 100)}%)`;
+    }
+
+    // Store reasoning fields
+    if (tdsReasoning) {
+      parsed["tds_section_reasoning"] = { value: tdsReasoning, confidence: 1.0 };
+    }
+    if (ledgerReasoning) {
+      parsed["suggested_ledger_reasoning"] = { value: ledgerReasoning, confidence: 1.0 };
     }
 
     // ----------------------------------------------------------------

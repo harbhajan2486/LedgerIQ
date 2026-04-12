@@ -295,10 +295,14 @@ export default function ReviewDetailPage() {
     ? ["igst_rate", "igst_amount"]
     : hideCgstSgstFields ? ["cgst_rate", "cgst_amount", "sgst_rate", "sgst_amount"] : [];
 
+  // Reasoning fields are shown inline next to their parent — never as standalone fields
+  const REASONING_FIELDS = ["tds_section_reasoning", "suggested_ledger_reasoning"];
+
   // Null-value fields have nothing to review; hidden GST fields are not applicable — exclude both from count
   const reviewableExtractions = extractions.filter((e) =>
     e.extracted_value !== null && e.extracted_value !== "" &&
-    !hiddenGstFields.includes(e.field_name)
+    !hiddenGstFields.includes(e.field_name) &&
+    !REASONING_FIELDS.includes(e.field_name)
   );
   const pendingCount      = reviewableExtractions.filter((e) => e.status === "pending").length;
   const highConfCount     = reviewableExtractions.filter((e) => e.confidence >= 0.8).length;
@@ -504,10 +508,15 @@ export default function ReviewDetailPage() {
                 .filter((e): e is Extraction => {
                   if (!e) return false;
                   if (hiddenGstFields.includes(e.field_name)) return false;
+                  if (REASONING_FIELDS.includes(e.field_name)) return false;
                   return true;
                 });
               if (groupExtractions.length === 0) return null;
               const globalIndex = (fieldName: string) => extractions.findIndex((e) => e.field_name === fieldName);
+
+              // Reasoning lookup helpers
+              const tdsReasoning = extractions.find(e => e.field_name === "tds_section_reasoning")?.extracted_value ?? "";
+              const ledgerReasoning = extractions.find(e => e.field_name === "suggested_ledger_reasoning")?.extracted_value ?? "";
 
               return (
                 <div key={group.label}>
@@ -641,9 +650,16 @@ export default function ReviewDetailPage() {
                               <AlertCircle size={10} /> Low confidence — please verify
                             </p>
                           )}
-                          {isRuleBased && extraction.status === "pending" && (
-                            <p className="text-xs text-orange-500 mt-1">
-                              Inferred from vendor name — confirm or correct
+                          {isTdsSection && tdsReasoning && (
+                            <p className="text-xs text-orange-500 mt-1 flex items-start gap-1">
+                              <span className="mt-px shrink-0">→</span>
+                              <span>{tdsReasoning}</span>
+                            </p>
+                          )}
+                          {isLedger && ledgerReasoning && (
+                            <p className="text-xs text-blue-500 mt-1 flex items-start gap-1">
+                              <span className="mt-px shrink-0">→</span>
+                              <span>{ledgerReasoning}</span>
                             </p>
                           )}
                         </div>

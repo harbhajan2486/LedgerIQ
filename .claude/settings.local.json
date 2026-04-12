@@ -14,7 +14,8 @@
       "Bash(npm list:*)",
       "Bash(npx tsc:*)",
       "Bash(npx jest:*)",
-      "Bash(supabase functions:*)"
+      "Bash(supabase functions:*)",
+      "Bash(npx supabase:*)"
     ]
   }
 }
