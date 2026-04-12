@@ -1848,21 +1848,12 @@ export default function ClientDetailPage() {
   );
 }
 
-// Simple markdown → HTML renderer (no external dep needed for headings/bold/lists)
+// Simple markdown → JSX renderer supporting headings, lists, tables, bold, italic
 function SummaryRenderer({ markdown }: { markdown: string }) {
   const lines = markdown.split("\n");
   const elements: React.ReactNode[] = [];
   let listItems: string[] = [];
-
-  function flushList() {
-    if (listItems.length === 0) return;
-    elements.push(
-      <ul key={`ul-${elements.length}`} className="list-disc pl-5 space-y-0.5 my-2">
-        {listItems.map((li, i) => <li key={i} dangerouslySetInnerHTML={{ __html: renderInline(li) }} />)}
-      </ul>
-    );
-    listItems = [];
-  }
+  let tableLines: string[] = [];
 
   function renderInline(text: string) {
     return text
@@ -1871,27 +1862,76 @@ function SummaryRenderer({ markdown }: { markdown: string }) {
       .replace(/`(.+?)`/g, "<code class='bg-gray-100 px-1 rounded text-xs font-mono'>$1</code>");
   }
 
+  function flushList() {
+    if (listItems.length === 0) return;
+    elements.push(
+      <ul key={`ul-${elements.length}`} className="list-disc pl-5 space-y-0.5 my-2">
+        {listItems.map((li, i) => <li key={i} className="text-sm text-gray-700" dangerouslySetInnerHTML={{ __html: renderInline(li) }} />)}
+      </ul>
+    );
+    listItems = [];
+  }
+
+  function flushTable() {
+    if (tableLines.length < 2) { tableLines = []; return; }
+    const parseRow = (row: string) => row.split("|").map(c => c.trim()).filter((_, i, arr) => i > 0 && i < arr.length - 1);
+    const headers = parseRow(tableLines[0]);
+    const body = tableLines.slice(2); // skip separator row
+    elements.push(
+      <div key={`tbl-${elements.length}`} className="overflow-x-auto my-3">
+        <table className="w-full text-xs border border-gray-200 rounded">
+          <thead className="bg-gray-50">
+            <tr>
+              {headers.map((h, i) => (
+                <th key={i} className="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200"
+                  dangerouslySetInnerHTML={{ __html: renderInline(h) }} />
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {body.map((row, ri) => (
+              <tr key={ri} className={ri % 2 === 0 ? "bg-white" : "bg-gray-50"}>
+                {parseRow(row).map((cell, ci) => (
+                  <td key={ci} className="px-3 py-1.5 border-b border-gray-100 text-gray-700"
+                    dangerouslySetInnerHTML={{ __html: renderInline(cell) }} />
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+    tableLines = [];
+  }
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (line.startsWith("## ")) {
+    const isTableRow = line.trim().startsWith("|") && line.trim().endsWith("|");
+
+    if (isTableRow) {
       flushList();
+      tableLines.push(line);
+    } else if (line.startsWith("## ")) {
+      flushList(); flushTable();
       elements.push(<h2 key={i} className="text-base font-semibold text-gray-900 mt-5 mb-2 border-b pb-1">{line.slice(3)}</h2>);
     } else if (line.startsWith("### ")) {
-      flushList();
+      flushList(); flushTable();
       elements.push(<h3 key={i} className="text-sm font-semibold text-gray-800 mt-3 mb-1">{line.slice(4)}</h3>);
     } else if (line.startsWith("- ") || line.startsWith("* ")) {
+      flushTable();
       listItems.push(line.slice(2));
     } else if (line.startsWith("---")) {
-      flushList();
+      flushList(); flushTable();
       elements.push(<hr key={i} className="border-gray-200 my-3" />);
     } else if (line.trim() === "") {
-      flushList();
+      flushList(); flushTable();
     } else {
-      flushList();
+      flushList(); flushTable();
       elements.push(<p key={i} className="text-sm text-gray-700 leading-relaxed my-1.5" dangerouslySetInnerHTML={{ __html: renderInline(line) }} />);
     }
   }
   flushList();
+  flushTable();
   return <div>{elements}</div>;
 }
 
