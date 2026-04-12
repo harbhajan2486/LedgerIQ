@@ -644,12 +644,32 @@ Return JSON in this exact format:
       }
     }
 
-    // If TDS still blank after all rules, check no-TDS vendor list
-    if (!parsed["tds_section"]?.value) {
-      if (NO_TDS_KEYWORDS.test(vendorForTds)) {
-        parsed["tds_section"] = { value: "No TDS", confidence: 0.75 };
-        parsed["tds_rate"]    = { value: "0",       confidence: 0.75 };
+    // If vendor is in the no-TDS list, override any low-confidence AI extraction
+    // (travel portals, telecom etc. are definitively exempt — don't let a low-confidence
+    //  AI guess of "194C" win over this deterministic rule)
+    if (NO_TDS_KEYWORDS.test(vendorForTds)) {
+      if (!parsed["tds_section"]?.value || (parsed["tds_section"].confidence ?? 0) < 0.85) {
+        parsed["tds_section"] = { value: "No TDS", confidence: 0.85 };
+        parsed["tds_rate"]    = { value: "0",       confidence: 0.85 };
         tdsReasoning = "No TDS: utility / travel / telecom vendor — not subject to TDS deduction";
+      }
+    }
+
+    // ----------------------------------------------------------------
+    // TAXABLE VALUE — back-calculate from GST if AI left it blank
+    // MakeMyTrip-style invoices show "Base Fare" not "Taxable Value"
+    // ----------------------------------------------------------------
+    if (!parsed["taxable_value"]?.value || (parsed["taxable_value"].confidence ?? 0) < 0.4) {
+      const igstAmt2  = parseFloat(parsed["igst_amount"]?.value ?? "0") || 0;
+      const igstRate2 = parseFloat(parsed["igst_rate"]?.value  ?? "0") || 0;
+      const cgstAmt2  = parseFloat(parsed["cgst_amount"]?.value ?? "0") || 0;
+      const cgstRate2 = parseFloat(parsed["cgst_rate"]?.value  ?? "0") || 0;
+      if (igstAmt2 > 0 && igstRate2 > 0) {
+        const tv = (igstAmt2 / (igstRate2 / 100)).toFixed(2);
+        parsed["taxable_value"] = { value: tv, confidence: 0.82 };
+      } else if (cgstAmt2 > 0 && cgstRate2 > 0) {
+        const tv = (cgstAmt2 / (cgstRate2 / 100)).toFixed(2);
+        parsed["taxable_value"] = { value: tv, confidence: 0.82 };
       }
     }
 

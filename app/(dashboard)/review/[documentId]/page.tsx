@@ -525,6 +525,11 @@ export default function ReviewDetailPage() {
                     group.label === "Ledger / Posting" ? "text-blue-600" :
                     "text-gray-400"
                   }`}>{group.label}</div>
+                  {group.label === "Amounts & GST" && hideCgstSgstFields && (
+                    <p className="text-xs text-blue-500 bg-blue-50 rounded px-2 py-1 mb-1.5">
+                      Inter-state supply — IGST only (CGST & SGST not applicable)
+                    </p>
+                  )}
                   <div className="space-y-1.5">
                     {groupExtractions.map((extraction) => {
                       const idx = globalIndex(extraction.field_name);
