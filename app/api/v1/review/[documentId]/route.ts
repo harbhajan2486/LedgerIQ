@@ -113,12 +113,36 @@ export async function GET(
     }
   }
 
+  // Fetch key fields of the duplicate document so the UI can show details
+  let duplicateInfo: { invoiceNumber: string | null; vendorName: string | null; invoiceDate: string | null; originalFilename: string | null } | null = null;
+  if (duplicateDocId) {
+    const { data: dupExts } = await supabase
+      .from("extractions")
+      .select("field_name, extracted_value")
+      .eq("document_id", duplicateDocId)
+      .in("field_name", ["invoice_number", "vendor_name", "invoice_date"])
+      .not("status", "eq", "rejected");
+    const { data: dupDoc } = await supabase
+      .from("documents")
+      .select("original_filename")
+      .eq("id", duplicateDocId)
+      .single();
+    const getField = (f: string) => dupExts?.find(e => e.field_name === f)?.extracted_value ?? null;
+    duplicateInfo = {
+      invoiceNumber: getField("invoice_number"),
+      vendorName: getField("vendor_name"),
+      invoiceDate: getField("invoice_date"),
+      originalFilename: dupDoc?.original_filename ?? null,
+    };
+  }
+
   return NextResponse.json({
     document: { ...doc, signedUrl: signedUrl?.signedUrl },
     extractions,
     possibleMisclassification,
     possibleDuplicate,
     duplicateDocId,
+    duplicateInfo,
   });
   } catch (err) {
     console.error("[review/document] Unhandled error:", err);

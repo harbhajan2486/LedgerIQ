@@ -40,12 +40,14 @@ export async function POST(
     // Reset document status
     await supabase.from("documents").update({ status: "queued" }).eq("id", id);
 
-    // Look up client industry
+    // Look up client industry and TDS flag
     let clientIndustry: string | null = null;
+    let clientTdsApplicable: boolean = true;
     if (doc.client_id) {
       const { data: clientData } = await supabase
-        .from("clients").select("industry_name").eq("id", doc.client_id).single();
+        .from("clients").select("industry_name, tds_applicable").eq("id", doc.client_id).single();
       clientIndustry = clientData?.industry_name ?? null;
+      clientTdsApplicable = clientData?.tds_applicable ?? true;
     }
 
     // Check monthly AI spend
@@ -67,6 +69,7 @@ export async function POST(
         budgetLimit,
         clientId: doc.client_id ?? null,
         clientIndustry,
+        clientTdsApplicable,
       }),
     });
 

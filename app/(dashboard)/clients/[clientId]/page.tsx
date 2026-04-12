@@ -7,7 +7,7 @@ import {
   Building2, ChevronLeft, FileText, Loader2, Upload,
   CheckCircle2, AlertTriangle, Clock, RefreshCw, Landmark,
   Link2, Link2Off, X, Pencil, BookOpen, Download, Plus, Trash2,
-  ShoppingCart, Receipt, Wallet, CreditCard, FolderOpen
+  ShoppingCart, Receipt, Wallet, CreditCard, FolderOpen, ScrollText
 } from "lucide-react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
@@ -19,6 +19,7 @@ interface Client {
   gstin: string | null;
   pan: string | null;
   industry_name: string | null;
+  tds_applicable: boolean;
 }
 
 interface Document {
@@ -146,7 +147,7 @@ export default function ClientDetailPage() {
   const [retrying, setRetrying] = useState<string | null>(null);
   const [retagging, setRetagging] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"documents" | "bank" | "reconciliation" | "ledgers" | "gst" | "expected">("documents");
+  const [activeTab, setActiveTab] = useState<"documents" | "bank" | "reconciliation" | "ledgers" | "gst" | "expected" | "summary">("documents");
   const [docFolder, setDocFolder] = useState<string | null>(() => searchParams.get("folder")); // restore folder from back-navigation
   const [bankTxns, setBankTxns] = useState<BankTxn[]>([]);
   const [bankSummary, setBankSummary] = useState<BankSummary | null>(null);
@@ -180,6 +181,54 @@ export default function ClientDetailPage() {
   const [reapplying, setReapplying] = useState(false);
   const [importingLedgers, setImportingLedgers] = useState(false);
   const ledgerImportRef = useRef<HTMLInputElement>(null);
+
+  // Summary note state
+  interface ClientSummary { id: string; summary_md: string; generated_at: string; period_from: string | null; period_to: string | null; }
+  const [summary, setSummary] = useState<ClientSummary | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [summaryGenerating, setSummaryGenerating] = useState(false);
+  const [summaryPeriodFrom, setSummaryPeriodFrom] = useState("");
+  const [summaryPeriodTo, setSummaryPeriodTo] = useState("");
+
+  function loadSummary() {
+    setSummaryLoading(true);
+    fetch(`/api/v1/clients/${clientId}/summary`)
+      .then(r => r.json())
+      .then(d => setSummary(d.summary ?? null))
+      .finally(() => setSummaryLoading(false));
+  }
+
+  async function generateSummary() {
+    setSummaryGenerating(true);
+    try {
+      const res = await fetch(`/api/v1/clients/${clientId}/summary`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ period_from: summaryPeriodFrom || null, period_to: summaryPeriodTo || null }),
+      });
+      const d = await res.json();
+      if (res.ok) {
+        setSummary(d.summary);
+        toast.success("Summary note generated");
+      } else {
+        toast.error(d.error ?? "Generation failed");
+      }
+    } finally {
+      setSummaryGenerating(false);
+    }
+  }
+
+  function downloadSummary() {
+    if (!summary) return;
+    const clientName = client?.client_name ?? "client";
+    const date = new Date(summary.generated_at).toISOString().slice(0, 10);
+    const filename = `${clientName.replace(/\s+/g, "_")}_summary_${date}.md`;
+    const blob = new Blob([summary.summary_md], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+  }
 
   // Expected invoices state
   interface ExpectedInvoice { id: string; vendor_name: string; approx_amount: number | null; expected_by: string | null; notes: string | null; status: string; created_at: string; }
@@ -595,6 +644,31 @@ export default function ClientDetailPage() {
                 {client.industry_name && <span>{client.industry_name}</span>}
                 {client.gstin && <><span className="text-gray-300">·</span><span className="font-mono">{client.gstin}</span></>}
                 {client.pan && <><span className="text-gray-300">·</span><span className="font-mono">PAN: {client.pan}</span></>}
+                <span className="text-gray-300">·</span>
+                <button
+                  onClick={async () => {
+                    const newVal = !client.tds_applicable;
+                    const res = await fetch(`/api/v1/clients/${clientId}`, {
+                      method: "PATCH",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ tds_applicable: newVal }),
+                    });
+                    if (res.ok) {
+                      setClient((prev) => prev ? { ...prev, tds_applicable: newVal } : prev);
+                      toast.success(newVal ? "TDS deduction enabled" : "TDS marked as not applicable");
+                    } else {
+                      toast.error("Could not update TDS setting");
+                    }
+                  }}
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-xs font-medium transition-colors ${
+                    client.tds_applicable
+                      ? "border-green-300 bg-green-50 text-green-700 hover:bg-green-100"
+                      : "border-gray-300 bg-gray-100 text-gray-500 hover:bg-gray-200"
+                  }`}
+                  title={client.tds_applicable ? "Click to mark client as not liable for TDS" : "Click to enable TDS deduction for this client"}
+                >
+                  TDS: {client.tds_applicable ? "Applicable" : "Not applicable"}
+                </button>
               </div>
             </div>
           </div>
@@ -638,10 +712,11 @@ export default function ClientDetailPage() {
           { key: "reconciliation", label: "Reconciliation", icon: <Link2 size={14} />, count: reconData?.summary.matched ?? null },
           { key: "ledgers", label: "Ledger Master", icon: <BookOpen size={14} />, count: ledgers.length || null },
           { key: "gst", label: "GST Filing", icon: <Receipt size={14} />, count: null },
+          { key: "summary", label: "Summary Note", icon: <ScrollText size={14} />, count: null },
         ] as const).map((tab) => (
           <button
             key={tab.key}
-            onClick={() => setActiveTab(tab.key)}
+            onClick={() => { setActiveTab(tab.key); if (tab.key === "summary" && !summary && !summaryLoading) loadSummary(); }}
             className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
               activeTab === tab.key
                 ? "border-blue-500 text-blue-600"
@@ -931,7 +1006,7 @@ export default function ClientDetailPage() {
               {reconData && ([
                 { label: "Matched",   value: reconData.summary.matched,               cls: "text-green-700" },
                 { label: "Possible",  value: reconData.summary.possible,              cls: "text-yellow-700" },
-                { label: "Unmatched txns", value: reconData.summary.unmatched_transactions, cls: "text-gray-700" },
+                { label: "Needs attention", value: (reconData.unmatched_transactions ?? []).filter(t => !t.category).length, cls: (reconData.unmatched_transactions ?? []).filter(t => !t.category).length > 0 ? "text-red-600" : "text-gray-500" },
                 { label: "Unmatched invoices", value: reconData.summary.unmatched_invoices, cls: "text-gray-700" },
               ].map(({ label, value, cls }) => (
                 <div key={label} className="text-center px-3 py-2 rounded-lg bg-gray-50 border border-gray-200">
@@ -1041,52 +1116,77 @@ export default function ClientDetailPage() {
               )}
 
               {/* Unmatched */}
-              {reconTab === "unmatched" && (
+              {reconTab === "unmatched" && (() => {
+                const allUnmatched = reconData?.unmatched_transactions ?? [];
+                const needsAttention = allUnmatched.filter(t => !t.category);
+                const categorised    = allUnmatched.filter(t => !!t.category);
+
+                const TxnTable = ({ txns, dimmed }: { txns: BankTxn[]; dimmed?: boolean }) => (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead><tr className="border-b bg-gray-50 text-gray-500">
+                        <th className="text-left px-4 py-2 font-medium">Date</th>
+                        <th className="text-left px-4 py-2 font-medium">Narration</th>
+                        <th className="text-left px-4 py-2 font-medium">Category</th>
+                        <th className="text-right px-4 py-2 font-medium">Debit</th>
+                        <th className="text-right px-4 py-2 font-medium">Credit</th>
+                        <th className="px-4 py-2" />
+                      </tr></thead>
+                      <tbody>
+                        {txns.map((txn) => (
+                          <tr key={txn.id} className={`border-b hover:bg-gray-50 ${dimmed ? "opacity-50" : ""}`}>
+                            <td className="px-4 py-2 text-gray-500 whitespace-nowrap">{txn.transaction_date}</td>
+                            <td className="px-4 py-2 max-w-[220px]">
+                              <p className="truncate font-medium text-gray-900">{txn.narration}</p>
+                              <p className="text-gray-400">{txn.bank_name}</p>
+                            </td>
+                            <td className="px-4 py-2">
+                              <MiniCategoryChip txnId={txn.id} value={txn.category} field="category" editingTxn={editingTxn} setEditingTxn={setEditingTxn} onSave={updateTxnField} />
+                            </td>
+                            <td className="px-4 py-2 text-right text-red-600 font-medium">{txn.debit_amount ? `₹${Number(txn.debit_amount).toLocaleString("en-IN")}` : "—"}</td>
+                            <td className="px-4 py-2 text-right text-green-700 font-medium">{txn.credit_amount ? `₹${Number(txn.credit_amount).toLocaleString("en-IN")}` : "—"}</td>
+                            <td className="px-4 py-2">
+                              <button onClick={() => setLinkingTxn(txn)}
+                                className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50">
+                                <Link2 size={11} /> Link
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+
+                return (
                 <div className="space-y-4">
+                  {/* Needs attention — no category set */}
                   <Card><CardContent className="p-0">
-                    <div className="px-4 py-3 border-b bg-gray-50 text-xs font-semibold text-gray-600">
-                      Bank transactions without match ({reconData?.unmatched_transactions.length ?? 0})
-                    </div>
-                    {(reconData?.unmatched_transactions ?? []).length === 0 ? (
-                      <div className="py-8 text-center text-gray-400 text-sm">All bank transactions are matched.</div>
-                    ) : (
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-xs">
-                          <thead><tr className="border-b bg-gray-50 text-gray-500">
-                            <th className="text-left px-4 py-2 font-medium">Date</th>
-                            <th className="text-left px-4 py-2 font-medium">Narration</th>
-                            <th className="text-left px-4 py-2 font-medium">Category</th>
-                            <th className="text-right px-4 py-2 font-medium">Debit</th>
-                            <th className="text-right px-4 py-2 font-medium">Credit</th>
-                            <th className="px-4 py-2" />
-                          </tr></thead>
-                          <tbody>
-                            {(reconData?.unmatched_transactions ?? []).map((txn) => (
-                              <tr key={txn.id} className="border-b hover:bg-gray-50">
-                                <td className="px-4 py-2 text-gray-500 whitespace-nowrap">{txn.transaction_date}</td>
-                                <td className="px-4 py-2 max-w-[220px]">
-                                  <p className="truncate font-medium text-gray-900">{txn.narration}</p>
-                                  <p className="text-gray-400">{txn.bank_name}</p>
-                                </td>
-                                <td className="px-4 py-2">
-                                  <MiniCategoryChip txnId={txn.id} value={txn.category} field="category" editingTxn={editingTxn} setEditingTxn={setEditingTxn} onSave={updateTxnField} />
-                                </td>
-                                <td className="px-4 py-2 text-right text-red-600 font-medium">{txn.debit_amount ? `₹${Number(txn.debit_amount).toLocaleString("en-IN")}` : "—"}</td>
-                                <td className="px-4 py-2 text-right text-green-700 font-medium">{txn.credit_amount ? `₹${Number(txn.credit_amount).toLocaleString("en-IN")}` : "—"}</td>
-                                <td className="px-4 py-2">
-                                  <button onClick={() => setLinkingTxn(txn)}
-                                    className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50">
-                                    <Link2 size={11} /> Link
-                                  </button>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                    <div className="px-4 py-3 border-b bg-red-50 flex items-center justify-between">
+                      <div>
+                        <span className="text-xs font-semibold text-red-700">Needs attention — no category set ({needsAttention.length})</span>
+                        <p className="text-xs text-red-500 mt-0.5">These transactions have no invoice and no category. Set a category or link to an invoice.</p>
                       </div>
+                    </div>
+                    {needsAttention.length === 0 ? (
+                      <div className="py-8 text-center text-gray-400 text-sm">All unmatched transactions have been categorised.</div>
+                    ) : (
+                      <TxnTable txns={needsAttention} />
                     )}
                   </CardContent></Card>
 
+                  {/* Categorised — resolved, no invoice needed */}
+                  {categorised.length > 0 && (
+                    <Card><CardContent className="p-0">
+                      <div className="px-4 py-3 border-b bg-gray-50 flex items-center justify-between">
+                        <div>
+                          <span className="text-xs font-semibold text-gray-500">Categorised / resolved ({categorised.length})</span>
+                          <p className="text-xs text-gray-400 mt-0.5">Already classified as salary, bank charges, tax payments, etc. No invoice needed.</p>
+                        </div>
+                      </div>
+                      <TxnTable txns={categorised} dimmed />
+                    </CardContent></Card>
+                  )}
                   <Card><CardContent className="p-0">
                     <div className="px-4 py-3 border-b bg-gray-50 text-xs font-semibold text-gray-600">
                       Invoices without payment ({reconData?.unmatched_invoices.length ?? 0})
@@ -1121,7 +1221,8 @@ export default function ClientDetailPage() {
                     )}
                   </CardContent></Card>
                 </div>
-              )}
+                );
+              })()}
             </>
           )}
         </div>
@@ -1335,6 +1436,71 @@ export default function ClientDetailPage() {
               </div>
             )}
           </Card>
+        </div>
+      )}
+
+      {/* Summary Note tab */}
+      {activeTab === "summary" && (
+        <div className="space-y-4">
+          {/* Controls */}
+          <div className="flex items-end gap-3 flex-wrap">
+            <div>
+              <label className="text-xs text-gray-500 block mb-1">Period from</label>
+              <input type="date" value={summaryPeriodFrom} onChange={e => setSummaryPeriodFrom(e.target.value)}
+                className="text-sm border border-gray-300 rounded-md px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-400" />
+            </div>
+            <div>
+              <label className="text-xs text-gray-500 block mb-1">Period to</label>
+              <input type="date" value={summaryPeriodTo} onChange={e => setSummaryPeriodTo(e.target.value)}
+                className="text-sm border border-gray-300 rounded-md px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-400" />
+            </div>
+            <button onClick={generateSummary} disabled={summaryGenerating}
+              className={buttonVariants() + " inline-flex items-center gap-2"}>
+              {summaryGenerating
+                ? <><Loader2 size={14} className="animate-spin" /> Generating…</>
+                : <><RefreshCw size={14} /> {summary ? "Regenerate" : "Generate"} Summary</>}
+            </button>
+            {summary && (
+              <button onClick={downloadSummary}
+                className={buttonVariants({ variant: "outline" }) + " inline-flex items-center gap-2"}>
+                <Download size={14} /> Download .md
+              </button>
+            )}
+            {summary && (
+              <span className="text-xs text-gray-400 self-end pb-2">
+                Last generated: {new Date(summary.generated_at).toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                {summary.period_from && ` · Period: ${summary.period_from} – ${summary.period_to ?? "present"}`}
+              </span>
+            )}
+          </div>
+
+          {/* Content */}
+          {summaryLoading ? (
+            <div className="flex items-center justify-center py-16"><Loader2 size={22} className="animate-spin text-gray-400" /></div>
+          ) : summaryGenerating ? (
+            <div className="flex flex-col items-center justify-center py-16 gap-3 text-gray-400">
+              <Loader2 size={28} className="animate-spin" />
+              <p className="text-sm">Analysing documents and generating summary…</p>
+              <p className="text-xs">This takes 15–30 seconds</p>
+            </div>
+          ) : summary ? (
+            <Card>
+              <CardContent className="py-6 px-8 prose prose-sm max-w-none
+                prose-headings:text-gray-900 prose-headings:font-semibold
+                prose-h2:text-base prose-h2:mt-5 prose-h2:mb-2
+                prose-p:text-gray-700 prose-p:leading-relaxed
+                prose-li:text-gray-700 prose-strong:text-gray-900
+                prose-hr:border-gray-200">
+                <SummaryRenderer markdown={summary.summary_md} />
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="flex flex-col items-center justify-center py-20 gap-3 text-gray-400">
+              <ScrollText size={36} className="opacity-30" />
+              <p className="text-sm">No summary yet.</p>
+              <p className="text-xs">Click "Generate Summary" to create a comprehensive accountant note for this client.</p>
+            </div>
+          )}
         </div>
       )}
 
@@ -1680,6 +1846,53 @@ export default function ClientDetailPage() {
       )}
     </div>
   );
+}
+
+// Simple markdown → HTML renderer (no external dep needed for headings/bold/lists)
+function SummaryRenderer({ markdown }: { markdown: string }) {
+  const lines = markdown.split("\n");
+  const elements: React.ReactNode[] = [];
+  let listItems: string[] = [];
+
+  function flushList() {
+    if (listItems.length === 0) return;
+    elements.push(
+      <ul key={`ul-${elements.length}`} className="list-disc pl-5 space-y-0.5 my-2">
+        {listItems.map((li, i) => <li key={i} dangerouslySetInnerHTML={{ __html: renderInline(li) }} />)}
+      </ul>
+    );
+    listItems = [];
+  }
+
+  function renderInline(text: string) {
+    return text
+      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+      .replace(/\*(.+?)\*/g, "<em>$1</em>")
+      .replace(/`(.+?)`/g, "<code class='bg-gray-100 px-1 rounded text-xs font-mono'>$1</code>");
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith("## ")) {
+      flushList();
+      elements.push(<h2 key={i} className="text-base font-semibold text-gray-900 mt-5 mb-2 border-b pb-1">{line.slice(3)}</h2>);
+    } else if (line.startsWith("### ")) {
+      flushList();
+      elements.push(<h3 key={i} className="text-sm font-semibold text-gray-800 mt-3 mb-1">{line.slice(4)}</h3>);
+    } else if (line.startsWith("- ") || line.startsWith("* ")) {
+      listItems.push(line.slice(2));
+    } else if (line.startsWith("---")) {
+      flushList();
+      elements.push(<hr key={i} className="border-gray-200 my-3" />);
+    } else if (line.trim() === "") {
+      flushList();
+    } else {
+      flushList();
+      elements.push(<p key={i} className="text-sm text-gray-700 leading-relaxed my-1.5" dangerouslySetInnerHTML={{ __html: renderInline(line) }} />);
+    }
+  }
+  flushList();
+  return <div>{elements}</div>;
 }
 
 function LedgerCell({ txnId, value, ledgers, onSave }: {

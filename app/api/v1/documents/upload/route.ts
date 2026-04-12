@@ -155,16 +155,18 @@ export async function POST(request: NextRequest) {
     const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
     if (serviceKey) {
-      // Look up client industry for Layer 1/3 injection in extraction prompt
+      // Look up client industry and TDS flag for extraction prompt
       let clientIndustry: string | null = null;
+      let clientTdsApplicable: boolean = true;
       if (clientId) {
         const { data: clientData } = await supabase
           .from("clients")
-          .select("industry_name")
+          .select("industry_name, tds_applicable")
           .eq("id", clientId)
           .eq("tenant_id", profile.tenant_id)
           .single();
         clientIndustry = clientData?.industry_name ?? null;
+        clientTdsApplicable = clientData?.tds_applicable ?? true;
       }
 
       // Retry up to 3 times with exponential backoff if the Edge Function call fails
@@ -177,6 +179,7 @@ export async function POST(request: NextRequest) {
         budgetLimit,
         clientId: clientId || null,
         clientIndustry,
+        clientTdsApplicable,
       });
 
       (async () => {

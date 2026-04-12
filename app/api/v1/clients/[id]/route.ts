@@ -7,6 +7,7 @@ const updateClientSchema = z.object({
   gstin: z.string().max(15).optional().nullable(),
   pan: z.string().max(10).optional().nullable(),
   industry_name: z.string().max(100).optional().nullable(),
+  tds_applicable: z.boolean().optional(),
 });
 
 // GET — single client + their documents
@@ -30,7 +31,7 @@ export async function GET(
 
     const { data: client, error: clientError } = await supabase
       .from("clients")
-      .select("id, client_name, gstin, pan, industry_name, created_at")
+      .select("id, client_name, gstin, pan, industry_name, tds_applicable, created_at")
       .eq("id", id)
       .eq("tenant_id", profile.tenant_id)
       .single();
@@ -126,7 +127,7 @@ export async function PATCH(
       .update(parsed.data)
       .eq("id", id)
       .eq("tenant_id", profile.tenant_id)
-      .select("id, client_name, gstin, pan, industry_name")
+      .select("id, client_name, gstin, pan, industry_name, tds_applicable")
       .single();
 
     if (error || !client) {

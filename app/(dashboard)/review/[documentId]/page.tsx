@@ -98,6 +98,7 @@ export default function ReviewDetailPage() {
   const [possibleMisclassification, setPossibleMisclassification] = useState(false);
   const [possibleDuplicate, setPossibleDuplicate] = useState(false);
   const [duplicateDocId, setDuplicateDocId] = useState<string | null>(null);
+  const [duplicateInfo, setDuplicateInfo] = useState<{ invoiceNumber: string | null; vendorName: string | null; invoiceDate: string | null; originalFilename: string | null } | null>(null);
   const [reclassifying, setReclassifying] = useState(false);
   const [showPostPreview, setShowPostPreview] = useState(false);
   const [posting, setPosting] = useState(false);
@@ -109,7 +110,7 @@ export default function ReviewDetailPage() {
       .then((d) => {
         setDocument(d.document);
         if (d.possibleMisclassification) setPossibleMisclassification(true);
-        if (d.possibleDuplicate) { setPossibleDuplicate(true); setDuplicateDocId(d.duplicateDocId ?? null); }
+        if (d.possibleDuplicate) { setPossibleDuplicate(true); setDuplicateDocId(d.duplicateDocId ?? null); setDuplicateInfo(d.duplicateInfo ?? null); }
         setExtractions(
           (d.extractions ?? []).map((e: Extraction) => ({
             ...e,
@@ -396,15 +397,24 @@ export default function ReviewDetailPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {!isReadonly && <button
-            onClick={rerunExtraction}
-            disabled={rerunning}
-            title="Re-run AI extraction with latest rules (TDS inference, ledger suggestion)"
-            className={buttonVariants({ variant: "outline" }) + " text-amber-600 border-amber-300 hover:bg-amber-50"}
-          >
-            {rerunning ? <Loader2 size={14} className="mr-2 animate-spin" /> : <RotateCcw size={14} className="mr-2" />}
-            Re-run extraction
-          </button>}
+          {!isReadonly && (
+            <div className="flex flex-col items-end gap-0.5">
+              <button
+                onClick={rerunExtraction}
+                disabled={rerunning}
+                title="Re-run AI extraction with latest rules (TDS inference, ledger suggestion)"
+                className={buttonVariants({ variant: "outline" }) + " text-amber-600 border-amber-300 hover:bg-amber-50"}
+              >
+                {rerunning ? <Loader2 size={14} className="mr-2 animate-spin" /> : <RotateCcw size={14} className="mr-2" />}
+                Re-run extraction
+              </button>
+              {document?.processed_at && (
+                <span className="text-xs text-gray-400">
+                  Last run: {new Date(document.processed_at).toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                </span>
+              )}
+            </div>
+          )}
           {!isReadonly && highConfidenceCount > 0 && (
             <button
               onClick={bulkAcceptHighConfidence}
@@ -476,16 +486,27 @@ export default function ReviewDetailPage() {
         <div className="overflow-y-auto space-y-3 pr-1">
           {/* Duplicate invoice warning */}
           {possibleDuplicate && (
-            <div className="flex items-start gap-3 px-3 py-2.5 rounded-lg border border-red-300 bg-red-50 text-sm">
+            <div className="flex items-start gap-3 px-3 py-3 rounded-lg border border-red-300 bg-red-50 text-sm">
               <span className="text-red-500 mt-0.5 flex-shrink-0">⚠</span>
-              <div className="flex-1">
-                <p className="font-medium text-red-800">Possible duplicate invoice</p>
-                <p className="text-red-700 text-xs mt-0.5">Same invoice number and vendor already exists for this client. Verify before marking reviewed to avoid double-booking.</p>
+              <div className="flex-1 min-w-0">
+                <p className="font-medium text-red-800">Duplicate invoice detected</p>
+                {duplicateInfo ? (
+                  <p className="text-red-700 text-xs mt-1">
+                    Invoice <span className="font-semibold">{duplicateInfo.invoiceNumber ?? "—"}</span>
+                    {duplicateInfo.vendorName && <> from <span className="font-semibold">{duplicateInfo.vendorName}</span></>}
+                    {duplicateInfo.invoiceDate && <> dated <span className="font-semibold">{duplicateInfo.invoiceDate}</span></>}
+                    {" "}was already uploaded
+                    {duplicateInfo.originalFilename && <> as <span className="font-mono text-red-600">{duplicateInfo.originalFilename}</span></>}.
+                    {" "}Do not mark both as reviewed — this will cause double-booking.
+                  </p>
+                ) : (
+                  <p className="text-red-700 text-xs mt-0.5">Same invoice number and vendor already exists for this client. Verify before marking reviewed to avoid double-booking.</p>
+                )}
               </div>
               {duplicateDocId && (
                 <a href={`/review/${duplicateDocId}?readonly=1`} target="_blank"
-                  className="flex-shrink-0 text-xs px-2.5 py-1 rounded bg-red-600 text-white hover:bg-red-700">
-                  View original →
+                  className="flex-shrink-0 text-xs px-2.5 py-1.5 rounded bg-red-600 text-white hover:bg-red-700 whitespace-nowrap">
+                  View other invoice →
                 </a>
               )}
             </div>

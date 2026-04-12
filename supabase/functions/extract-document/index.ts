@@ -147,7 +147,7 @@ Deno.serve(async (req) => {
 
     const body = await req.json();
     documentId = body.documentId;
-    const { tenantId, storagePath, documentType, monthlySpend, clientId, clientIndustry } = body;
+    const { tenantId, storagePath, documentType, monthlySpend, clientId, clientIndustry, clientTdsApplicable } = body;
 
     if (!documentId || !tenantId) {
       return new Response(JSON.stringify({ error: "documentId and tenantId required" }), {
@@ -627,18 +627,25 @@ Return JSON in this exact format:
 
     if (!extractedTdsSection || extractedTdsConfidence < 0.6) {
       for (const rule of TDS_KEYWORD_RULES) {
-        if (rule.keywords.test(vendorForTds) && totalAmountNum >= rule.threshold) {
-          const inferenceConfidence = 0.78; // rule-based, not document-read
-          if (!parsed["tds_section"]?.value || (parsed["tds_section"].confidence ?? 0) < inferenceConfidence) {
-            parsed["tds_section"] = { value: rule.section,           confidence: inferenceConfidence };
-            parsed["tds_rate"]    = { value: rule.rate,              confidence: inferenceConfidence };
-            tdsReasoning = `Auto-inferred: vendor/service keyword matched ${rule.section} (${rule.rate}% rate, applies on amounts ≥ ₹${rule.threshold.toLocaleString("en-IN")})`;
-            // Calculate TDS amount if not already extracted with reasonable confidence
-            if (!parsed["tds_amount"]?.value || (parsed["tds_amount"].confidence ?? 0) < 0.5) {
-              const base = parseFloat(parsed["taxable_value"]?.value ?? "0") || totalAmountNum;
-              const tdsAmt = (base * parseFloat(rule.rate) / 100).toFixed(2);
-              parsed["tds_amount"] = { value: tdsAmt, confidence: 0.72 };
+        if (rule.keywords.test(vendorForTds)) {
+          if (totalAmountNum >= rule.threshold) {
+            const inferenceConfidence = 0.78; // rule-based, not document-read
+            if (!parsed["tds_section"]?.value || (parsed["tds_section"].confidence ?? 0) < inferenceConfidence) {
+              parsed["tds_section"] = { value: rule.section,           confidence: inferenceConfidence };
+              parsed["tds_rate"]    = { value: rule.rate,              confidence: inferenceConfidence };
+              tdsReasoning = `Auto-inferred: vendor/service keyword matched ${rule.section} (${rule.rate}% rate, applies on amounts ≥ ₹${rule.threshold.toLocaleString("en-IN")})`;
+              // Calculate TDS amount if not already extracted with reasonable confidence
+              if (!parsed["tds_amount"]?.value || (parsed["tds_amount"].confidence ?? 0) < 0.5) {
+                const base = parseFloat(parsed["taxable_value"]?.value ?? "0") || totalAmountNum;
+                const tdsAmt = (base * parseFloat(rule.rate) / 100).toFixed(2);
+                parsed["tds_amount"] = { value: tdsAmt, confidence: 0.72 };
+              }
             }
+          } else if (totalAmountNum > 0) {
+            // Keyword matches but invoice is below the TDS threshold — explicit message
+            parsed["tds_section"] = { value: "No TDS", confidence: 0.80 };
+            parsed["tds_rate"]    = { value: "0",       confidence: 0.80 };
+            tdsReasoning = `No TDS: ${rule.section} applies on amounts ≥ ₹${rule.threshold.toLocaleString("en-IN")} — this invoice (₹${totalAmountNum.toLocaleString("en-IN")}) is below threshold`;
           }
           break; // first matching rule wins
         }
@@ -679,6 +686,8 @@ Return JSON in this exact format:
           "9965":   { section: "194C", rate: "2",  desc: "goods transport (GTA)" },
           "998536": { section: "194J", rate: "10", desc: "management consulting services" },
           "998532": { section: "194J", rate: "10", desc: "HR / staffing services" },
+          "999293": { section: "194J", rate: "10", desc: "education & training services" },
+          "9992":   { section: "194J", rate: "10", desc: "education services" },
         };
         const sacEntry = SAC_TDS_MAP[hsnForTds.substring(0, 6)] ?? SAC_TDS_MAP[hsnForTds.substring(0, 4)];
         if (sacEntry && totalAmountNum >= 30000) {
@@ -801,6 +810,10 @@ Return JSON in this exact format:
       else if (/rent|lease.rent|office.rent|premises/.test(vendorForSac)) {
         parsed["hsn_sac_code"] = { value: "997212", confidence: 0.75 };
       }
+      // Education / training / edtech → SAC 999293
+      else if (/training|educat|academy|institute|elearning|edtech|skill|coaching|tuition|workshop|seminar|course/.test(vendorForSac)) {
+        parsed["hsn_sac_code"] = { value: "999293", confidence: 0.75 };
+      }
     }
 
     // ----------------------------------------------------------------
@@ -872,6 +885,8 @@ Return JSON in this exact format:
               "998536": { ledger: "Support Services",                  desc: "SAC 998536 — management consulting" },
               "9954":   { ledger: "Construction / Civil Work",         desc: "SAC 9954 — construction services" },
               "998311": { ledger: "Professional Fees",                 desc: "SAC 998311 — architectural & engineering services" },
+              "999293": { ledger: "Staff Training & Development",      desc: "SAC 999293 — education & training services" },
+              "9992":   { ledger: "Staff Training & Development",      desc: "SAC 9992 — education services" },
             };
             // Try 6-digit match first, then 4-digit
             const entry = SAC_LEDGER_MAP[hsnClean.substring(0, 6)] ?? SAC_LEDGER_MAP[hsnClean.substring(0, 4)];
@@ -933,6 +948,17 @@ Return JSON in this exact format:
     } else {
       // Ledger was AI-extracted with reasonable confidence
       ledgerReasoning = `AI extracted from document (confidence ${Math.round((parsed["suggested_ledger"]?.confidence ?? 0) * 100)}%)`;
+    }
+
+    // ----------------------------------------------------------------
+    // CLIENT TDS FLAG — final override if client is not liable to deduct TDS
+    // Applies when the CA has marked the client as below turnover threshold
+    // ----------------------------------------------------------------
+    if (clientTdsApplicable === false) {
+      parsed["tds_section"] = { value: "No TDS", confidence: 1.0 };
+      parsed["tds_rate"]    = { value: "0",       confidence: 1.0 };
+      parsed["tds_amount"]  = { value: null,      confidence: 1.0 };
+      tdsReasoning = "No TDS — client not liable to deduct TDS (annual turnover below the prescribed limit)";
     }
 
     // Store reasoning fields — always store something so the UI caption never disappears
