@@ -69,7 +69,9 @@ export async function GET(
       }
     }
 
-    // Misclassification detection: flag purchase invoices where vendor_name ≈ client name
+    // Misclassification detection: flag purchase invoices where vendor IS the client.
+    // GSTIN-first: if vendor_gstin matches client's own GSTIN → definitive flag.
+    // Fall back to name-word overlap only when vendor_gstin is absent.
     const purchaseDocIds = (documents ?? [])
       .filter((d) => d.document_type === "purchase_invoice")
       .map((d) => d.id);
@@ -79,10 +81,30 @@ export async function GET(
         .from("extractions").select("document_id, extracted_value")
         .in("document_id", purchaseDocIds).eq("field_name", "vendor_name")
         .not("status", "eq", "rejected").not("extracted_value", "is", null);
+      const { data: gstinExts } = await supabase
+        .from("extractions").select("document_id, extracted_value")
+        .in("document_id", purchaseDocIds).eq("field_name", "vendor_gstin")
+        .not("status", "eq", "rejected").not("extracted_value", "is", null);
+
+      // Build a map: document_id → vendor_gstin
+      const vendorGstinMap: Record<string, string> = {};
+      for (const ext of gstinExts ?? []) {
+        vendorGstinMap[ext.document_id] = (ext.extracted_value ?? "").trim().toUpperCase();
+      }
+      const clientGstin = (client.gstin ?? "").trim().toUpperCase();
       const clientWords = client.client_name.toLowerCase().split(/\s+/).filter((w: string) => w.length > 3);
+
       for (const ext of vendorExts ?? []) {
-        const v = (ext.extracted_value ?? "").toLowerCase();
-        if (clientWords.some((word: string) => v.includes(word))) mismatchSet.add(ext.document_id);
+        const vendorGstin = vendorGstinMap[ext.document_id] ?? "";
+        if (vendorGstin && clientGstin) {
+          // Definitive: vendor GSTIN matches client's own GSTIN
+          if (vendorGstin === clientGstin) mismatchSet.add(ext.document_id);
+          // If present but different → not a mismatch, skip
+        } else if (!vendorGstin) {
+          // No GSTIN — fall back to name-word overlap
+          const v = (ext.extracted_value ?? "").toLowerCase();
+          if (clientWords.some((word: string) => v.includes(word))) mismatchSet.add(ext.document_id);
+        }
       }
     }
 

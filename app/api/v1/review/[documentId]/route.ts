@@ -57,16 +57,26 @@ export async function GET(
     .createSignedUrl(doc.storage_path, 900);
 
   // Misclassification check: if vendor_name ≈ client's own name on a purchase invoice
+  // GSTIN-first: if vendor_gstin is present, use it to disambiguate definitively.
+  // Only fall back to name-matching when vendor_gstin is absent.
   let possibleMisclassification = false;
   if (doc.client_id && doc.document_type === "purchase_invoice") {
     const { data: clientRecord } = await supabase
-      .from("clients").select("client_name").eq("id", doc.client_id).single();
+      .from("clients").select("client_name, gstin").eq("id", doc.client_id).single();
     const vendorName = (extractions.find(e => e.field_name === "vendor_name")?.extracted_value ?? "").toLowerCase();
+    const vendorGstin = (extractions.find(e => e.field_name === "vendor_gstin")?.extracted_value ?? "").trim().toUpperCase();
+    const clientGstin = (clientRecord?.gstin ?? "").trim().toUpperCase();
     const clientName = (clientRecord?.client_name ?? "").toLowerCase();
-    if (vendorName && clientName) {
+
+    if (vendorGstin && clientGstin) {
+      // Definitive check: vendor GSTIN matches client's own GSTIN → it IS the client
+      possibleMisclassification = vendorGstin === clientGstin;
+    } else if (!vendorGstin && vendorName && clientName) {
+      // No GSTIN available — fall back to name-word overlap (uncertain)
       const clientWords = clientName.split(/\s+/).filter((w: string) => w.length > 3);
       possibleMisclassification = clientWords.some((word: string) => vendorName.includes(word));
     }
+    // If vendorGstin present but ≠ clientGstin → definitely a different entity, never flag
   }
 
   // Duplicate invoice detection: same invoice_number + vendor_name in another document for same client
