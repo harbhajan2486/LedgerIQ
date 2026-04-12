@@ -93,7 +93,7 @@ interface TdsRule {
 const TDS_KEYWORD_RULES: TdsRule[] = [
   {
     section: "194J", rate: "10", threshold: 30000,
-    keywords: /\b(advocate|lawyer|legal|attorney|solicitor|chartered.accountant|ca.firm|auditor|audit|consultant|advisory|architect|interior.design|doctor|physician|surgeon|hospital|clinic|medical|healthcare|physiotherap|it.service|software|technology|technical.service|data.processing|research|scientific|information.tech)\b/i,
+    keywords: /\b(advocate|lawyer|legal|attorney|solicitor|chartered.accountant|ca.firm|auditor|audit|consultant|advisory|architect|interior.design|doctor|physician|surgeon|hospital|clinic|medical|healthcare|physiotherap|it.service|software|technology|technical.service|data.processing|research|scientific|information.tech|training|educat|academy|institute|elearning|e.learning|edtech|skill.develop|coaching|tuition|course.provider|learning|upskill|workshop|seminar)\b/i,
   },
   {
     section: "194C", rate: "2", threshold: 30000,
@@ -136,6 +136,7 @@ const INVOICE_LEDGER_RULES: LedgerRule[] = [
   { keywords: /\b(computer|laptop|server|hardware|software.licen|subscription|microsoft|adobe|google.workspace|zoom)\b/i, ledger: "Computer / IT Expenses" },
   { keywords: /\b(bank.charge|service.charge|sms.charge|annual.fee|processing.fee|atm.charge)\b/i, ledger: "Bank Charges" },
   { keywords: /\b(loan|emi|repayment|instalment|principal)\b/i,                   ledger: "Loan Repayment" },
+  { keywords: /\b(training|educat|academy|institute|elearning|e.learning|edtech|skill.develop|coaching|tuition|course|learning|upskill|workshop|seminar)\b/i, ledger: "Staff Training & Development" },
 ];
 
 Deno.serve(async (req) => {
@@ -891,13 +892,19 @@ Return JSON in this exact format:
       ledgerReasoning = `AI extracted from document (confidence ${Math.round((parsed["suggested_ledger"]?.confidence ?? 0) * 100)}%)`;
     }
 
-    // Store reasoning fields
-    if (tdsReasoning) {
-      parsed["tds_section_reasoning"] = { value: tdsReasoning, confidence: 1.0 };
+    // Store reasoning fields — always store something so the UI caption never disappears
+    if (!tdsReasoning) {
+      tdsReasoning = parsed["tds_section"]?.value
+        ? `AI extracted from document (confidence ${Math.round((parsed["tds_section"].confidence ?? 0) * 100)}%)`
+        : "Could not auto-determine TDS — please verify based on vendor type and amount";
     }
-    if (ledgerReasoning) {
-      parsed["suggested_ledger_reasoning"] = { value: ledgerReasoning, confidence: 1.0 };
+    if (!ledgerReasoning) {
+      ledgerReasoning = parsed["suggested_ledger"]?.value
+        ? `AI extracted from document (confidence ${Math.round((parsed["suggested_ledger"].confidence ?? 0) * 100)}%)`
+        : "Ledger not auto-mapped — select manually from your Tally master";
     }
+    parsed["tds_section_reasoning"]      = { value: tdsReasoning,   confidence: 1.0 };
+    parsed["suggested_ledger_reasoning"] = { value: ledgerReasoning, confidence: 1.0 };
 
     // ----------------------------------------------------------------
     // ITC ELIGIBILITY — expenses cannot claim input credit; force Blocked
