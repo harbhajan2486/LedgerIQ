@@ -55,8 +55,8 @@ export async function POST(
     const periodFrom: string | null = body.period_from ?? null;
     const periodTo: string | null   = body.period_to   ?? null;
 
-    // ── Rate limit: max 1 generation per client per hour ──────────────────────
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    // ── Rate limit: max 1 generation per client per 15 minutes ──────────────────────
+    const oneHourAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     const { data: recentSummary } = await supabase
       .from("client_summaries")
       .select("generated_at")
@@ -68,7 +68,7 @@ export async function POST(
     if (recentSummary) {
       const nextAllowed = new Date(new Date(recentSummary.generated_at).getTime() + 60 * 60 * 1000);
       return NextResponse.json({
-        error: `Summary was just generated. You can regenerate after ${nextAllowed.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}.`,
+        error: `Summary was recently generated. You can regenerate after ${nextAllowed.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}.`,
       }, { status: 429 });
     }
 
@@ -183,17 +183,24 @@ export async function POST(
       salesTaxable += parseFloat(latestByDocField.get(`${doc.id}__taxable_value`) ?? "0") || 0;
     }
 
-    // Reconciliation
+    // Reconciliation — fetch status + category so we can separate
+    // truly unknown transactions from already-categorised ones
     const { data: reconStats } = await supabase
       .from("bank_transactions")
-      .select("status")
+      .select("status, category")
       .eq("client_id", id)
       .eq("tenant_id", profile.tenant_id);
-    const reconSummary = { matched: 0, possible: 0, unmatched: 0 };
+    const reconSummary = { matched: 0, possible: 0, unmatchedCategorised: 0, unmatchedNeedsAttention: 0 };
     for (const t of reconStats ?? []) {
-      if (t.status === "matched")   reconSummary.matched++;
-      else if (t.status === "possible") reconSummary.possible++;
-      else reconSummary.unmatched++;
+      if (t.status === "matched" || t.status === "manual_match") {
+        reconSummary.matched++;
+      } else if (t.status === "possible_match") {
+        reconSummary.possible++;
+      } else if (t.category) {
+        reconSummary.unmatchedCategorised++; // labelled (salary, bank charge, customer receipt, etc.) — resolved
+      } else {
+        reconSummary.unmatchedNeedsAttention++; // no invoice, no label — genuinely outstanding
+      }
     }
 
     // Exceptions
@@ -269,9 +276,11 @@ Total sales value (gross): ₹${fmt(salesTotal)}
 Total taxable sales: ₹${fmt(salesTaxable)}
 
 BANK RECONCILIATION
-Matched transactions: ${reconSummary.matched}
+Matched / manually linked transactions: ${reconSummary.matched}
 Possible matches (pending confirmation): ${reconSummary.possible}
-Unmatched transactions: ${reconSummary.unmatched}
+Categorised but not invoice-matched (salaries, bank charges, receipts, etc.): ${reconSummary.unmatchedCategorised}
+Genuinely unaccounted transactions (no match, no category): ${reconSummary.unmatchedNeedsAttention}
+Note: "Categorised" means the accountant has labelled the transaction type but it has no linked invoice. This is normal for salary/bank-charge transactions. Only the "genuinely unaccounted" count requires follow-up.
 
 DATA QUALITY FLAGS
 Low-confidence extractions: ${lowConfCount}
@@ -282,7 +291,7 @@ Failed extractions: ${failedDocs}
     // ── 5. Call Claude Sonnet ──────────────────────────────────────────────────
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 2000,
+      max_tokens: 4000,
       temperature: 0.3,
       system: `You are a senior chartered accountant writing a technical review note for an Indian accounting firm.
 Write in clear, professional English. Use proper Indian accounting terminology (CGST, SGST, IGST, ITC, TDS sections, etc.).

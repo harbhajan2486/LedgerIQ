@@ -47,14 +47,16 @@ export async function GET(request: NextRequest) {
   if (clientId) txnQuery = txnQuery.eq("client_id", clientId);
   const { data: allTxns } = await txnQuery;
 
-  // Fetch unreconciled invoices
-  const { data: unmatchedDocs } = await supabase
+  // Fetch unreconciled invoices — scoped to client if provided
+  let docsQuery = supabase
     .from("documents")
     .select("id, original_filename, document_type, status")
     .eq("tenant_id", tenantId)
     .in("status", ["review_required", "reviewed"])
     .order("created_at", { ascending: false })
     .limit(200);
+  if (clientId) docsQuery = docsQuery.eq("client_id", clientId);
+  const { data: unmatchedDocs } = await docsQuery;
 
   // Get amounts for unmatched docs
   const unmatchedDocIds = (unmatchedDocs ?? []).map((d) => d.id);
