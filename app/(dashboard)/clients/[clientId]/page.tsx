@@ -7,7 +7,8 @@ import {
   Building2, ChevronLeft, FileText, Loader2, Upload,
   CheckCircle2, AlertTriangle, Clock, RefreshCw, Landmark,
   Link2, Link2Off, X, Pencil, BookOpen, Download, Plus, Trash2,
-  ShoppingCart, Receipt, Wallet, CreditCard, FolderOpen, ScrollText
+  ShoppingCart, Receipt, Wallet, CreditCard, FolderOpen, ScrollText,
+  BarChart3, ChevronDown, ChevronRight, ExternalLink
 } from "lucide-react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
@@ -147,7 +148,7 @@ export default function ClientDetailPage() {
   const [retrying, setRetrying] = useState<string | null>(null);
   const [retagging, setRetagging] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"documents" | "bank" | "reconciliation" | "ledgers" | "gst" | "expected" | "summary">("documents");
+  const [activeTab, setActiveTab] = useState<"documents" | "bank" | "reconciliation" | "ledgers" | "gst" | "expected" | "summary" | "ledger_view">("documents");
   const [docFolder, setDocFolder] = useState<string | null>(() => searchParams.get("folder")); // restore folder from back-navigation
   const [bankTxns, setBankTxns] = useState<BankTxn[]>([]);
   const [bankSummary, setBankSummary] = useState<BankSummary | null>(null);
@@ -189,6 +190,58 @@ export default function ClientDetailPage() {
   const [summaryGenerating, setSummaryGenerating] = useState(false);
   const [summaryPeriodFrom, setSummaryPeriodFrom] = useState("");
   const [summaryPeriodTo, setSummaryPeriodTo] = useState("");
+
+  // Ledger view state
+  interface InvoiceLine {
+    doc_id: string; doc_type: string; doc_status: string;
+    invoice_number: string | null; invoice_date: string | null;
+    taxable_value: number; cgst: number; sgst: number; igst: number;
+    total_gst: number; total_amount: number;
+    tds_section: string | null; tds_rate: string | null; tds_amount: number;
+    net_payable: number; itc_eligible: string | null; suggested_ledger: string | null;
+    payment: { date: string; amount: number; ref: string | null; narration: string } | null;
+  }
+  interface VendorLedger {
+    vendor_name: string; invoice_count: number;
+    total_taxable: number; total_gst: number; total_invoiced: number;
+    total_tds: number; net_payable: number; paid: number; outstanding: number;
+    invoices: InvoiceLine[];
+  }
+  interface ExpenseHead {
+    ledger_name: string; invoice_count: number;
+    total_taxable: number; total_gst: number; total_invoiced: number;
+    total_tds: number; itc_eligible: number; itc_blocked: number;
+  }
+  interface LedgerData {
+    vendors: VendorLedger[];
+    expense_heads: ExpenseHead[];
+    totals: { invoiced: number; gst: number; tds: number; net_payable: number; paid: number; outstanding: number };
+  }
+  const [ledgerData, setLedgerData] = useState<LedgerData | null>(null);
+  const [ledgerLoading, setLedgerLoading] = useState(false);
+  const [ledgerView, setLedgerView] = useState<"vendor" | "head">("vendor");
+  const [ledgerFromDate, setLedgerFromDate] = useState("");
+  const [ledgerToDate, setLedgerToDate] = useState("");
+  const [expandedVendors, setExpandedVendors] = useState<Set<string>>(new Set());
+
+  function loadLedger(from?: string, to?: string) {
+    setLedgerLoading(true);
+    const p = new URLSearchParams();
+    if (from) p.set("from", from);
+    if (to)   p.set("to", to);
+    fetch(`/api/v1/clients/${clientId}/ledger?${p}`)
+      .then(r => r.json())
+      .then(d => setLedgerData(d))
+      .finally(() => setLedgerLoading(false));
+  }
+
+  function toggleVendor(name: string) {
+    setExpandedVendors(prev => {
+      const s = new Set(prev);
+      s.has(name) ? s.delete(name) : s.add(name);
+      return s;
+    });
+  }
 
   function loadSummary() {
     setSummaryLoading(true);
@@ -517,6 +570,7 @@ export default function ClientDetailPage() {
   useEffect(() => { loadData(); }, [clientId]);
   useEffect(() => { if (activeTab === "bank") { loadBankTxns(); loadLedgers(); } }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "reconciliation") loadRecon(); }, [activeTab, clientId]);
+  useEffect(() => { if (activeTab === "ledger_view" && !ledgerData) loadLedger(); }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "ledgers") loadLedgers(); }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "gst") loadGstData(); }, [activeTab, clientId, gstPeriodFrom, gstPeriodTo]);
   useEffect(() => { if (activeTab === "expected") loadExpected(); }, [activeTab, clientId]);
@@ -710,13 +764,14 @@ export default function ClientDetailPage() {
           { key: "expected", label: "Expected Invoices", icon: <Clock size={14} />, count: expectedInvoices.filter(e => e.status === "pending").length || null },
           { key: "bank", label: "Bank Statements", icon: <Landmark size={14} />, count: bankSummary?.total ?? null },
           { key: "reconciliation", label: "Reconciliation", icon: <Link2 size={14} />, count: reconData?.summary.matched ?? null },
+          { key: "ledger_view", label: "Ledger", icon: <BarChart3 size={14} />, count: ledgerData?.vendors.length ?? null },
           { key: "ledgers", label: "Ledger Master", icon: <BookOpen size={14} />, count: ledgers.length || null },
           { key: "gst", label: "GST Filing", icon: <Receipt size={14} />, count: null },
           { key: "summary", label: "Summary Note", icon: <ScrollText size={14} />, count: null },
         ] as const).map((tab) => (
           <button
             key={tab.key}
-            onClick={() => { setActiveTab(tab.key); if (tab.key === "summary" && !summary && !summaryLoading) loadSummary(); }}
+            onClick={() => { setActiveTab(tab.key); if (tab.key === "summary" && !summary && !summaryLoading) loadSummary(); if (tab.key === "ledger_view" && !ledgerData && !ledgerLoading) loadLedger(); }}
             className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
               activeTab === tab.key
                 ? "border-blue-500 text-blue-600"
@@ -1438,6 +1493,202 @@ export default function ClientDetailPage() {
           </Card>
         </div>
       )}
+
+      {/* Ledger View tab */}
+      {activeTab === "ledger_view" && (() => {
+        const inr = (n: number) => n.toLocaleString("en-IN", { maximumFractionDigits: 0 });
+        return (
+          <div className="space-y-4">
+            {/* Controls */}
+            <div className="flex items-end gap-3 flex-wrap">
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">From</label>
+                <input type="date" value={ledgerFromDate} onChange={e => setLedgerFromDate(e.target.value)}
+                  className="text-sm border border-gray-300 rounded-md px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-400" />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">To</label>
+                <input type="date" value={ledgerToDate} onChange={e => setLedgerToDate(e.target.value)}
+                  className="text-sm border border-gray-300 rounded-md px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-400" />
+              </div>
+              <button onClick={() => loadLedger(ledgerFromDate || undefined, ledgerToDate || undefined)} disabled={ledgerLoading}
+                className={buttonVariants({ variant: "outline" }) + " inline-flex items-center gap-2"}>
+                {ledgerLoading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />} Refresh
+              </button>
+              {/* View toggle */}
+              <div className="flex rounded-md border border-gray-300 overflow-hidden ml-auto">
+                <button onClick={() => setLedgerView("vendor")}
+                  className={`px-3 py-1.5 text-sm ${ledgerView === "vendor" ? "bg-blue-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}>
+                  By Vendor
+                </button>
+                <button onClick={() => setLedgerView("head")}
+                  className={`px-3 py-1.5 text-sm border-l border-gray-300 ${ledgerView === "head" ? "bg-blue-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}>
+                  By Expense Head
+                </button>
+              </div>
+            </div>
+
+            {ledgerLoading ? (
+              <div className="flex items-center justify-center py-20 gap-2 text-gray-400 text-sm">
+                <Loader2 size={18} className="animate-spin" /> Building ledger…
+              </div>
+            ) : !ledgerData || (ledgerData.vendors.length === 0 && ledgerData.expense_heads.length === 0) ? (
+              <div className="flex flex-col items-center justify-center py-20 gap-2 text-gray-400">
+                <BarChart3 size={36} className="opacity-30" />
+                <p className="text-sm">No purchase invoices or expenses found for this client.</p>
+                <p className="text-xs">Upload documents and run AI extraction to populate the ledger.</p>
+              </div>
+            ) : (
+              <>
+                {/* Summary cards */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                  {[
+                    { label: "Total Invoiced",  value: `₹${inr(ledgerData.totals.invoiced)}`,   cls: "text-gray-900" },
+                    { label: "GST Input",        value: `₹${inr(ledgerData.totals.gst)}`,         cls: "text-blue-700" },
+                    { label: "TDS Deducted",     value: `₹${inr(ledgerData.totals.tds)}`,         cls: "text-orange-700" },
+                    { label: "Net Payable",      value: `₹${inr(ledgerData.totals.net_payable)}`, cls: "text-gray-900" },
+                    { label: "Paid",             value: `₹${inr(ledgerData.totals.paid)}`,        cls: "text-green-700" },
+                    { label: "Outstanding",      value: `₹${inr(ledgerData.totals.outstanding)}`, cls: ledgerData.totals.outstanding > 0 ? "text-red-600" : "text-green-700" },
+                  ].map(({ label, value, cls }) => (
+                    <Card key={label} className="border border-gray-200">
+                      <CardContent className="p-3">
+                        <p className="text-xs text-gray-500 uppercase tracking-wide">{label}</p>
+                        <p className={`text-lg font-bold mt-0.5 ${cls}`}>{value}</p>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+
+                {/* By Vendor view */}
+                {ledgerView === "vendor" && (
+                  <div className="border border-gray-200 rounded-lg overflow-hidden">
+                    {/* Header row */}
+                    <div className="grid grid-cols-[2fr_1fr_1fr_1fr_1fr_1fr_1fr_40px] gap-2 px-4 py-2 bg-gray-50 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                      <span>Vendor</span>
+                      <span className="text-right">Invoices</span>
+                      <span className="text-right">Taxable</span>
+                      <span className="text-right">GST</span>
+                      <span className="text-right">TDS</span>
+                      <span className="text-right">Net Payable</span>
+                      <span className="text-right">Outstanding</span>
+                      <span />
+                    </div>
+                    {ledgerData.vendors.map((v) => (
+                      <div key={v.vendor_name} className="border-b border-gray-100 last:border-0">
+                        {/* Vendor summary row */}
+                        <button
+                          onClick={() => toggleVendor(v.vendor_name)}
+                          className="w-full grid grid-cols-[2fr_1fr_1fr_1fr_1fr_1fr_1fr_40px] gap-2 px-4 py-3 hover:bg-gray-50 transition-colors text-sm text-left items-center">
+                          <span className="font-medium text-gray-900 truncate flex items-center gap-2">
+                            {expandedVendors.has(v.vendor_name)
+                              ? <ChevronDown size={14} className="text-gray-400 flex-shrink-0" />
+                              : <ChevronRight size={14} className="text-gray-400 flex-shrink-0" />}
+                            {v.vendor_name}
+                          </span>
+                          <span className="text-right text-gray-500">{v.invoice_count}</span>
+                          <span className="text-right text-gray-700">₹{inr(v.total_taxable)}</span>
+                          <span className="text-right text-blue-700">₹{inr(v.total_gst)}</span>
+                          <span className="text-right text-orange-700">₹{inr(v.total_tds)}</span>
+                          <span className="text-right text-gray-900 font-medium">₹{inr(v.net_payable)}</span>
+                          <span className={`text-right font-semibold ${v.outstanding > 100 ? "text-red-600" : "text-green-700"}`}>
+                            ₹{inr(v.outstanding)}
+                          </span>
+                          <span />
+                        </button>
+                        {/* Expanded invoice lines */}
+                        {expandedVendors.has(v.vendor_name) && (
+                          <div className="bg-gray-50 border-t border-gray-100">
+                            {/* Sub-header */}
+                            <div className="grid grid-cols-[120px_130px_1fr_1fr_1fr_1fr_1fr_130px_100px] gap-2 px-8 py-1.5 text-xs font-medium text-gray-400 uppercase tracking-wide border-b border-gray-200">
+                              <span>Date</span>
+                              <span>Invoice #</span>
+                              <span className="text-right">Taxable</span>
+                              <span className="text-right">GST</span>
+                              <span className="text-right">TDS</span>
+                              <span className="text-right">Net Payable</span>
+                              <span className="text-right">ITC</span>
+                              <span className="text-right">Payment</span>
+                              <span />
+                            </div>
+                            {v.invoices.map((inv) => (
+                              <div key={inv.doc_id}
+                                className="grid grid-cols-[120px_130px_1fr_1fr_1fr_1fr_1fr_130px_100px] gap-2 px-8 py-2.5 text-xs border-b border-gray-100 last:border-0 items-center hover:bg-white transition-colors">
+                                <span className="text-gray-500">{inv.invoice_date ?? "—"}</span>
+                                <span className="text-gray-700 font-medium truncate" title={inv.invoice_number ?? ""}>{inv.invoice_number ?? "—"}</span>
+                                <span className="text-right text-gray-700">₹{inr(inv.taxable_value)}</span>
+                                <span className="text-right text-blue-700">₹{inr(inv.total_gst)}</span>
+                                <span className="text-right text-orange-700">
+                                  {inv.tds_section ? <span title={`${inv.tds_section} @ ${inv.tds_rate ?? "?"}%`}>₹{inr(inv.tds_amount)}</span> : "—"}
+                                </span>
+                                <span className="text-right font-medium text-gray-900">₹{inr(inv.net_payable)}</span>
+                                <span className={`text-right font-medium ${inv.itc_eligible === "Yes" ? "text-green-700" : inv.itc_eligible === "Blocked" ? "text-red-600" : "text-gray-400"}`}>
+                                  {inv.itc_eligible ?? "—"}
+                                </span>
+                                <span className="text-right">
+                                  {inv.payment ? (
+                                    <span className="text-green-700" title={`Paid ₹${inr(inv.payment.amount)} on ${inv.payment.date} — ${inv.payment.narration}`}>
+                                      ✓ {inv.payment.date}
+                                    </span>
+                                  ) : (
+                                    <span className="text-amber-600">Unpaid</span>
+                                  )}
+                                </span>
+                                <span className="text-right">
+                                  <Link href={`/review/${inv.doc_id}`}
+                                    className="inline-flex items-center gap-1 text-blue-600 hover:underline">
+                                    View <ExternalLink size={10} />
+                                  </Link>
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* By Expense Head view */}
+                {ledgerView === "head" && (
+                  <div className="border border-gray-200 rounded-lg overflow-hidden">
+                    <div className="grid grid-cols-[2fr_1fr_1fr_1fr_1fr_1fr_1fr] gap-2 px-4 py-2 bg-gray-50 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                      <span>Expense Head</span>
+                      <span className="text-right">Invoices</span>
+                      <span className="text-right">Taxable</span>
+                      <span className="text-right">GST</span>
+                      <span className="text-right">TDS</span>
+                      <span className="text-right">ITC Eligible</span>
+                      <span className="text-right">ITC Blocked</span>
+                    </div>
+                    {ledgerData.expense_heads.map((h) => (
+                      <div key={h.ledger_name}
+                        className="grid grid-cols-[2fr_1fr_1fr_1fr_1fr_1fr_1fr] gap-2 px-4 py-3 border-b border-gray-100 last:border-0 text-sm items-center hover:bg-gray-50">
+                        <span className="font-medium text-gray-900">{h.ledger_name}</span>
+                        <span className="text-right text-gray-500">{h.invoice_count}</span>
+                        <span className="text-right text-gray-700">₹{inr(h.total_taxable)}</span>
+                        <span className="text-right text-blue-700">₹{inr(h.total_gst)}</span>
+                        <span className="text-right text-orange-700">₹{inr(h.total_tds)}</span>
+                        <span className="text-right text-green-700">₹{inr(h.itc_eligible)}</span>
+                        <span className="text-right text-red-600">₹{inr(h.itc_blocked)}</span>
+                      </div>
+                    ))}
+                    {/* Totals row */}
+                    <div className="grid grid-cols-[2fr_1fr_1fr_1fr_1fr_1fr_1fr] gap-2 px-4 py-3 bg-gray-100 text-sm font-semibold border-t border-gray-300">
+                      <span className="text-gray-700">Total</span>
+                      <span className="text-right text-gray-700">{ledgerData.expense_heads.reduce((s, h) => s + h.invoice_count, 0)}</span>
+                      <span className="text-right">₹{inr(ledgerData.totals.invoiced - ledgerData.totals.gst)}</span>
+                      <span className="text-right text-blue-700">₹{inr(ledgerData.totals.gst)}</span>
+                      <span className="text-right text-orange-700">₹{inr(ledgerData.totals.tds)}</span>
+                      <span className="text-right text-green-700">₹{inr(ledgerData.expense_heads.reduce((s, h) => s + h.itc_eligible, 0))}</span>
+                      <span className="text-right text-red-600">₹{inr(ledgerData.expense_heads.reduce((s, h) => s + h.itc_blocked, 0))}</span>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Summary Note tab */}
       {activeTab === "summary" && (
