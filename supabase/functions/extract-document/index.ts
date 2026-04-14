@@ -276,15 +276,15 @@ Deno.serve(async (req) => {
             })
           );
 
-          // Token budget: keep examples under ~500 tokens
-          const exampleText = correctionWithFields
-            .filter((e) => e.field)
-            .slice(0, 5)
-            .map((e) => `Field "${e.field}": previously extracted "${e.wrong}" but correct value was "${e.correct}"`)
-            .join("\n");
+          // PII policy: send only field names + structural correction signal to Anthropic.
+          // Never send actual extracted values (vendor names, GSTINs, amounts) — these are
+          // client financial data that must not leave the tenant's database.
+          const correctedFields = [...new Set(
+            correctionWithFields.filter((e) => e.field).map((e) => e.field)
+          )].slice(0, 5);
 
-          if (exampleText) {
-            fewShotExamples = `\n\nLearned corrections from similar documents:\n${exampleText}\nApply these patterns when extracting fields from this document.\n`;
+          if (correctedFields.length > 0) {
+            fewShotExamples = `\n\nFields that required human correction on similar past documents for this firm: ${correctedFields.map(f => `"${f}"`).join(", ")}. Pay extra attention to these fields — the AI has made mistakes on them before.\n`;
           }
         }
       }
@@ -360,23 +360,11 @@ ${rcmRules ? `\nReverse Charge (RCM):\n${rcmRules}` : ""}
         .order("last_updated", { ascending: false })
         .limit(10);
 
-      if (vendorProfiles && vendorProfiles.length > 0) {
-        const profileLines = vendorProfiles
-          .filter((vp) => vp.invoice_quirks && Object.keys(vp.invoice_quirks).length > 0)
-          .map((vp) => {
-            const quirks = vp.invoice_quirks as Record<string, string>;
-            const quirkStr = Object.entries(quirks)
-              .map(([field, val]) => `${field}="${val}"`)
-              .join(", ");
-            return `Vendor "${vp.vendor_name}"${vp.gstin ? ` (GSTIN: ${vp.gstin})` : ""}: ${quirkStr}${vp.tds_category ? `, TDS=${vp.tds_category}` : ""}`;
-          });
-
-        if (profileLines.length > 0) {
-          layer3Context = `\n\nLayer 3 — Your firm's learned vendor patterns (apply with high confidence for matching vendors):
-${profileLines.join("\n")}
-`;
-        }
-      }
+      // PII policy: vendor names, GSTINs, and learned field values are applied as
+      // deterministic post-processing overrides (below) — NOT injected into the prompt.
+      // Injecting them would send client financial data to Anthropic's servers unnecessarily.
+      // layer3Context remains empty; Layer 3 override happens after parsing.
+      void vendorProfiles; // fetched above for post-processing use only
     } catch {
       // Layer 3 retrieval failed — continue without it
     }

@@ -251,14 +251,22 @@ export default function ReviewDetailPage() {
           const r = await fetch(`/api/v1/documents/${documentId}/status`);
           if (!r.ok) return;
           const d = await r.json();
-          if (d.status === "review_required" || d.status === "failed") {
+          if (d.status === "review_required") {
             clearInterval(poll);
             window.location.reload();
+          } else if (d.status === "failed") {
+            clearInterval(poll);
+            setRerunning(false);
+            toast.error("AI extraction failed — the document could not be processed. This usually means the file is corrupted, password-protected, or the AI service is temporarily unavailable. Try re-running in a few minutes or contact support if it keeps failing.", { duration: 8000 });
           }
         } catch { /* keep polling */ }
       }, 5000);
-      // Safety timeout — reload after 3 min regardless
-      setTimeout(() => { clearInterval(poll); window.location.reload(); }, 180000);
+      // Safety timeout — stop polling after 3 min, show timeout message
+      setTimeout(() => {
+        clearInterval(poll);
+        setRerunning(false);
+        toast.error("Extraction is taking longer than expected. Refresh the page in a few minutes to check if it completed.", { duration: 8000 });
+      }, 180000);
     } catch {
       toast.error("Re-extraction failed");
       setRerunning(false);

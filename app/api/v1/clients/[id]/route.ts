@@ -135,14 +135,16 @@ export async function PATCH(
     }
 
     // Audit log — capture what changed (especially tds_applicable toggle)
-    await supabase.from("audit_log").insert({
-      tenant_id: profile.tenant_id,
-      user_id: user.id,
-      action: "update_client",
-      entity_type: "client",
-      entity_id: id,
-      new_value: parsed.data,
-    }).catch(() => {});
+    try {
+      await supabase.from("audit_log").insert({
+        tenant_id: profile.tenant_id,
+        user_id: user.id,
+        action: "update_client",
+        entity_type: "client",
+        entity_id: id,
+        new_value: parsed.data,
+      });
+    } catch { /* audit log failure must not block the response */ }
 
     return NextResponse.json({ client });
   } catch (err) {

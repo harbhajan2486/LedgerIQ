@@ -325,14 +325,16 @@ Do not add disclaimers or sign-offs.`,
       .single();
 
     // Audit log
-    await supabase.from("audit_log").insert({
-      tenant_id: profile.tenant_id,
-      user_id: user.id,
-      action: "generate_summary",
-      entity_type: "client",
-      entity_id: id,
-      new_value: { period_from: periodFrom, period_to: periodTo, summary_id: saved?.id },
-    }).catch(() => {});
+    try {
+      await supabase.from("audit_log").insert({
+        tenant_id: profile.tenant_id,
+        user_id: user.id,
+        action: "generate_summary",
+        entity_type: "client",
+        entity_id: id,
+        new_value: { period_from: periodFrom, period_to: periodTo, summary_id: saved?.id },
+      });
+    } catch { /* audit log failure must not block the response */ }
 
     return NextResponse.json({ summary: { ...saved, summary_md: summaryMd } });
   } catch (err) {
