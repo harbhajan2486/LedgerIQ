@@ -27,18 +27,23 @@ export async function POST(
 
     if (!doc) return NextResponse.json({ error: "Document not found" }, { status: 404 });
 
+    // Race condition guard: if already extracting, reject the duplicate request
+    if (doc.status === "extracting") {
+      return NextResponse.json({ error: "Extraction already in progress for this document" }, { status: 409 });
+    }
+
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
     const serviceKey  = process.env.SUPABASE_SERVICE_ROLE_KEY!;
     if (!serviceKey) return NextResponse.json({ error: "Extraction service not configured" }, { status: 503 });
+
+    // Lock document immediately — any concurrent request will hit the 409 above
+    await supabase.from("documents").update({ status: "extracting" }).eq("id", id);
 
     // Mark all existing extractions as rejected so the fresh run has a clean slate
     await supabase
       .from("extractions")
       .update({ status: "rejected" })
       .eq("document_id", id);
-
-    // Reset document status
-    await supabase.from("documents").update({ status: "queued" }).eq("id", id);
 
     // Look up client industry and TDS flag
     let clientIndustry: string | null = null;

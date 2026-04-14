@@ -134,6 +134,16 @@ export async function PATCH(
       return NextResponse.json({ error: "Client not found or update failed" }, { status: 404 });
     }
 
+    // Audit log — capture what changed (especially tds_applicable toggle)
+    await supabase.from("audit_log").insert({
+      tenant_id: profile.tenant_id,
+      user_id: user.id,
+      action: "update_client",
+      entity_type: "client",
+      entity_id: id,
+      new_value: parsed.data,
+    }).catch(() => {});
+
     return NextResponse.json({ client });
   } catch (err) {
     console.error("[clients/[id]/PATCH]", err);

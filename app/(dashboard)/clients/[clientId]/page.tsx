@@ -1856,7 +1856,14 @@ function SummaryRenderer({ markdown }: { markdown: string }) {
   let tableLines: string[] = [];
 
   function renderInline(text: string) {
-    return text
+    // Escape HTML first to prevent XSS from AI-generated content
+    const safe = text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+    return safe
       .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
       .replace(/\*(.+?)\*/g, "<em>$1</em>")
       .replace(/`(.+?)`/g, "<code class='bg-gray-100 px-1 rounded text-xs font-mono'>$1</code>");

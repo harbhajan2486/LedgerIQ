@@ -55,6 +55,23 @@ export async function POST(
     const periodFrom: string | null = body.period_from ?? null;
     const periodTo: string | null   = body.period_to   ?? null;
 
+    // ── Rate limit: max 1 generation per client per hour ──────────────────────
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const { data: recentSummary } = await supabase
+      .from("client_summaries")
+      .select("generated_at")
+      .eq("client_id", id)
+      .eq("tenant_id", profile.tenant_id)
+      .gte("generated_at", oneHourAgo)
+      .limit(1)
+      .maybeSingle();
+    if (recentSummary) {
+      const nextAllowed = new Date(new Date(recentSummary.generated_at).getTime() + 60 * 60 * 1000);
+      return NextResponse.json({
+        error: `Summary was just generated. You can regenerate after ${nextAllowed.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}.`,
+      }, { status: 429 });
+    }
+
     // ── 1. Client profile ──────────────────────────────────────────────────────
     const { data: client } = await supabase
       .from("clients")
@@ -306,6 +323,16 @@ Do not add disclaimers or sign-offs.`,
       })
       .select("id, generated_at, period_from, period_to")
       .single();
+
+    // Audit log
+    await supabase.from("audit_log").insert({
+      tenant_id: profile.tenant_id,
+      user_id: user.id,
+      action: "generate_summary",
+      entity_type: "client",
+      entity_id: id,
+      new_value: { period_from: periodFrom, period_to: periodTo, summary_id: saved?.id },
+    }).catch(() => {});
 
     return NextResponse.json({ summary: { ...saved, summary_md: summaryMd } });
   } catch (err) {

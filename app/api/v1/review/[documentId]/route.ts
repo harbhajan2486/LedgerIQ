@@ -101,7 +101,7 @@ export async function GET(
             .select("document_id")
             .eq("document_id", dupCheck.document_id)
             .eq("field_name", "vendor_name")
-            .ilike("extracted_value", `%${vendorNameRaw.split(" ")[0]}%`)
+            .ilike("extracted_value", `%${vendorNameRaw.split(" ").slice(0, 2).join(" ")}%`)
             .not("status", "eq", "rejected")
             .maybeSingle();
           if (vendorCheck) {

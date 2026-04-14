@@ -45,11 +45,12 @@ const FIELD_LABELS: Record<string, string> = {
   reverse_charge: "Reverse Charge (RCM)", place_of_supply: "Place of Supply",
   suggested_ledger: "Suggested Tally Ledger",
   hsn_sac_code: "HSN / SAC Code", itc_eligible: "ITC Eligible",
+  irn: "IRN (e-Invoice Ref)",
 };
 
 // Field grouping for display
 const FIELD_GROUPS = [
-  { label: "Invoice Details",    fields: ["vendor_name","vendor_gstin","buyer_gstin","invoice_number","invoice_date","due_date","place_of_supply","reverse_charge"] },
+  { label: "Invoice Details",    fields: ["vendor_name","vendor_gstin","buyer_gstin","invoice_number","invoice_date","due_date","place_of_supply","reverse_charge","irn"] },
   { label: "Amounts & GST",      fields: ["taxable_value","cgst_rate","cgst_amount","sgst_rate","sgst_amount","igst_rate","igst_amount","total_amount"] },
   { label: "TDS Deduction",      fields: ["tds_section","tds_rate","tds_amount"] },
   { label: "Ledger / Posting",   fields: ["suggested_ledger","hsn_sac_code","itc_eligible"] },
@@ -122,11 +123,18 @@ export default function ReviewDetailPage() {
         setLoading(false);
         // Fetch file and create a blob: URL — data: URIs are blocked for PDFs in Safari/Chrome
         if (d.document?.id) {
-          fetch(`/api/v1/documents/${d.document.id}/file`)
-            .then((r) => { if (!r.ok) throw new Error("not_found"); return r.blob(); })
-            .then((blob) => URL.createObjectURL(blob))
-            .then((blobUrl) => setFileDataUrl(blobUrl))
-            .catch(() => setFileError(true));
+          const loadFile = (docId: string) =>
+            fetch(`/api/v1/documents/${docId}/file`)
+              .then((r) => { if (!r.ok) throw new Error("not_found"); return r.blob(); })
+              .then((blob) => URL.createObjectURL(blob))
+              .then((blobUrl) => setFileDataUrl(blobUrl))
+              .catch(() => setFileError(true));
+          loadFile(d.document.id);
+          // Re-fetch before URL expires (every 12 min — signed URLs last 15 min)
+          const refreshInterval = setInterval(() => {
+            if (d.document?.id) loadFile(d.document.id);
+          }, 12 * 60 * 1000);
+          return () => clearInterval(refreshInterval);
         }
       })
       .catch(() => { setError("Failed to load document."); setLoading(false); });
@@ -235,10 +243,24 @@ export default function ReviewDetailPage() {
     try {
       const res = await fetch(`/api/v1/documents/${documentId}/reextract`, { method: "POST" });
       const data = await res.json();
-      if (!res.ok) { toast.error(data.error ?? "Re-extraction failed"); return; }
-      toast.success("Re-extraction started. This page will refresh in 30 seconds.");
-      setTimeout(() => window.location.reload(), 30000);
-    } finally {
+      if (!res.ok) { toast.error(data.error ?? "Re-extraction failed"); setRerunning(false); return; }
+      toast.success("Re-extraction started — page will refresh automatically when complete.");
+      // Poll every 5s until status is no longer extracting/queued
+      const poll = setInterval(async () => {
+        try {
+          const r = await fetch(`/api/v1/documents/${documentId}/status`);
+          if (!r.ok) return;
+          const d = await r.json();
+          if (d.status === "review_required" || d.status === "failed") {
+            clearInterval(poll);
+            window.location.reload();
+          }
+        } catch { /* keep polling */ }
+      }, 5000);
+      // Safety timeout — reload after 3 min regardless
+      setTimeout(() => { clearInterval(poll); window.location.reload(); }, 180000);
+    } catch {
+      toast.error("Re-extraction failed");
       setRerunning(false);
     }
   }
@@ -300,6 +322,22 @@ export default function ReviewDetailPage() {
   const hiddenGstFields = hideIgstFields
     ? ["igst_rate", "igst_amount"]
     : hideCgstSgstFields ? ["cgst_rate", "cgst_amount", "sgst_rate", "sgst_amount"] : [];
+
+  // C8 — HSN/SAC mandatory flag: warn if blank for invoices (not bank statements / credit notes)
+  const hsnExtraction = extractions.find(e => e.field_name === "hsn_sac_code");
+  const hsnMissing = document &&
+    (document.type === "purchase_invoice" || document.type === "sales_invoice") &&
+    (!hsnExtraction || !hsnExtraction.extracted_value || hsnExtraction.extracted_value.trim() === "");
+
+  // C6 — Place of supply warning: for service invoices (SAC code starting with 99), check if
+  // CGST+SGST are present — that means intra-state. If IGST is present, place of supply likely
+  // differs from vendor state (inter-state). Warn if place_of_supply is blank for service invoices.
+  const sacValue = (hsnExtraction?.extracted_value ?? "").replace(/[\s-]/g, "");
+  const isServiceInvoice = sacValue.startsWith("99") && sacValue.length === 6;
+  const posExtraction = extractions.find(e => e.field_name === "place_of_supply");
+  const posBlankForService = isServiceInvoice &&
+    document && (document.type === "purchase_invoice" || document.type === "sales_invoice") &&
+    (!posExtraction || !posExtraction.extracted_value || posExtraction.extracted_value.trim() === "");
 
   // Reasoning fields are shown inline next to their parent — never as standalone fields
   const REASONING_FIELDS = ["tds_section_reasoning", "suggested_ledger_reasoning"];
@@ -523,6 +561,26 @@ export default function ReviewDetailPage() {
                 className="flex-shrink-0 text-xs px-2.5 py-1 rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
                 {reclassifying ? "Moving…" : "Move to Sales →"}
               </button>
+            </div>
+          )}
+          {/* C8 — HSN/SAC missing warning */}
+          {hsnMissing && (
+            <div className="flex items-start gap-3 px-3 py-2.5 rounded-lg border border-amber-300 bg-amber-50 text-sm">
+              <span className="text-amber-500 mt-0.5 flex-shrink-0">⚠</span>
+              <div className="flex-1">
+                <p className="font-medium text-amber-800">HSN / SAC code not found</p>
+                <p className="text-amber-700 text-xs mt-0.5">HSN/SAC is mandatory for GST compliance. Please check the invoice and enter it in the Ledger / Posting section below.</p>
+              </div>
+            </div>
+          )}
+          {/* C6 — Place of supply missing for service invoice */}
+          {posBlankForService && (
+            <div className="flex items-start gap-3 px-3 py-2.5 rounded-lg border border-blue-200 bg-blue-50 text-sm">
+              <span className="text-blue-500 mt-0.5 flex-shrink-0">ℹ</span>
+              <div className="flex-1">
+                <p className="font-medium text-blue-800">Place of supply not captured (service invoice)</p>
+                <p className="text-blue-700 text-xs mt-0.5">For services, place of supply determines whether CGST+SGST or IGST applies and affects ITC eligibility. Enter the state code in the Invoice Details section.</p>
+              </div>
             </div>
           )}
           {extractions.length === 0 ? (
