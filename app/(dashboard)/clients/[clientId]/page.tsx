@@ -162,6 +162,7 @@ export default function ClientDetailPage() {
   const [reconMatching, setReconMatching] = useState(false);
   const [reconTab, setReconTab] = useState<"matched" | "possible" | "unmatched">("matched");
   const [reconFilter, setReconFilter] = useState("");
+  const [bankFilter, setBankFilter] = useState("");
   const [linkingTxn, setLinkingTxn] = useState<BankTxn | null>(null);
   const [linkingId, setLinkingId] = useState<string | null>(null);
   const [editingTxn, setEditingTxn] = useState<string | null>(null);
@@ -1467,6 +1468,20 @@ export default function ClientDetailPage() {
             </div>
           )}
 
+          {/* Bank filter bar */}
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              placeholder="Filter by narration, ref number, category, ledger, amount…"
+              value={bankFilter}
+              onChange={e => setBankFilter(e.target.value)}
+              className="flex-1 text-sm border border-gray-300 rounded-md px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-400"
+            />
+            {bankFilter && (
+              <button onClick={() => setBankFilter("")} className="text-xs text-gray-400 hover:text-gray-600 px-2 py-1.5 rounded border border-gray-200">Clear</button>
+            )}
+          </div>
+
           <Card>
             <CardHeader className="py-4 px-5 border-b flex flex-row items-center justify-between">
               <CardTitle className="text-sm text-gray-700">Bank transactions</CardTitle>
@@ -1525,7 +1540,19 @@ export default function ClientDetailPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {bankTxns.map((txn) => (
+                      {bankTxns.filter(txn => {
+                        if (!bankFilter) return true;
+                        const q = bankFilter.toLowerCase();
+                        return (
+                          txn.narration?.toLowerCase().includes(q) ||
+                          txn.ref_number?.toLowerCase().includes(q) ||
+                          txn.category?.toLowerCase().includes(q) ||
+                          txn.ledger_name?.toLowerCase().includes(q) ||
+                          txn.bank_name?.toLowerCase().includes(q) ||
+                          String(txn.debit_amount ?? "").includes(q) ||
+                          String(txn.credit_amount ?? "").includes(q)
+                        );
+                      }).map((txn) => (
                         <tr key={txn.id} className="border-b last:border-0 hover:bg-gray-50/50 text-xs">
                           <td className="px-5 py-2.5 text-gray-500 whitespace-nowrap">{txn.transaction_date}</td>
                           <td className="px-4 py-2.5 max-w-xs">

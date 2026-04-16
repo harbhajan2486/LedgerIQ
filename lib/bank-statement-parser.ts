@@ -208,13 +208,16 @@ export function parseXLSX(buffer: ArrayBuffer): BankTransaction[] {
 
 export interface InvoiceForMatching {
   id: string;
+  doc_type: string | null;           // "purchase_invoice" | "expense" | "sales_invoice"
   invoice_number: string | null;
   invoice_date: string | null;
   due_date: string | null;
   total_amount: number | null;
   tds_amount: number | null;
   vendor_name: string | null;
+  buyer_name: string | null;         // for sales invoices
   payment_reference: string | null;
+  suggested_ledger: string | null;   // propagated to bank txn on match
 }
 
 export interface MatchResult {
@@ -228,14 +231,61 @@ function daysDiff(a: string, b: string): number {
   return Math.abs(new Date(a).getTime() - new Date(b).getTime()) / (1000 * 60 * 60 * 24);
 }
 
+// Narrations that should NEVER match an invoice — these are salary, tax payments,
+// bank charges, internal transfers etc. Amount coincidence must not trigger a match.
+const BLOCKED_NARRATION_PATTERNS = [
+  /\bsalar(y|ies|ied)\b/i,
+  /\bpayroll\b/i,
+  /\bwages?\b/i,
+  /\bstipend\b/i,
+  /\bgst\s*payment\b/i,
+  /\bgst\s*paid\b/i,
+  /\btds\s*payment\b/i,
+  /\btds\s*paid\b/i,
+  /\badvance\s*tax\b/i,
+  /\bincome\s*tax\b/i,
+  /\bself\s*transfer\b/i,
+  /\bown\s*transfer\b/i,
+  /\binter.?bank\b/i,
+  /\bbank\s*charges?\b/i,
+  /\bservice\s*charge\b/i,
+  /\bcheque\s*(return|bounce)\b/i,
+  /\bneft\s*return\b/i,
+  /\bloan\s*(emi|repay|instalment)\b/i,
+  /\bemi\s*payment\b/i,
+  /\bfd\s*(interest|maturity|renewal)\b/i,
+  /\binterest\s*(credit|earned|paid)\b/i,
+  /\bopening\s*balance\b/i,
+  /\bclosing\s*balance\b/i,
+  /\bdividend\b/i,
+  /\bpf\s*(payment|contribution)\b/i,
+  /\besi\s*payment\b/i,
+  /\bgratuity\b/i,
+];
+
 export function scoreMatch(
   txn: BankTransaction & { id: string },
   invoice: InvoiceForMatching
 ): { score: number; reasons: string[] } {
+  const narr = txn.narration ?? "";
+
+  // Hard block: salary / tax payments / bank charges must never match invoices
+  if (BLOCKED_NARRATION_PATTERNS.some((p) => p.test(narr))) {
+    return { score: 0, reasons: [] };
+  }
+
+  // Direction check: purchase/expense → debit only; sales → credit only
+  // Wrong direction = hard zero (a customer receipt cannot match a vendor invoice)
+  const isSales = invoice.doc_type === "sales_invoice";
+  const isPurchase = invoice.doc_type === "purchase_invoice" || invoice.doc_type === "expense";
+  if (isSales && txn.debit && !txn.credit) return { score: 0, reasons: [] };
+  if (isPurchase && txn.credit && !txn.debit) return { score: 0, reasons: [] };
+
   let score = 0;
   const reasons: string[] = [];
 
-  const txnAmount = txn.debit ?? txn.credit ?? 0;
+  // Use the correct amount side based on direction
+  const txnAmount = isSales ? (txn.credit ?? 0) : (txn.debit ?? txn.credit ?? 0);
   const invoiceAmount = invoice.total_amount ?? 0;
   const netAfterTds = invoiceAmount - (invoice.tds_amount ?? 0);
 
@@ -244,44 +294,51 @@ export function scoreMatch(
     if (Math.abs(txnAmount - invoiceAmount) <= 1) {
       score += 50; reasons.push("Exact amount match");
     } else if (Math.abs(txnAmount - invoiceAmount) / invoiceAmount <= 0.02) {
-      score += 30; reasons.push("Amount within 2%");
+      score += 40; reasons.push("Amount within 2%");
     } else if (Math.abs(txnAmount - netAfterTds) <= 1 && invoice.tds_amount && invoice.tds_amount > 0) {
-      score += 20; reasons.push("Amount matches invoice minus TDS");
+      score += 35; reasons.push("Amount matches invoice minus TDS");
+    } else if (Math.abs(txnAmount - invoiceAmount) / invoiceAmount <= 0.10) {
+      score += 15; reasons.push("Amount within 10%");
     }
   }
 
-  // Date match
+  // Date proximity
   if (invoice.due_date && txn.date) {
     const diff = daysDiff(txn.date, invoice.due_date);
-    if (diff <= 7) { score += 30; reasons.push("Within 7 days of due date"); }
-    else if (diff <= 30) { score += 20; reasons.push("Within 30 days of due date"); }
+    if (diff <= 3)  { score += 30; reasons.push("Within 3 days of due date"); }
+    else if (diff <= 7)  { score += 25; reasons.push("Within 7 days of due date"); }
+    else if (diff <= 30) { score += 15; reasons.push("Within 30 days of due date"); }
   } else if (invoice.invoice_date && txn.date) {
     const diff = daysDiff(txn.date, invoice.invoice_date);
-    if (diff <= 7) { score += 20; reasons.push("Within 7 days of invoice date"); }
-    else if (diff <= 30) { score += 15; reasons.push("Within 30 days of invoice date"); }
+    if (diff <= 3)  { score += 20; reasons.push("Within 3 days of invoice date"); }
+    else if (diff <= 7)  { score += 15; reasons.push("Within 7 days of invoice date"); }
+    else if (diff <= 30) { score += 8;  reasons.push("Within 30 days of invoice date"); }
   }
 
-  // Invoice number in narration
+  // Invoice number in narration (strong signal)
   if (invoice.invoice_number) {
-    const inv = invoice.invoice_number.toLowerCase().replace(/\s/g, "");
-    const narr = txn.narration.toLowerCase().replace(/\s/g, "");
-    if (narr.includes(inv)) { score += 40; reasons.push("Invoice number in narration"); }
+    const inv = invoice.invoice_number.toLowerCase().replace(/[\s\-\/]/g, "");
+    const narrClean = narr.toLowerCase().replace(/[\s\-\/]/g, "");
+    if (inv.length >= 4 && narrClean.includes(inv)) {
+      score += 45; reasons.push("Invoice number in narration");
+    }
   }
 
-  // Vendor name in narration
-  if (invoice.vendor_name) {
-    const vendorWords = invoice.vendor_name.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
-    const narr = txn.narration.toLowerCase();
-    const matched = vendorWords.filter((w) => narr.includes(w));
-    if (matched.length >= 2) { score += 25; reasons.push("Vendor name in narration"); }
-    else if (matched.length === 1) { score += 10; reasons.push("Partial vendor name match"); }
-  }
-
-  // UTR / payment reference
+  // UTR / payment reference (strongest possible signal)
   if (invoice.payment_reference && txn.ref_number) {
     if (txn.ref_number.trim() === invoice.payment_reference.trim()) {
-      score += 35; reasons.push("UTR/reference matches");
+      score += 55; reasons.push("UTR/reference number matches");
     }
+  }
+
+  // Party name in narration
+  const partyName = isSales ? invoice.buyer_name : invoice.vendor_name;
+  if (partyName) {
+    const partyWords = partyName.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+    const narrLow = narr.toLowerCase();
+    const matchedWords = partyWords.filter((w) => narrLow.includes(w));
+    if (matchedWords.length >= 2) { score += 30; reasons.push(`${isSales ? "Customer" : "Vendor"} name in narration`); }
+    else if (matchedWords.length === 1) { score += 12; reasons.push(`Partial ${isSales ? "customer" : "vendor"} name match`); }
   }
 
   return { score, reasons };
