@@ -67,9 +67,10 @@ export async function GET(request: NextRequest) {
 
   type DocRow = typeof docs extends (infer T)[] | null ? T : never;
   const documents = (docs ?? []).map((doc: DocRow) => {
-    const client = Array.isArray((doc as { clients: unknown }).clients)
-      ? ((doc as { clients: { client_name: string }[] }).clients[0]?.client_name ?? null)
-      : ((doc as { clients: { client_name: string } | null }).clients?.client_name ?? null);
+    const rawClients = (doc as unknown as { clients: { client_name: string }[] | { client_name: string } | null }).clients;
+    const client = Array.isArray(rawClients)
+      ? (rawClients[0]?.client_name ?? null)
+      : (rawClients?.client_name ?? null);
     return {
       id: doc.id,
       original_filename: doc.original_filename,
