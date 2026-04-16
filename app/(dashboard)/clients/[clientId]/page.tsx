@@ -74,6 +74,8 @@ interface Reconciliation {
   matched_at: string;
   bank_transactions: BankTxn | BankTxn[];
   documents: ReconDoc | ReconDoc[];
+  doc_total_amount: string | null;
+  doc_invoice_number: string | null;
 }
 
 interface ReconData {
@@ -159,6 +161,7 @@ export default function ClientDetailPage() {
   const [reconLoading, setReconLoading] = useState(false);
   const [reconMatching, setReconMatching] = useState(false);
   const [reconTab, setReconTab] = useState<"matched" | "possible" | "unmatched">("matched");
+  const [reconFilter, setReconFilter] = useState("");
   const [linkingTxn, setLinkingTxn] = useState<BankTxn | null>(null);
   const [linkingId, setLinkingId] = useState<string | null>(null);
   const [editingTxn, setEditingTxn] = useState<string | null>(null);
@@ -1102,29 +1105,63 @@ export default function ClientDetailPage() {
             ))}
           </div>
 
+          {/* Filter bar — shown for matched + possible tabs */}
+          {(reconTab === "matched" || reconTab === "possible") && (
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                placeholder="Filter by narration, invoice #, vendor, amount…"
+                value={reconFilter}
+                onChange={e => setReconFilter(e.target.value)}
+                className="flex-1 text-sm border border-gray-300 rounded-md px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-400"
+              />
+              {reconFilter && (
+                <button onClick={() => setReconFilter("")} className="text-xs text-gray-400 hover:text-gray-600 px-2 py-1.5 rounded border border-gray-200">
+                  Clear
+                </button>
+              )}
+            </div>
+          )}
+
           {reconLoading ? (
             <div className="flex items-center gap-2 text-sm text-gray-400 py-8 justify-center"><Loader2 size={16} className="animate-spin" /> Loading…</div>
           ) : (
             <>
               {/* Matched */}
               {reconTab === "matched" && (() => {
-                const matched = reconData?.reconciliations.filter(r => r.status === "matched") ?? [];
                 const inr = (n: number) => n.toLocaleString("en-IN", { maximumFractionDigits: 0 });
+                const q = reconFilter.toLowerCase();
+                const matched = (reconData?.reconciliations.filter(r => r.status === "matched") ?? []).filter(r => {
+                  if (!q) return true;
+                  const txn = Array.isArray(r.bank_transactions) ? r.bank_transactions[0] : r.bank_transactions;
+                  const doc = Array.isArray(r.documents) ? r.documents[0] : r.documents;
+                  return (
+                    txn?.narration?.toLowerCase().includes(q) ||
+                    txn?.ref_number?.toLowerCase().includes(q) ||
+                    doc?.original_filename?.toLowerCase().includes(q) ||
+                    r.doc_invoice_number?.toLowerCase().includes(q) ||
+                    r.doc_total_amount?.includes(q) ||
+                    String(txn?.debit_amount ?? txn?.credit_amount ?? "").includes(q)
+                  );
+                });
                 return (
                   <Card><CardContent className="p-0">
                     {matched.length === 0 ? (
-                      <div className="py-10 text-center text-gray-400 text-sm">No matched transactions yet. Click Re-run matching.</div>
+                      <div className="py-10 text-center text-gray-400 text-sm">
+                        {q ? `No results for "${reconFilter}"` : "No matched transactions yet. Click Re-run matching."}
+                      </div>
                     ) : (
                       <div className="overflow-x-auto">
                         <table className="w-full text-xs">
                           <thead>
                             <tr className="bg-gray-50 border-b text-gray-500 uppercase tracking-wide text-[11px]">
-                              <th className="text-left px-4 py-2.5 font-semibold">Date</th>
-                              <th className="text-left px-4 py-2.5 font-semibold">Bank Transaction</th>
-                              <th className="text-right px-4 py-2.5 font-semibold">Bank Amount</th>
-                              <th className="text-left px-4 py-2.5 font-semibold">Matched Invoice</th>
-                              <th className="text-right px-4 py-2.5 font-semibold">Invoice Amount</th>
-                              <th className="text-center px-4 py-2.5 font-semibold">Confidence</th>
+                              <th className="text-left px-4 py-2.5 font-semibold whitespace-nowrap">Date</th>
+                              <th className="text-left px-4 py-2.5 font-semibold">Bank Narration</th>
+                              <th className="text-right px-4 py-2.5 font-semibold whitespace-nowrap">Bank Amount</th>
+                              <th className="text-left px-4 py-2.5 font-semibold whitespace-nowrap">Invoice #</th>
+                              <th className="text-left px-4 py-2.5 font-semibold">Invoice File</th>
+                              <th className="text-right px-4 py-2.5 font-semibold whitespace-nowrap">Invoice Amount</th>
+                              <th className="text-center px-4 py-2.5 font-semibold whitespace-nowrap">Conf.</th>
                               <th className="text-left px-4 py-2.5 font-semibold">Match Reasons</th>
                               <th className="px-4 py-2.5" />
                             </tr>
@@ -1135,30 +1172,36 @@ export default function ClientDetailPage() {
                               const doc = Array.isArray(r.documents) ? r.documents[0] : r.documents;
                               const bankAmt = Number(txn?.debit_amount ?? txn?.credit_amount ?? 0);
                               const isDebit = !!txn?.debit_amount;
+                              const invAmt = r.doc_total_amount ? Number(r.doc_total_amount) : null;
                               const score = r.match_score ?? 0;
                               const scoreColor = score >= 80 ? "bg-green-100 text-green-700" : score >= 60 ? "bg-yellow-100 text-yellow-700" : "bg-red-100 text-red-700";
+                              const amtMismatch = invAmt !== null && bankAmt > 0 && Math.abs(bankAmt - invAmt) / Math.max(bankAmt, invAmt) > 0.02;
                               return (
-                                <tr key={r.id} className="border-b hover:bg-gray-50">
+                                <tr key={r.id} className="border-b hover:bg-gray-50 align-top">
                                   <td className="px-4 py-3 whitespace-nowrap text-gray-500">{txn?.transaction_date ?? "—"}</td>
-                                  <td className="px-4 py-3 max-w-[200px]">
-                                    <p className="font-medium text-gray-900 truncate" title={txn?.narration}>{txn?.narration ?? "—"}</p>
-                                    <p className="text-gray-400 mt-0.5">{txn?.bank_name}</p>
+                                  <td className="px-4 py-3 min-w-[200px] max-w-[280px]">
+                                    <p className="font-medium text-gray-900 break-words leading-snug">{txn?.narration ?? "—"}</p>
+                                    <p className="text-gray-400 mt-0.5">{txn?.bank_name}{txn?.ref_number ? ` · Ref: ${txn.ref_number}` : ""}</p>
                                   </td>
                                   <td className={`px-4 py-3 text-right font-semibold whitespace-nowrap ${isDebit ? "text-red-600" : "text-green-700"}`}>
                                     {bankAmt ? `₹${inr(bankAmt)}` : "—"}
-                                    <span className="text-gray-400 font-normal ml-1">{isDebit ? "Dr" : "Cr"}</span>
+                                    <span className="text-gray-400 font-normal ml-1 text-[10px]">{isDebit ? "Dr" : "Cr"}</span>
                                   </td>
-                                  <td className="px-4 py-3 max-w-[180px]">
-                                    <p className="font-medium text-gray-900 truncate" title={doc?.original_filename}>{doc?.original_filename ?? "—"}</p>
+                                  <td className="px-4 py-3 whitespace-nowrap font-mono text-gray-700 text-[11px]">
+                                    {r.doc_invoice_number ?? "—"}
+                                  </td>
+                                  <td className="px-4 py-3 min-w-[160px] max-w-[220px]">
+                                    <p className="font-medium text-gray-900 break-words leading-snug">{doc?.original_filename ?? "—"}</p>
                                     <p className="text-gray-400 mt-0.5 capitalize">{doc?.document_type?.replace(/_/g, " ")}</p>
                                   </td>
-                                  <td className="px-4 py-3 text-right font-semibold text-gray-700 whitespace-nowrap">
-                                    {doc?.total_amount ? `₹${inr(Number(doc.total_amount))}` : "—"}
+                                  <td className={`px-4 py-3 text-right font-semibold whitespace-nowrap ${amtMismatch ? "text-amber-600" : "text-gray-700"}`}>
+                                    {invAmt !== null ? `₹${inr(invAmt)}` : "—"}
+                                    {amtMismatch && <span className="block text-[10px] font-normal text-amber-500">Amt diff</span>}
                                   </td>
                                   <td className="px-4 py-3 text-center">
-                                    <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${scoreColor}`}>{score}%</span>
+                                    <span className={`px-2 py-0.5 rounded-full font-bold ${scoreColor}`}>{score}%</span>
                                   </td>
-                                  <td className="px-4 py-3">
+                                  <td className="px-4 py-3 min-w-[160px]">
                                     <div className="flex flex-wrap gap-1">
                                       {(r.match_reasons ?? []).map((reason, i) => (
                                         <span key={i} className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[11px]">{reason}</span>
@@ -1175,6 +1218,11 @@ export default function ClientDetailPage() {
                             })}
                           </tbody>
                         </table>
+                        <div className="px-4 py-2 border-t bg-gray-50 text-xs text-gray-400">
+                          {matched.length} {matched.length === 1 ? "match" : "matches"}{q ? ` matching "${reconFilter}"` : ""}
+                          {" · "}Total bank: ₹{inr(matched.reduce((s, r) => { const txn = Array.isArray(r.bank_transactions) ? r.bank_transactions[0] : r.bank_transactions; return s + Number(txn?.debit_amount ?? txn?.credit_amount ?? 0); }, 0))}
+                          {" · "}Total invoiced: ₹{inr(matched.reduce((s, r) => s + (r.doc_total_amount ? Number(r.doc_total_amount) : 0), 0))}
+                        </div>
                       </div>
                     )}
                   </CardContent></Card>
@@ -1183,23 +1231,39 @@ export default function ClientDetailPage() {
 
               {/* Possible */}
               {reconTab === "possible" && (() => {
-                const possible = reconData?.reconciliations.filter(r => r.status === "possible_match") ?? [];
                 const inr = (n: number) => n.toLocaleString("en-IN", { maximumFractionDigits: 0 });
+                const q = reconFilter.toLowerCase();
+                const possible = (reconData?.reconciliations.filter(r => r.status === "possible_match") ?? []).filter(r => {
+                  if (!q) return true;
+                  const txn = Array.isArray(r.bank_transactions) ? r.bank_transactions[0] : r.bank_transactions;
+                  const doc = Array.isArray(r.documents) ? r.documents[0] : r.documents;
+                  return (
+                    txn?.narration?.toLowerCase().includes(q) ||
+                    txn?.ref_number?.toLowerCase().includes(q) ||
+                    doc?.original_filename?.toLowerCase().includes(q) ||
+                    r.doc_invoice_number?.toLowerCase().includes(q) ||
+                    r.doc_total_amount?.includes(q) ||
+                    String(txn?.debit_amount ?? txn?.credit_amount ?? "").includes(q)
+                  );
+                });
                 return (
                   <Card><CardContent className="p-0">
                     {possible.length === 0 ? (
-                      <div className="py-10 text-center text-gray-400 text-sm">No possible matches.</div>
+                      <div className="py-10 text-center text-gray-400 text-sm">
+                        {q ? `No results for "${reconFilter}"` : "No possible matches."}
+                      </div>
                     ) : (
                       <div className="overflow-x-auto">
                         <table className="w-full text-xs">
                           <thead>
                             <tr className="bg-gray-50 border-b text-gray-500 uppercase tracking-wide text-[11px]">
-                              <th className="text-left px-4 py-2.5 font-semibold">Date</th>
-                              <th className="text-left px-4 py-2.5 font-semibold">Bank Transaction</th>
-                              <th className="text-right px-4 py-2.5 font-semibold">Bank Amount</th>
-                              <th className="text-left px-4 py-2.5 font-semibold">Suggested Invoice</th>
-                              <th className="text-right px-4 py-2.5 font-semibold">Invoice Amount</th>
-                              <th className="text-center px-4 py-2.5 font-semibold">Confidence</th>
+                              <th className="text-left px-4 py-2.5 font-semibold whitespace-nowrap">Date</th>
+                              <th className="text-left px-4 py-2.5 font-semibold">Bank Narration</th>
+                              <th className="text-right px-4 py-2.5 font-semibold whitespace-nowrap">Bank Amount</th>
+                              <th className="text-left px-4 py-2.5 font-semibold whitespace-nowrap">Invoice #</th>
+                              <th className="text-left px-4 py-2.5 font-semibold">Invoice File</th>
+                              <th className="text-right px-4 py-2.5 font-semibold whitespace-nowrap">Invoice Amount</th>
+                              <th className="text-center px-4 py-2.5 font-semibold whitespace-nowrap">Conf.</th>
                               <th className="text-left px-4 py-2.5 font-semibold">Match Reasons</th>
                               <th className="px-4 py-2.5" />
                             </tr>
@@ -1210,30 +1274,36 @@ export default function ClientDetailPage() {
                               const doc = Array.isArray(r.documents) ? r.documents[0] : r.documents;
                               const bankAmt = Number(txn?.debit_amount ?? txn?.credit_amount ?? 0);
                               const isDebit = !!txn?.debit_amount;
+                              const invAmt = r.doc_total_amount ? Number(r.doc_total_amount) : null;
                               const score = r.match_score ?? 0;
                               const scoreColor = score >= 70 ? "bg-yellow-100 text-yellow-700" : "bg-orange-100 text-orange-700";
+                              const amtMismatch = invAmt !== null && bankAmt > 0 && Math.abs(bankAmt - invAmt) / Math.max(bankAmt, invAmt) > 0.02;
                               return (
-                                <tr key={r.id} className="border-b hover:bg-yellow-50/40">
+                                <tr key={r.id} className="border-b hover:bg-yellow-50/40 align-top">
                                   <td className="px-4 py-3 whitespace-nowrap text-gray-500">{txn?.transaction_date ?? "—"}</td>
-                                  <td className="px-4 py-3 max-w-[200px]">
-                                    <p className="font-medium text-gray-900 truncate" title={txn?.narration}>{txn?.narration ?? "—"}</p>
-                                    <p className="text-gray-400 mt-0.5">{txn?.bank_name}</p>
+                                  <td className="px-4 py-3 min-w-[200px] max-w-[280px]">
+                                    <p className="font-medium text-gray-900 break-words leading-snug">{txn?.narration ?? "—"}</p>
+                                    <p className="text-gray-400 mt-0.5">{txn?.bank_name}{txn?.ref_number ? ` · Ref: ${txn.ref_number}` : ""}</p>
                                   </td>
                                   <td className={`px-4 py-3 text-right font-semibold whitespace-nowrap ${isDebit ? "text-red-600" : "text-green-700"}`}>
                                     {bankAmt ? `₹${inr(bankAmt)}` : "—"}
-                                    <span className="text-gray-400 font-normal ml-1">{isDebit ? "Dr" : "Cr"}</span>
+                                    <span className="text-gray-400 font-normal ml-1 text-[10px]">{isDebit ? "Dr" : "Cr"}</span>
                                   </td>
-                                  <td className="px-4 py-3 max-w-[180px]">
-                                    <p className="font-medium text-gray-900 truncate" title={doc?.original_filename}>{doc?.original_filename ?? "—"}</p>
+                                  <td className="px-4 py-3 whitespace-nowrap font-mono text-gray-700 text-[11px]">
+                                    {r.doc_invoice_number ?? "—"}
+                                  </td>
+                                  <td className="px-4 py-3 min-w-[160px] max-w-[220px]">
+                                    <p className="font-medium text-gray-900 break-words leading-snug">{doc?.original_filename ?? "—"}</p>
                                     <p className="text-gray-400 mt-0.5 capitalize">{doc?.document_type?.replace(/_/g, " ")}</p>
                                   </td>
-                                  <td className="px-4 py-3 text-right font-semibold text-gray-700 whitespace-nowrap">
-                                    {doc?.total_amount ? `₹${inr(Number(doc.total_amount))}` : "—"}
+                                  <td className={`px-4 py-3 text-right font-semibold whitespace-nowrap ${amtMismatch ? "text-amber-600" : "text-gray-700"}`}>
+                                    {invAmt !== null ? `₹${inr(invAmt)}` : "—"}
+                                    {amtMismatch && <span className="block text-[10px] font-normal text-amber-500">Amt diff</span>}
                                   </td>
                                   <td className="px-4 py-3 text-center">
-                                    <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${scoreColor}`}>{score}%</span>
+                                    <span className={`px-2 py-0.5 rounded-full font-bold ${scoreColor}`}>{score}%</span>
                                   </td>
-                                  <td className="px-4 py-3">
+                                  <td className="px-4 py-3 min-w-[160px]">
                                     <div className="flex flex-wrap gap-1">
                                       {(r.match_reasons ?? []).map((reason, i) => (
                                         <span key={i} className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[11px]">{reason}</span>
@@ -1255,6 +1325,9 @@ export default function ClientDetailPage() {
                             })}
                           </tbody>
                         </table>
+                        <div className="px-4 py-2 border-t bg-gray-50 text-xs text-gray-400">
+                          {possible.length} suggestion{possible.length !== 1 ? "s" : ""}{q ? ` matching "${reconFilter}"` : ""}
+                        </div>
                       </div>
                     )}
                   </CardContent></Card>

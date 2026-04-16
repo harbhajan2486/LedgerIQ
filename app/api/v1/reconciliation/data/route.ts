@@ -15,7 +15,7 @@ export async function GET(request: NextRequest) {
   const clientId = new URL(request.url).searchParams.get("clientId") ?? null;
 
   // Fetch reconciliations with their bank transaction + document data
-  let reconQuery = supabase
+  const reconQuery = supabase
     .from("reconciliations")
     .select(`
       id, status, match_score, match_reasons, matched_at,
@@ -35,6 +35,33 @@ export async function GET(request: NextRequest) {
         return (txn as { client_id?: string | null } | null)?.client_id === clientId;
       })
     : (recons ?? []);
+
+  // Fetch total_amount and invoice_number extractions for matched/possible docs
+  const reconDocIds = filteredRecons.map((r) => r.document_id).filter(Boolean) as string[];
+  const { data: reconExtractions } = reconDocIds.length > 0
+    ? await supabase
+        .from("extractions")
+        .select("document_id, field_name, extracted_value, status")
+        .in("document_id", reconDocIds)
+        .in("field_name", ["total_amount", "invoice_number"])
+        .in("status", ["accepted", "corrected", "pending"])
+        .order("status", { ascending: true }) // corrected last = wins
+    : { data: [] };
+
+  // Build per-doc extraction map: corrected > accepted > pending
+  const reconExtMap: Record<string, { total_amount?: string; invoice_number?: string }> = {};
+  for (const ext of (reconExtractions ?? [])) {
+    if (!reconExtMap[ext.document_id]) reconExtMap[ext.document_id] = {};
+    // Always overwrite — since corrected sorts last alphabetically, it wins
+    (reconExtMap[ext.document_id] as Record<string, string>)[ext.field_name] = ext.extracted_value ?? "";
+  }
+
+  // Enrich each reconciliation with invoice amount + number
+  const enrichedRecons = filteredRecons.map((r) => ({
+    ...r,
+    doc_total_amount:   reconExtMap[r.document_id]?.total_amount   ?? null,
+    doc_invoice_number: reconExtMap[r.document_id]?.invoice_number ?? null,
+  }));
 
   // Fetch unmatched bank transactions
   let txnQuery = supabase
@@ -71,14 +98,14 @@ export async function GET(request: NextRequest) {
   const amountMap: Record<string, string> = {};
   for (const a of amounts ?? []) amountMap[a.document_id] = a.extracted_value;
 
-  const matched    = filteredRecons.filter((r) => r.status === "matched").length;
-  const possible   = filteredRecons.filter((r) => r.status === "possible_match").length;
-  const exceptions = filteredRecons.filter((r) => r.status === "exception").length;
+  const matched    = enrichedRecons.filter((r) => r.status === "matched").length;
+  const possible   = enrichedRecons.filter((r) => r.status === "possible_match").length;
+  const exceptions = enrichedRecons.filter((r) => r.status === "exception").length;
   const unmatched  = (allTxns ?? []).length;
 
   return NextResponse.json({
     summary: { matched, possible, exceptions, unmatched_transactions: unmatched, unmatched_invoices: (unmatchedDocs ?? []).length },
-    reconciliations: filteredRecons,
+    reconciliations: enrichedRecons,
     unmatched_transactions: allTxns ?? [],
     unmatched_invoices: (unmatchedDocs ?? []).map((d) => ({
       ...d,
