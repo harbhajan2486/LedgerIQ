@@ -41,7 +41,7 @@ export async function GET(
       .select("id, document_type, status")
       .eq("client_id", clientId)
       .eq("tenant_id", profile.tenant_id)
-      .in("document_type", ["purchase_invoice", "expense", "sales_invoice"])
+      .in("document_type", ["purchase_invoice", "expense", "sales_invoice", "credit_note", "debit_note"])
       .in("status", ["reviewed", "reconciled", "posted"]); // F4: exclude unreviewed
 
     if (!docs || docs.length === 0) {
@@ -179,9 +179,12 @@ export async function GET(
       });
     }
 
-    // ── 5. Split into purchase/expense vs sales ────────────────────────────
+    // ── 5. Split into purchase/expense vs sales vs credit/debit notes ────────
     const purchaseLines = allLines.filter(l => l.doc_type === "purchase_invoice" || l.doc_type === "expense");
     const salesLines    = allLines.filter(l => l.doc_type === "sales_invoice");
+    // Credit notes reduce output GST; debit notes increase it
+    const creditNoteGst = allLines.filter(l => l.doc_type === "credit_note").reduce((s, l) => s + l.total_gst, 0);
+    const debitNoteGst  = allLines.filter(l => l.doc_type === "debit_note").reduce((s, l) => s + l.total_gst, 0);
 
     // ── 6. Purchase: group by vendor ──────────────────────────────────────
     const vendorMap = new Map<string, InvoiceLine[]>();
@@ -262,11 +265,12 @@ export async function GET(
       outstanding: customers.reduce((s, c) => s + c.outstanding, 0),
     };
 
-    // ── 9. F9: GST net position ────────────────────────────────────────────
+    // ── 9. F9: GST net position (output net of credit notes, minus ITC) ──────
+    const netOutputGst = salesTotals.output_gst - creditNoteGst + debitNoteGst;
     const gst_position = {
-      output_gst:   salesTotals.output_gst,
+      output_gst:   netOutputGst,
       itc_eligible: purchaseTotals.itc_eligible,
-      net_payable:  salesTotals.output_gst - purchaseTotals.itc_eligible,
+      net_payable:  netOutputGst - purchaseTotals.itc_eligible,
     };
 
     // ── 10. F10: TDS payable summary ──────────────────────────────────────

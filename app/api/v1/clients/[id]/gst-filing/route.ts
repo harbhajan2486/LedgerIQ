@@ -12,6 +12,17 @@ function fmt2(v: number) {
   return v.toFixed(2);
 }
 
+// Normalise Indian DD/MM/YYYY → YYYY-MM-DD for date comparison
+function normaliseDate(d: string | undefined | null): string | null {
+  if (!d) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  const parts = d.split("/");
+  if (parts.length === 3 && parts[2].length === 4) {
+    return `${parts[2]}-${parts[1].padStart(2, "0")}-${parts[0].padStart(2, "0")}`;
+  }
+  return d;
+}
+
 // ─── types ──────────────────────────────────────────────────────────────────
 
 interface FieldMap {
@@ -57,17 +68,16 @@ export async function GET(
     .from("clients").select("client_name, gstin").eq("id", clientId).eq("tenant_id", profile.tenant_id).single();
   if (!client) return NextResponse.json({ error: "Client not found" }, { status: 404 });
 
-  // ── Fetch all reviewed docs for this client ─────────────────────────────
-  let docQ = supabase
+  // ── Fetch all verified docs for this client ──────────────────────────────
+  // Only reviewed/reconciled/posted (human-verified). review_required = unverified AI, excluded.
+  // No DB-level date filter — we filter by invoice_date in JS to match GSTR-1 tax period logic.
+  const docQ = supabase
     .from("documents")
     .select("id, document_type, original_filename, uploaded_at")
     .eq("tenant_id", profile.tenant_id)
     .eq("client_id", clientId)
     .in("document_type", ["sales_invoice", "purchase_invoice", "expense", "credit_note", "debit_note"])
-    .in("status", ["reviewed", "reconciled", "posted", "review_required"]);
-
-  if (from) docQ = docQ.gte("uploaded_at", from);
-  if (to)   docQ = docQ.lte("uploaded_at", to);
+    .in("status", ["reviewed", "reconciled", "posted"]);
 
   const { data: docs } = await docQ;
   if (!docs?.length) {
@@ -116,11 +126,22 @@ export async function GET(
     fieldMap[docId] = { ...pendingMap[docId], ...verifiedMap[docId] } as FieldMap;
   }
 
+  // ── Filter by invoice_date (not uploaded_at) — matches GSTR-1 tax period ──
+  // GSTR-1 period is determined by invoice date, not when the doc was uploaded.
+  const filteredDocs = docs.filter((d) => {
+    if (!from && !to) return true;
+    const invDate = normaliseDate((fieldMap[d.id] as FieldMap | undefined)?.invoice_date);
+    if (!invDate) return true; // no date extracted → include (conservative)
+    if (from && invDate < from) return false;
+    if (to   && invDate > to)   return false;
+    return true;
+  });
+
   // ── Separate by doc type ─────────────────────────────────────────────────
-  const salesDocs    = docs.filter((d) => d.document_type === "sales_invoice");
-  const purchaseDocs = docs.filter((d) => ["purchase_invoice", "expense"].includes(d.document_type));
-  const creditDocs   = docs.filter((d) => d.document_type === "credit_note");
-  const debitDocs    = docs.filter((d) => d.document_type === "debit_note");
+  const salesDocs    = filteredDocs.filter((d) => d.document_type === "sales_invoice");
+  const purchaseDocs = filteredDocs.filter((d) => ["purchase_invoice", "expense"].includes(d.document_type));
+  const creditDocs   = filteredDocs.filter((d) => d.document_type === "credit_note");
+  const debitDocs    = filteredDocs.filter((d) => d.document_type === "debit_note");
 
   // ── GSTR-1: B2B (sales with buyer GSTIN) ────────────────────────────────
   const b2b = salesDocs
@@ -228,7 +249,8 @@ export async function GET(
       const sgst = n(f.sgst_amount);
       const igst = n(f.igst_amount);
       if (cgst + sgst + igst === 0) return null;
-      const itcEligible = (f.itc_eligible ?? "Yes") !== "No" && (f.itc_eligible ?? "Yes") !== "Blocked";
+      // Only explicit "Yes" counts as eligible — null/unknown = not counted (conservative)
+      const itcEligible = f.itc_eligible === "Yes";
       return {
         sr: i + 1,
         vendor_name: f.vendor_name ?? "",
