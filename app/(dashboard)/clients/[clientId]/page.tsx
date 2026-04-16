@@ -1107,83 +1107,159 @@ export default function ClientDetailPage() {
           ) : (
             <>
               {/* Matched */}
-              {reconTab === "matched" && (
-                <Card><CardContent className="p-0">
-                  {reconData?.reconciliations.filter(r => r.status === "matched").length === 0 ? (
-                    <div className="py-10 text-center text-gray-400 text-sm">No matched transactions yet. Click Re-run matching.</div>
-                  ) : (
-                    <div className="divide-y">
-                      {reconData?.reconciliations.filter(r => r.status === "matched").map((r) => {
-                        const txn = Array.isArray(r.bank_transactions) ? r.bank_transactions[0] : r.bank_transactions;
-                        const doc = Array.isArray(r.documents) ? r.documents[0] : r.documents;
-                        return (
-                          <div key={r.id} className="p-4 flex items-start justify-between gap-4">
-                            <div className="flex-1 grid grid-cols-2 gap-4">
-                              <div>
-                                <p className="text-xs text-gray-400">{txn?.bank_name} · {txn?.transaction_date}</p>
-                                <p className="text-sm font-medium text-gray-900 truncate">{txn?.narration}</p>
-                                <p className="text-sm font-semibold text-gray-700 mt-0.5">
-                                  {txn?.debit_amount ? `₹${Number(txn.debit_amount).toLocaleString("en-IN")} debit` : txn?.credit_amount ? `₹${Number(txn.credit_amount).toLocaleString("en-IN")} credit` : ""}
-                                </p>
-                              </div>
-                              <div>
-                                <p className="text-xs text-gray-400 capitalize">{doc?.document_type?.replace(/_/g, " ")}</p>
-                                <p className="text-sm font-medium text-gray-900 truncate">{doc?.original_filename}</p>
-                                <p className="text-xs text-gray-400 mt-0.5">{r.match_score}% match · {(r.match_reasons ?? []).slice(0,2).join(" · ")}</p>
-                              </div>
-                            </div>
-                            <button onClick={() => handleUnmatch(r.id)} className="text-xs text-gray-400 hover:text-red-500 flex items-center gap-1 flex-shrink-0">
-                              <Link2Off size={12} /> Unmatch
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </CardContent></Card>
-              )}
+              {reconTab === "matched" && (() => {
+                const matched = reconData?.reconciliations.filter(r => r.status === "matched") ?? [];
+                const inr = (n: number) => n.toLocaleString("en-IN", { maximumFractionDigits: 0 });
+                return (
+                  <Card><CardContent className="p-0">
+                    {matched.length === 0 ? (
+                      <div className="py-10 text-center text-gray-400 text-sm">No matched transactions yet. Click Re-run matching.</div>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="bg-gray-50 border-b text-gray-500 uppercase tracking-wide text-[11px]">
+                              <th className="text-left px-4 py-2.5 font-semibold">Date</th>
+                              <th className="text-left px-4 py-2.5 font-semibold">Bank Transaction</th>
+                              <th className="text-right px-4 py-2.5 font-semibold">Bank Amount</th>
+                              <th className="text-left px-4 py-2.5 font-semibold">Matched Invoice</th>
+                              <th className="text-right px-4 py-2.5 font-semibold">Invoice Amount</th>
+                              <th className="text-center px-4 py-2.5 font-semibold">Confidence</th>
+                              <th className="text-left px-4 py-2.5 font-semibold">Match Reasons</th>
+                              <th className="px-4 py-2.5" />
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {matched.map((r) => {
+                              const txn = Array.isArray(r.bank_transactions) ? r.bank_transactions[0] : r.bank_transactions;
+                              const doc = Array.isArray(r.documents) ? r.documents[0] : r.documents;
+                              const bankAmt = Number(txn?.debit_amount ?? txn?.credit_amount ?? 0);
+                              const isDebit = !!txn?.debit_amount;
+                              const score = r.match_score ?? 0;
+                              const scoreColor = score >= 80 ? "bg-green-100 text-green-700" : score >= 60 ? "bg-yellow-100 text-yellow-700" : "bg-red-100 text-red-700";
+                              return (
+                                <tr key={r.id} className="border-b hover:bg-gray-50">
+                                  <td className="px-4 py-3 whitespace-nowrap text-gray-500">{txn?.transaction_date ?? "—"}</td>
+                                  <td className="px-4 py-3 max-w-[200px]">
+                                    <p className="font-medium text-gray-900 truncate" title={txn?.narration}>{txn?.narration ?? "—"}</p>
+                                    <p className="text-gray-400 mt-0.5">{txn?.bank_name}</p>
+                                  </td>
+                                  <td className={`px-4 py-3 text-right font-semibold whitespace-nowrap ${isDebit ? "text-red-600" : "text-green-700"}`}>
+                                    {bankAmt ? `₹${inr(bankAmt)}` : "—"}
+                                    <span className="text-gray-400 font-normal ml-1">{isDebit ? "Dr" : "Cr"}</span>
+                                  </td>
+                                  <td className="px-4 py-3 max-w-[180px]">
+                                    <p className="font-medium text-gray-900 truncate" title={doc?.original_filename}>{doc?.original_filename ?? "—"}</p>
+                                    <p className="text-gray-400 mt-0.5 capitalize">{doc?.document_type?.replace(/_/g, " ")}</p>
+                                  </td>
+                                  <td className="px-4 py-3 text-right font-semibold text-gray-700 whitespace-nowrap">
+                                    {doc?.total_amount ? `₹${inr(Number(doc.total_amount))}` : "—"}
+                                  </td>
+                                  <td className="px-4 py-3 text-center">
+                                    <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${scoreColor}`}>{score}%</span>
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <div className="flex flex-wrap gap-1">
+                                      {(r.match_reasons ?? []).map((reason, i) => (
+                                        <span key={i} className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[11px]">{reason}</span>
+                                      ))}
+                                    </div>
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <button onClick={() => handleUnmatch(r.id)} className="text-gray-400 hover:text-red-500 flex items-center gap-1 whitespace-nowrap">
+                                      <Link2Off size={12} /> Unmatch
+                                    </button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </CardContent></Card>
+                );
+              })()}
 
               {/* Possible */}
-              {reconTab === "possible" && (
-                <Card><CardContent className="p-0">
-                  {reconData?.reconciliations.filter(r => r.status === "possible_match").length === 0 ? (
-                    <div className="py-10 text-center text-gray-400 text-sm">No possible matches.</div>
-                  ) : (
-                    <div className="divide-y">
-                      {reconData?.reconciliations.filter(r => r.status === "possible_match").map((r) => {
-                        const txn = Array.isArray(r.bank_transactions) ? r.bank_transactions[0] : r.bank_transactions;
-                        const doc = Array.isArray(r.documents) ? r.documents[0] : r.documents;
-                        return (
-                          <div key={r.id} className="p-4 flex items-start justify-between gap-4">
-                            <div className="flex-1 grid grid-cols-2 gap-4">
-                              <div>
-                                <p className="text-xs text-gray-400">{txn?.bank_name} · {txn?.transaction_date}</p>
-                                <p className="text-sm font-medium text-gray-900 truncate">{txn?.narration}</p>
-                                <p className="text-sm font-semibold text-gray-700 mt-0.5">
-                                  {txn?.debit_amount ? `₹${Number(txn.debit_amount).toLocaleString("en-IN")} debit` : txn?.credit_amount ? `₹${Number(txn.credit_amount).toLocaleString("en-IN")} credit` : ""}
-                                </p>
-                              </div>
-                              <div>
-                                <p className="text-xs text-gray-400 capitalize">{doc?.document_type?.replace(/_/g, " ")}</p>
-                                <p className="text-sm font-medium text-gray-900 truncate">{doc?.original_filename}</p>
-                                <span className="text-xs bg-yellow-50 text-yellow-700 px-1.5 py-0.5 rounded">{r.match_score}% confidence</span>
-                              </div>
-                            </div>
-                            <div className="flex gap-2 flex-shrink-0">
-                              <button onClick={() => handleUnmatch(r.id)} className="text-xs text-gray-400 hover:text-red-500 flex items-center gap-1">
-                                <Link2Off size={12} /> Reject
-                              </button>
-                              <button onClick={() => approvePossible(r.id)} className="text-xs bg-green-600 text-white px-2 py-1 rounded hover:bg-green-700 flex items-center gap-1">
-                                <CheckCircle2 size={11} /> Confirm
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </CardContent></Card>
-              )}
+              {reconTab === "possible" && (() => {
+                const possible = reconData?.reconciliations.filter(r => r.status === "possible_match") ?? [];
+                const inr = (n: number) => n.toLocaleString("en-IN", { maximumFractionDigits: 0 });
+                return (
+                  <Card><CardContent className="p-0">
+                    {possible.length === 0 ? (
+                      <div className="py-10 text-center text-gray-400 text-sm">No possible matches.</div>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="bg-gray-50 border-b text-gray-500 uppercase tracking-wide text-[11px]">
+                              <th className="text-left px-4 py-2.5 font-semibold">Date</th>
+                              <th className="text-left px-4 py-2.5 font-semibold">Bank Transaction</th>
+                              <th className="text-right px-4 py-2.5 font-semibold">Bank Amount</th>
+                              <th className="text-left px-4 py-2.5 font-semibold">Suggested Invoice</th>
+                              <th className="text-right px-4 py-2.5 font-semibold">Invoice Amount</th>
+                              <th className="text-center px-4 py-2.5 font-semibold">Confidence</th>
+                              <th className="text-left px-4 py-2.5 font-semibold">Match Reasons</th>
+                              <th className="px-4 py-2.5" />
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {possible.map((r) => {
+                              const txn = Array.isArray(r.bank_transactions) ? r.bank_transactions[0] : r.bank_transactions;
+                              const doc = Array.isArray(r.documents) ? r.documents[0] : r.documents;
+                              const bankAmt = Number(txn?.debit_amount ?? txn?.credit_amount ?? 0);
+                              const isDebit = !!txn?.debit_amount;
+                              const score = r.match_score ?? 0;
+                              const scoreColor = score >= 70 ? "bg-yellow-100 text-yellow-700" : "bg-orange-100 text-orange-700";
+                              return (
+                                <tr key={r.id} className="border-b hover:bg-yellow-50/40">
+                                  <td className="px-4 py-3 whitespace-nowrap text-gray-500">{txn?.transaction_date ?? "—"}</td>
+                                  <td className="px-4 py-3 max-w-[200px]">
+                                    <p className="font-medium text-gray-900 truncate" title={txn?.narration}>{txn?.narration ?? "—"}</p>
+                                    <p className="text-gray-400 mt-0.5">{txn?.bank_name}</p>
+                                  </td>
+                                  <td className={`px-4 py-3 text-right font-semibold whitespace-nowrap ${isDebit ? "text-red-600" : "text-green-700"}`}>
+                                    {bankAmt ? `₹${inr(bankAmt)}` : "—"}
+                                    <span className="text-gray-400 font-normal ml-1">{isDebit ? "Dr" : "Cr"}</span>
+                                  </td>
+                                  <td className="px-4 py-3 max-w-[180px]">
+                                    <p className="font-medium text-gray-900 truncate" title={doc?.original_filename}>{doc?.original_filename ?? "—"}</p>
+                                    <p className="text-gray-400 mt-0.5 capitalize">{doc?.document_type?.replace(/_/g, " ")}</p>
+                                  </td>
+                                  <td className="px-4 py-3 text-right font-semibold text-gray-700 whitespace-nowrap">
+                                    {doc?.total_amount ? `₹${inr(Number(doc.total_amount))}` : "—"}
+                                  </td>
+                                  <td className="px-4 py-3 text-center">
+                                    <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${scoreColor}`}>{score}%</span>
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <div className="flex flex-wrap gap-1">
+                                      {(r.match_reasons ?? []).map((reason, i) => (
+                                        <span key={i} className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[11px]">{reason}</span>
+                                      ))}
+                                    </div>
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <div className="flex gap-2 whitespace-nowrap">
+                                      <button onClick={() => handleUnmatch(r.id)} className="text-gray-400 hover:text-red-500 flex items-center gap-1">
+                                        <Link2Off size={12} /> Reject
+                                      </button>
+                                      <button onClick={() => approvePossible(r.id)} className="bg-green-600 text-white px-2 py-1 rounded hover:bg-green-700 flex items-center gap-1">
+                                        <CheckCircle2 size={11} /> Confirm
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </CardContent></Card>
+                );
+              })()}
 
               {/* Unmatched */}
               {reconTab === "unmatched" && (() => {
