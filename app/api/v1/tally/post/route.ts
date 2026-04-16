@@ -88,15 +88,22 @@ export async function POST(request: NextRequest) {
     if (m.tally_ledger_name) ledgerMap[m.standard_account] = m.tally_ledger_name;
   }
 
-  // Get all accepted extractions for this document
+  // Get all human-reviewed extractions: accepted OR corrected (corrected = manually verified,
+  // highest quality data). For each field, corrected takes priority over accepted.
   const { data: extractions } = await supabase
     .from("extractions")
-    .select("field_name, extracted_value")
+    .select("field_name, extracted_value, status")
     .eq("document_id", documentId)
-    .eq("status", "accepted");
+    .in("status", ["accepted", "corrected"])
+    .order("status", { ascending: true }); // "accepted" < "corrected" alphabetically — corrected rows come last
 
+  // Per field: corrected value wins over accepted
   const fields: Record<string, string | null> = {};
-  for (const ext of extractions ?? []) fields[ext.field_name] = ext.extracted_value;
+  for (const ext of extractions ?? []) {
+    // Always overwrite — since corrected comes after accepted in the ordered result,
+    // it naturally wins
+    fields[ext.field_name] = ext.extracted_value;
+  }
 
   // Build invoice fields
   let invoiceFields = {
