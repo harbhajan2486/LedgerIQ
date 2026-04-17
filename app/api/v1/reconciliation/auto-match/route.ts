@@ -20,11 +20,12 @@ export async function POST(request: NextRequest) {
   }
 
   // ── 1. Fetch data in parallel ──────────────────────────────────────────────
+  // Include already-matched/possible_match txns so we can re-score and update reasons
   const txnQuery = supabase
     .from("bank_transactions")
     .select("id, transaction_date, narration, ref_number, debit_amount, credit_amount, balance")
     .eq("tenant_id", tenantId)
-    .eq("status", "unmatched");
+    .in("status", ["unmatched", "matched", "possible_match"]);
 
   if (transactionIds?.length > 0) txnQuery.in("id", transactionIds);
 
@@ -92,9 +93,14 @@ export async function POST(request: NextRequest) {
   const matchedDocIds: string[] = [];
   const usedDocIds = new Set<string>();
 
+  // Build map: txn_id → already-paired doc_id (for re-scoring existing pairs)
+  const existingPairMap: Record<string, string> = {};
+  for (const r of existingRecons ?? []) {
+    if (r.bank_transaction_id && r.document_id) existingPairMap[r.bank_transaction_id] = r.document_id;
+  }
+
   for (const txn of transactions) {
-    // Skip txns already in a reconciliation record
-    if (reconciledTxnIds.has(txn.id)) continue;
+    const alreadyPairedDocId = existingPairMap[txn.id] ?? null;
 
     const txnForScoring = {
       id: txn.id,
@@ -112,7 +118,9 @@ export async function POST(request: NextRequest) {
     let bestReasons: string[] = [];
 
     for (const invoice of unmatchedInvoices) {
-      if (usedDocIds.has(invoice.id)) continue; // already claimed by a better-scoring txn
+      // For already-paired txns: only re-score against their existing paired document
+      if (alreadyPairedDocId && invoice.id !== alreadyPairedDocId) continue;
+      if (!alreadyPairedDocId && usedDocIds.has(invoice.id)) continue; // already claimed by a better-scoring txn
       const { score, reasons } = scoreMatch(txnForScoring, invoice);
       if (score > bestScore) {
         bestScore = score;
@@ -121,9 +129,15 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    if (bestInvoice && bestScore >= POSSIBLE_THRESHOLD) {
-      const status = bestScore >= MATCH_THRESHOLD ? "matched" : "possible_match";
-      if (status === "matched") usedDocIds.add(bestInvoice.id); // reserve this invoice
+    if (bestInvoice && (bestScore >= POSSIBLE_THRESHOLD || alreadyPairedDocId)) {
+      // For already-paired: keep existing status unless score now qualifies for an upgrade/downgrade
+      let status: string;
+      if (alreadyPairedDocId) {
+        status = bestScore >= MATCH_THRESHOLD ? "matched" : bestScore >= POSSIBLE_THRESHOLD ? "possible_match" : "possible_match";
+      } else {
+        status = bestScore >= MATCH_THRESHOLD ? "matched" : "possible_match";
+      }
+      if (status === "matched" && !alreadyPairedDocId) usedDocIds.add(bestInvoice.id);
 
       reconRows.push({
         tenant_id: tenantId,
