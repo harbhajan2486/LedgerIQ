@@ -28,13 +28,25 @@ export async function GET(request: NextRequest) {
 
   const { data: recons } = await reconQuery;
 
+  // Deduplicate by bank_transaction_id — keep the row with the highest-priority status
+  // (matched > possible_match > others). Handles legacy data created before the unique constraint.
+  const STATUS_PRIORITY: Record<string, number> = { matched: 3, manual_match: 3, possible_match: 2, pending: 1 };
+  const reconByTxnId: Record<string, typeof (recons ?? [])[0]> = {};
+  for (const r of recons ?? []) {
+    const existing = reconByTxnId[r.bank_transaction_id];
+    if (!existing || (STATUS_PRIORITY[r.status] ?? 0) > (STATUS_PRIORITY[existing.status] ?? 0)) {
+      reconByTxnId[r.bank_transaction_id] = r;
+    }
+  }
+  const dedupedRecons = Object.values(reconByTxnId);
+
   // Filter by client if requested
   const filteredRecons = clientId
-    ? (recons ?? []).filter((r) => {
+    ? dedupedRecons.filter((r) => {
         const txn = Array.isArray(r.bank_transactions) ? r.bank_transactions[0] : r.bank_transactions;
         return (txn as { client_id?: string | null } | null)?.client_id === clientId;
       })
-    : (recons ?? []);
+    : dedupedRecons;
 
   // Fetch total_amount and invoice_number extractions for matched/possible docs
   const reconDocIds = filteredRecons.map((r) => r.document_id).filter(Boolean) as string[];
