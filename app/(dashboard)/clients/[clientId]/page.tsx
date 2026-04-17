@@ -658,8 +658,8 @@ export default function ClientDetailPage() {
     setImportingLedgers(false);
   }
 
-  useEffect(() => { loadData(); }, [clientId]);
-  useEffect(() => { if (activeTab === "bank") { loadBankTxns(); loadLedgers(); if (!reconData) loadRecon(); } }, [activeTab, clientId]);
+  useEffect(() => { loadData(); loadRecon(); }, [clientId]);
+  useEffect(() => { if (activeTab === "bank") { loadBankTxns(); loadLedgers(); } }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "reconciliation") loadRecon(); }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "ledger_view" && !ledgerData) loadLedger(ledgerFromDate || undefined, ledgerToDate || undefined); }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "ledgers") { loadLedgers(); loadMappingRules(); } }, [activeTab, clientId]);
