@@ -31,7 +31,8 @@ export async function GET(request: NextRequest) {
   // Deduplicate by bank_transaction_id — keep the row with the highest-priority status
   // (matched > possible_match > others). Handles legacy data created before the unique constraint.
   const STATUS_PRIORITY: Record<string, number> = { matched: 3, manual_match: 3, possible_match: 2, pending: 1 };
-  const reconByTxnId: Record<string, typeof (recons ?? [])[0]> = {};
+  type ReconRow = NonNullable<typeof recons>[0];
+  const reconByTxnId: Record<string, ReconRow> = {};
   for (const r of recons ?? []) {
     const existing = reconByTxnId[r.bank_transaction_id];
     if (!existing || (STATUS_PRIORITY[r.status] ?? 0) > (STATUS_PRIORITY[existing.status] ?? 0)) {
