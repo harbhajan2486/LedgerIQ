@@ -657,7 +657,7 @@ export default function ClientDetailPage() {
   }
 
   useEffect(() => { loadData(); }, [clientId]);
-  useEffect(() => { if (activeTab === "bank") { loadBankTxns(); loadLedgers(); } }, [activeTab, clientId]);
+  useEffect(() => { if (activeTab === "bank") { loadBankTxns(); loadLedgers(); if (!reconData) loadRecon(); } }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "reconciliation") loadRecon(); }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "ledger_view" && !ledgerData) loadLedger(ledgerFromDate || undefined, ledgerToDate || undefined); }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "ledgers") { loadLedgers(); loadMappingRules(); } }, [activeTab, clientId]);
@@ -1596,6 +1596,22 @@ export default function ClientDetailPage() {
                 </div>
               ) : (
                 <div className="overflow-x-auto">
+                  {(() => {
+                    // Build a txn_id → recon info map from reconData (already loaded)
+                    const reconByTxnId: Record<string, { score: number; reasons: string[]; invoiceNum: string | null; filename: string | null }> = {};
+                    for (const r of reconData?.reconciliations ?? []) {
+                      const txn = Array.isArray(r.bank_transactions) ? r.bank_transactions[0] : r.bank_transactions;
+                      const doc = Array.isArray(r.documents) ? r.documents[0] : r.documents;
+                      if (txn?.id) {
+                        reconByTxnId[txn.id] = {
+                          score: r.match_score,
+                          reasons: r.match_reasons ?? [],
+                          invoiceNum: r.doc_invoice_number ?? null,
+                          filename: doc?.original_filename ?? null,
+                        };
+                      }
+                    }
+                  return (
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b bg-gray-50 text-xs text-gray-500">
@@ -1613,18 +1629,21 @@ export default function ClientDetailPage() {
                       {bankTxns.filter(txn => {
                         if (!bankFilter) return true;
                         const q = bankFilter.toLowerCase();
+                        const rInfo = reconByTxnId[txn.id];
                         return (
                           txn.narration?.toLowerCase().includes(q) ||
                           txn.ref_number?.toLowerCase().includes(q) ||
                           txn.category?.toLowerCase().includes(q) ||
                           txn.ledger_name?.toLowerCase().includes(q) ||
                           txn.bank_name?.toLowerCase().includes(q) ||
-                          txn.matched_invoice_number?.toLowerCase().includes(q) ||
-                          txn.matched_doc_filename?.toLowerCase().includes(q) ||
+                          rInfo?.invoiceNum?.toLowerCase().includes(q) ||
+                          rInfo?.filename?.toLowerCase().includes(q) ||
                           String(txn.debit_amount ?? "").includes(q) ||
                           String(txn.credit_amount ?? "").includes(q)
                         );
-                      }).map((txn) => (
+                      }).map((txn) => {
+                        const rInfo = reconByTxnId[txn.id];
+                        return (
                         <tr key={txn.id} className={`border-b last:border-0 hover:bg-gray-50/50 text-xs ${
                           txn.status === "matched" ? "bg-green-50/30" :
                           txn.status === "possible_match" ? "bg-yellow-50/30" : ""
@@ -1673,37 +1692,38 @@ export default function ClientDetailPage() {
                                   {txn.status === "matched" ? <CheckCircle2 size={9} /> : null}
                                   {txn.status.replace(/_/g, " ")}
                                 </span>
-                                {txn.match_score != null && (
+                                {rInfo?.score != null && (
                                   <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-xs font-semibold ${
-                                    txn.match_score >= 70 ? "bg-green-100 text-green-800" :
-                                    txn.match_score >= 40 ? "bg-yellow-100 text-yellow-800" :
+                                    rInfo.score >= 70 ? "bg-green-100 text-green-800" :
+                                    rInfo.score >= 40 ? "bg-yellow-100 text-yellow-800" :
                                     "bg-gray-100 text-gray-600"
                                   }`}>
-                                    {txn.match_score}%
+                                    {rInfo.score}%
                                   </span>
                                 )}
                               </div>
-                              {/* Matched invoice reference */}
-                              {(txn.matched_invoice_number || txn.matched_doc_filename) && (
-                                <p className="text-gray-500 text-xs truncate max-w-[180px]" title={txn.matched_invoice_number ?? txn.matched_doc_filename ?? ""}>
+                              {(rInfo?.invoiceNum || rInfo?.filename) && (
+                                <p className="text-gray-500 text-xs truncate max-w-[180px]" title={rInfo.invoiceNum ?? rInfo.filename ?? ""}>
                                   <span className="text-gray-400">Invoice:</span>{" "}
-                                  {txn.matched_invoice_number ?? txn.matched_doc_filename}
+                                  {rInfo.invoiceNum ?? rInfo.filename}
                                 </p>
                               )}
-                              {/* Match reasons as chips */}
-                              {txn.match_reasons && txn.match_reasons.length > 0 && (
+                              {rInfo?.reasons && rInfo.reasons.length > 0 && (
                                 <div className="flex flex-wrap gap-1 mt-0.5">
-                                  {txn.match_reasons.map((r, i) => (
-                                    <span key={i} className="px-1 py-px rounded text-xs bg-blue-50 text-blue-600 border border-blue-100">{r}</span>
+                                  {rInfo.reasons.map((reason, i) => (
+                                    <span key={i} className="px-1 py-px rounded text-xs bg-blue-50 text-blue-600 border border-blue-100">{reason}</span>
                                   ))}
                                 </div>
                               )}
                             </div>
                           </td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
+                  );
+                  })()}
                 </div>
               )}
             </CardContent>
