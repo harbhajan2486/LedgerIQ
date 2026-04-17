@@ -316,11 +316,22 @@ export function scoreMatch(
   }
 
   // Invoice number in narration (strong signal)
+  // Rules to avoid false positives:
+  // - Must be >= 6 chars after stripping separators (avoids matching short sequences inside UPI ref numbers)
+  // - Must contain at least one digit (pure-word codes like "MISC" shouldn't trigger this)
+  // - Must match as a word boundary or segment boundary (not buried inside a longer number)
   if (invoice.invoice_number) {
     const inv = invoice.invoice_number.toLowerCase().replace(/[\s\-\/]/g, "");
     const narrClean = narr.toLowerCase().replace(/[\s\-\/]/g, "");
-    if (inv.length >= 4 && narrClean.includes(inv)) {
-      score += 45; reasons.push("Invoice number in narration");
+    const hasDigit = /\d/.test(inv);
+    if (inv.length >= 6 && hasDigit) {
+      // Word-boundary match: the invoice number should not be surrounded by more digits
+      // e.g. inv="12345" should NOT match inside "UPI/4123456/vendor"
+      const escaped = inv.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const wordBoundaryMatch = new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`).test(narrClean);
+      if (wordBoundaryMatch) {
+        score += 45; reasons.push("Invoice number in narration");
+      }
     }
   }
 
