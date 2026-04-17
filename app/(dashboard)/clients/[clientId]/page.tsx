@@ -33,6 +33,8 @@ interface Document {
   ai_model_used: string | null;
   conf: { high: number; medium: number; low: number } | null;
   possible_misclassification: boolean;
+  invoice_number: string | null;
+  total_amount: string | null;
 }
 
 interface BankTxn {
@@ -1001,6 +1003,8 @@ export default function ClientDetailPage() {
                       <tr className="border-b bg-gray-50">
                         <th className="text-left text-xs font-medium text-gray-500 px-5 py-3">File</th>
                         <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Type</th>
+                        <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Invoice #</th>
+                        <th className="text-right text-xs font-medium text-gray-500 px-4 py-3">Amount</th>
                         <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Status</th>
                         <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Confidence</th>
                         <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Uploaded / Last run</th>
@@ -1031,6 +1035,16 @@ export default function ClientDetailPage() {
                                   {RETAG_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
                                 </select>
                               )}
+                            </td>
+                            <td className="px-4 py-3 text-xs font-mono text-gray-700">
+                              {["reviewed", "reconciled", "posted"].includes(doc.status) && doc.invoice_number
+                                ? doc.invoice_number
+                                : <span className="text-gray-300">—</span>}
+                            </td>
+                            <td className="px-4 py-3 text-xs text-right font-medium">
+                              {["reviewed", "reconciled", "posted"].includes(doc.status) && doc.total_amount
+                                ? <span className="text-gray-800">₹{Number(doc.total_amount).toLocaleString("en-IN")}</span>
+                                : <span className="text-gray-300">—</span>}
                             </td>
                             <td className="px-4 py-3">
                               <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium ${cfg.cls}`}>

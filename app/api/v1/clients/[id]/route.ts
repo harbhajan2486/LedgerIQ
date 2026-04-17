@@ -51,22 +51,37 @@ export async function GET(
     if (toDate)   docQuery = docQuery.lte("uploaded_at", toDate + "T23:59:59");
     const { data: documents } = await docQuery;
 
-    // Per-doc confidence breakdown: high (≥0.8), medium (0.5–0.8), low (<0.5)
+    // Per-doc confidence breakdown + invoice_number + total_amount
     const docIds = (documents ?? []).map((d) => d.id);
     const confMap: Record<string, { high: number; medium: number; low: number }> = {};
+    const invoiceNumMap: Record<string, string> = {};
+    const totalAmountMap: Record<string, string> = {};
     if (docIds.length > 0) {
-      const { data: confRows } = await supabase
-        .from("extractions")
-        .select("document_id, confidence")
-        .in("document_id", docIds)
-        .not("status", "eq", "rejected")
-        .not("extracted_value", "is", null);
+      const [{ data: confRows }, { data: keyExts }] = await Promise.all([
+        supabase
+          .from("extractions")
+          .select("document_id, confidence")
+          .in("document_id", docIds)
+          .not("status", "eq", "rejected")
+          .not("extracted_value", "is", null),
+        supabase
+          .from("extractions")
+          .select("document_id, field_name, extracted_value, status")
+          .in("document_id", docIds)
+          .in("field_name", ["invoice_number", "total_amount"])
+          .in("status", ["accepted", "corrected", "pending"])
+          .order("status", { ascending: true }), // corrected sorts last → wins
+      ]);
       for (const row of confRows ?? []) {
         if (!confMap[row.document_id]) confMap[row.document_id] = { high: 0, medium: 0, low: 0 };
         const c = row.confidence ?? 0;
         if (c >= 0.8) confMap[row.document_id].high++;
         else if (c >= 0.5) confMap[row.document_id].medium++;
         else confMap[row.document_id].low++;
+      }
+      for (const ext of keyExts ?? []) {
+        if (ext.field_name === "invoice_number") invoiceNumMap[ext.document_id] = ext.extracted_value ?? "";
+        if (ext.field_name === "total_amount")   totalAmountMap[ext.document_id] = ext.extracted_value ?? "";
       }
     }
 
@@ -92,6 +107,8 @@ export async function GET(
       ...d,
       conf: confMap[d.id] ?? null,
       possible_misclassification: mismatchSet.has(d.id),
+      invoice_number: invoiceNumMap[d.id] ?? null,
+      total_amount: totalAmountMap[d.id] ?? null,
     }));
 
     return NextResponse.json({ client, documents: docsWithConf });
