@@ -37,7 +37,7 @@ export async function GET(
     if (reconTxnIds.length > 0) {
       const { data: recons } = await supabase
         .from("reconciliations")
-        .select("bank_transaction_id, match_score, match_reasons, document_id")
+        .select("bank_transaction_id, match_score, match_reasons, document_id, status")
         .in("bank_transaction_id", reconTxnIds)
         .neq("status", "exception");
 

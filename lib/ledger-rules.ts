@@ -66,14 +66,22 @@ export function suggestLedger(narration: string): string | null {
 
 /**
  * Extract a normalised pattern key from a narration for rule storage/lookup.
- * Takes the first meaningful segment (up to 30 chars, lowercased).
+ * Skips common banking prefixes (NEFT/RTGS/IMPS/UPI/MMT) so the meaningful
+ * vendor/party name is captured instead of the payment method prefix.
  */
 export function extractPattern(narration: string): string {
-  return narration
+  let n = narration
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, " ")
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 30)
     .trim();
+
+  // Strip leading payment method tokens: neft, rtgs, imps, upi, mmt, transfer, payment
+  n = n
+    .replace(/^(neft|rtgs|imps|upi|mmt|neft rtgs|net banking|transfer|payment|credit|debit)\s+/i, "")
+    .replace(/^\d{10,}\s+/, "") // strip leading reference numbers (10+ digits)
+    .trim();
+
+  // Take first 30 chars of what remains
+  return n.slice(0, 30).trim();
 }
