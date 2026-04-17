@@ -245,8 +245,9 @@ export async function POST(request: NextRequest) {
   const allHashes: string[] = [];
   let minDate = "9999-12-31", maxDate = "0000-01-01";
 
-  // Pre-load confirmed client-specific mapping rules (if client is set)
+  // Pre-load confirmed client-specific rules (Layer 3) and industry rules (Layer 2)
   const clientRules: Map<string, string> = new Map();
+  const industryRules: Map<string, string> = new Map();
   if (clientId) {
     const { data: rules } = await supabase
       .from("ledger_mapping_rules")
@@ -255,6 +256,24 @@ export async function POST(request: NextRequest) {
       .eq("client_id", clientId)
       .eq("confirmed", true);
     for (const r of rules ?? []) clientRules.set(r.pattern, r.ledger_name);
+
+    // Fetch industry for this client, then load industry rules
+    const { data: clientRow } = await supabase
+      .from("clients")
+      .select("industry_name")
+      .eq("id", clientId)
+      .single();
+    const industryName = clientRow?.industry_name ?? null;
+    if (industryName) {
+      const { data: iRules } = await supabase
+        .from("ledger_mapping_rules")
+        .select("pattern, ledger_name")
+        .eq("tenant_id", tenantId)
+        .eq("industry_name", industryName)
+        .is("client_id", null)
+        .eq("confirmed", true);
+      for (const r of iRules ?? []) industryRules.set(r.pattern, r.ledger_name);
+    }
   }
 
   for (const txn of transactions) {
@@ -262,9 +281,9 @@ export async function POST(request: NextRequest) {
     const isDebit = !!txn.debit;
     const { category, voucher_type } = classifyTransaction(txn.narration ?? "", isDebit);
 
-    // Suggest ledger_name: Layer 3 client rules first, then Layer 1 global rules
+    // Suggest ledger_name: Layer 3 client rules > Layer 2 industry rules > Layer 1 global keywords
     const pattern = extractPattern(txn.narration ?? "");
-    const ledger_name = clientRules.get(pattern) ?? suggestLedger(txn.narration ?? "") ?? null;
+    const ledger_name = clientRules.get(pattern) ?? industryRules.get(pattern) ?? suggestLedger(txn.narration ?? "") ?? null;
 
     // Hash = bank + date + narration (normalised) + debit + credit for dedup
     const hashStr = `${bankName}|${isoDate}|${(txn.narration ?? "").toLowerCase().trim()}|${txn.debit ?? ""}|${txn.credit ?? ""}`;

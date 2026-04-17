@@ -46,7 +46,7 @@ export async function PATCH(
       if (txn?.narration && txn.client_id) {
         const pattern = extractPattern(txn.narration);
         if (pattern) {
-          // Upsert rule: increment match_count, confirm once >= 3
+          // ── Layer 3: upsert client-level rule ──────────────────────────────
           const { data: existing } = await supabase
             .from("ledger_mapping_rules")
             .select("id, match_count")
@@ -55,8 +55,9 @@ export async function PATCH(
             .eq("pattern", pattern)
             .single();
 
+          let newCount = 1;
           if (existing) {
-            const newCount = (existing.match_count ?? 1) + 1;
+            newCount = (existing.match_count ?? 1) + 1;
             await supabase
               .from("ledger_mapping_rules")
               .update({ ledger_name: parsed.data.ledger_name, match_count: newCount, confirmed: newCount >= 3, updated_at: new Date().toISOString() })
@@ -70,6 +71,57 @@ export async function PATCH(
               match_count: 1,
               confirmed: false,
             });
+          }
+
+          // ── Industry promotion: check if 3+ confirmed clients in same industry share this pattern → ledger ──
+          try {
+            // Get industry for this client
+            const { data: clientRow } = await supabase
+              .from("clients")
+              .select("industry_name")
+              .eq("id", txn.client_id)
+              .single();
+
+            const industry = clientRow?.industry_name;
+            if (industry) {
+              // Count distinct confirmed client rules for this pattern+ledger in this industry
+              const { data: clientsInIndustry } = await supabase
+                .from("clients")
+                .select("id")
+                .eq("tenant_id", profile.tenant_id)
+                .eq("industry_name", industry);
+
+              const industryClientIds = (clientsInIndustry ?? []).map((c) => c.id);
+              if (industryClientIds.length >= 3) {
+                const { data: confirmedRules } = await supabase
+                  .from("ledger_mapping_rules")
+                  .select("client_id")
+                  .eq("tenant_id", profile.tenant_id)
+                  .eq("pattern", pattern)
+                  .eq("ledger_name", parsed.data.ledger_name)
+                  .eq("confirmed", true)
+                  .in("client_id", industryClientIds);
+
+                if ((confirmedRules ?? []).length >= 3) {
+                  // Promote to industry rule (Layer 2)
+                  await supabase.from("ledger_mapping_rules").upsert(
+                    {
+                      tenant_id: profile.tenant_id,
+                      client_id: null,
+                      industry_name: industry,
+                      pattern,
+                      ledger_name: parsed.data.ledger_name,
+                      match_count: (confirmedRules ?? []).length,
+                      confirmed: true,
+                      updated_at: new Date().toISOString(),
+                    },
+                    { onConflict: "tenant_id,industry_name,pattern" }
+                  );
+                }
+              }
+            }
+          } catch {
+            // Industry promotion is best-effort; never block the main save
           }
         }
       }

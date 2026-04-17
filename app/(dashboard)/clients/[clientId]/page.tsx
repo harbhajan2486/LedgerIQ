@@ -48,6 +48,11 @@ interface BankTxn {
   category: string | null;
   voucher_type: string | null;
   ledger_name: string | null;
+  // match reasoning (only present for matched/possible_match)
+  match_score?: number | null;
+  match_reasons?: string[] | null;
+  matched_invoice_number?: string | null;
+  matched_doc_filename?: string | null;
 }
 
 interface BankSummary {
@@ -186,6 +191,20 @@ export default function ClientDetailPage() {
   const [reapplying, setReapplying] = useState(false);
   const [importingLedgers, setImportingLedgers] = useState(false);
   const ledgerImportRef = useRef<HTMLInputElement>(null);
+
+  // Ledger mapping rules state
+  interface MappingRule {
+    id: string; client_id: string | null; industry_name: string | null;
+    pattern: string; ledger_name: string; match_count: number; confirmed: boolean; updated_at: string;
+  }
+  const [clientMappingRules, setClientMappingRules] = useState<MappingRule[]>([]);
+  const [industryMappingRules, setIndustryMappingRules] = useState<MappingRule[]>([]);
+  const [industryNameForRules, setIndustryNameForRules] = useState<string | null>(null);
+  const [rulesLoading, setRulesLoading] = useState(false);
+  const [newRulePattern, setNewRulePattern] = useState("");
+  const [newRuleLedger, setNewRuleLedger] = useState("");
+  const [newRuleScope, setNewRuleScope] = useState<"client" | "industry">("client");
+  const [addingRule, setAddingRule] = useState(false);
 
   // Summary note state
   interface ClientSummary { id: string; summary_md: string; generated_at: string; period_from: string | null; period_to: string | null; }
@@ -521,6 +540,57 @@ export default function ClientDetailPage() {
       .finally(() => setLedgersLoading(false));
   }
 
+  function loadMappingRules() {
+    setRulesLoading(true);
+    fetch(`/api/v1/ledger-rules?clientId=${clientId}`)
+      .then((r) => r.json())
+      .then((d) => {
+        setClientMappingRules(d.client_rules ?? []);
+        setIndustryMappingRules(d.industry_rules ?? []);
+        setIndustryNameForRules(d.industry_name ?? null);
+      })
+      .finally(() => setRulesLoading(false));
+  }
+
+  async function addMappingRule(e: React.FormEvent) {
+    e.preventDefault();
+    if (!newRulePattern.trim() || !newRuleLedger.trim()) return;
+    setAddingRule(true);
+    const res = await fetch("/api/v1/ledger-rules", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: newRuleScope === "client" ? clientId : null,
+        industry_name: newRuleScope === "industry" ? (industryNameForRules ?? null) : null,
+        pattern: newRulePattern.trim().toLowerCase(),
+        ledger_name: newRuleLedger.trim(),
+      }),
+    });
+    if (res.ok) {
+      setNewRulePattern(""); setNewRuleLedger("");
+      loadMappingRules();
+      toast.success("Rule added");
+    } else {
+      const d = await res.json();
+      toast.error(d.error ?? "Could not add rule");
+    }
+    setAddingRule(false);
+  }
+
+  async function deleteMappingRule(ruleId: string) {
+    await fetch(`/api/v1/ledger-rules/${ruleId}`, { method: "DELETE" });
+    loadMappingRules();
+  }
+
+  async function toggleRuleConfirmed(ruleId: string, current: boolean) {
+    await fetch(`/api/v1/ledger-rules/${ruleId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmed: !current }),
+    });
+    loadMappingRules();
+  }
+
   async function addLedger(e: React.FormEvent) {
     e.preventDefault();
     if (!newLedgerName.trim()) return;
@@ -590,7 +660,7 @@ export default function ClientDetailPage() {
   useEffect(() => { if (activeTab === "bank") { loadBankTxns(); loadLedgers(); } }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "reconciliation") loadRecon(); }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "ledger_view" && !ledgerData) loadLedger(ledgerFromDate || undefined, ledgerToDate || undefined); }, [activeTab, clientId]);
-  useEffect(() => { if (activeTab === "ledgers") loadLedgers(); }, [activeTab, clientId]);
+  useEffect(() => { if (activeTab === "ledgers") { loadLedgers(); loadMappingRules(); } }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "gst") loadGstData(); }, [activeTab, clientId, gstPeriodFrom, gstPeriodTo]);
   useEffect(() => { if (activeTab === "expected") loadExpected(); }, [activeTab, clientId]);
 
@@ -1536,7 +1606,7 @@ export default function ClientDetailPage() {
                         <th className="text-right px-4 py-3 font-medium">Debit</th>
                         <th className="text-right px-4 py-3 font-medium">Credit</th>
                         <th className="text-right px-4 py-3 font-medium">Balance</th>
-                        <th className="px-4 py-3 font-medium">Status</th>
+                        <th className="px-4 py-3 font-medium">Status / Match</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1549,14 +1619,19 @@ export default function ClientDetailPage() {
                           txn.category?.toLowerCase().includes(q) ||
                           txn.ledger_name?.toLowerCase().includes(q) ||
                           txn.bank_name?.toLowerCase().includes(q) ||
+                          txn.matched_invoice_number?.toLowerCase().includes(q) ||
+                          txn.matched_doc_filename?.toLowerCase().includes(q) ||
                           String(txn.debit_amount ?? "").includes(q) ||
                           String(txn.credit_amount ?? "").includes(q)
                         );
                       }).map((txn) => (
-                        <tr key={txn.id} className="border-b last:border-0 hover:bg-gray-50/50 text-xs">
+                        <tr key={txn.id} className={`border-b last:border-0 hover:bg-gray-50/50 text-xs ${
+                          txn.status === "matched" ? "bg-green-50/30" :
+                          txn.status === "possible_match" ? "bg-yellow-50/30" : ""
+                        }`}>
                           <td className="px-5 py-2.5 text-gray-500 whitespace-nowrap">{txn.transaction_date}</td>
                           <td className="px-4 py-2.5 max-w-xs">
-                            <p className="truncate text-gray-800">{txn.narration}</p>
+                            <p className="text-gray-800">{txn.narration}</p>
                             {txn.ref_number && <p className="text-gray-400 text-xs">Ref: {txn.ref_number}</p>}
                           </td>
                           <td className="px-4 py-2.5">
@@ -1587,15 +1662,43 @@ export default function ClientDetailPage() {
                           <td className="px-4 py-2.5 text-right text-gray-500 whitespace-nowrap">
                             {txn.balance != null ? `₹${Number(txn.balance).toLocaleString("en-IN")}` : ""}
                           </td>
-                          <td className="px-4 py-2.5">
-                            <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium ${
-                              txn.status === "matched" ? "bg-green-50 text-green-700" :
-                              txn.status === "possible_match" ? "bg-yellow-50 text-yellow-700" :
-                              "bg-gray-100 text-gray-500"
-                            }`}>
-                              {txn.status === "matched" ? <CheckCircle2 size={9} /> : null}
-                              {txn.status.replace("_", " ")}
-                            </span>
+                          <td className="px-4 py-2.5 min-w-[160px]">
+                            <div className="flex flex-col gap-1">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium ${
+                                  txn.status === "matched" ? "bg-green-100 text-green-700" :
+                                  txn.status === "possible_match" ? "bg-yellow-100 text-yellow-700" :
+                                  "bg-gray-100 text-gray-500"
+                                }`}>
+                                  {txn.status === "matched" ? <CheckCircle2 size={9} /> : null}
+                                  {txn.status.replace(/_/g, " ")}
+                                </span>
+                                {txn.match_score != null && (
+                                  <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-xs font-semibold ${
+                                    txn.match_score >= 70 ? "bg-green-100 text-green-800" :
+                                    txn.match_score >= 40 ? "bg-yellow-100 text-yellow-800" :
+                                    "bg-gray-100 text-gray-600"
+                                  }`}>
+                                    {txn.match_score}%
+                                  </span>
+                                )}
+                              </div>
+                              {/* Matched invoice reference */}
+                              {(txn.matched_invoice_number || txn.matched_doc_filename) && (
+                                <p className="text-gray-500 text-xs truncate max-w-[180px]" title={txn.matched_invoice_number ?? txn.matched_doc_filename ?? ""}>
+                                  <span className="text-gray-400">Invoice:</span>{" "}
+                                  {txn.matched_invoice_number ?? txn.matched_doc_filename}
+                                </p>
+                              )}
+                              {/* Match reasons as chips */}
+                              {txn.match_reasons && txn.match_reasons.length > 0 && (
+                                <div className="flex flex-wrap gap-1 mt-0.5">
+                                  {txn.match_reasons.map((r, i) => (
+                                    <span key={i} className="px-1 py-px rounded text-xs bg-blue-50 text-blue-600 border border-blue-100">{r}</span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -2203,6 +2306,163 @@ export default function ClientDetailPage() {
               )}
             </CardContent>
           </Card>
+
+          {/* ── Mapping Rules section ──────────────────────────────────────── */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900">Auto-Mapping Rules</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Narration keyword → Ledger. The system learns these automatically as you assign ledgers.
+                  {industryNameForRules && (
+                    <span className="ml-1 text-blue-600">Industry rules for <strong>{industryNameForRules}</strong> are shown separately below.</span>
+                  )}
+                </p>
+              </div>
+            </div>
+
+            {/* Add rule form */}
+            <Card className="mb-3">
+              <CardContent className="pt-4 pb-4">
+                <form onSubmit={addMappingRule} className="flex gap-2 items-end flex-wrap">
+                  <div className="flex-1 min-w-[140px] space-y-1">
+                    <label className="text-xs font-medium text-gray-600">Keyword / Pattern</label>
+                    <input value={newRulePattern} onChange={(e) => setNewRulePattern(e.target.value)}
+                      placeholder="e.g. neft swiggy"
+                      className="w-full h-9 px-3 rounded-md border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                  </div>
+                  <div className="flex-1 min-w-[140px] space-y-1">
+                    <label className="text-xs font-medium text-gray-600">Ledger Name</label>
+                    <select value={newRuleLedger} onChange={(e) => setNewRuleLedger(e.target.value)}
+                      className="w-full h-9 px-2 rounded-md border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                      <option value="">Select ledger…</option>
+                      {ledgers.map((l) => <option key={l.id} value={l.ledger_name}>{l.ledger_name}</option>)}
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-gray-600">Scope</label>
+                    <select value={newRuleScope} onChange={(e) => setNewRuleScope(e.target.value as "client" | "industry")}
+                      className="h-9 px-2 rounded-md border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                      <option value="client">This client only</option>
+                      {industryNameForRules && <option value="industry">Whole industry ({industryNameForRules})</option>}
+                    </select>
+                  </div>
+                  <button type="submit" disabled={addingRule || !newRulePattern.trim() || !newRuleLedger}
+                    className="h-9 px-4 rounded-md bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 inline-flex items-center gap-1">
+                    {addingRule ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />} Add Rule
+                  </button>
+                </form>
+              </CardContent>
+            </Card>
+
+            {/* Client-level rules */}
+            <Card className="mb-3">
+              <CardHeader className="pb-2 pt-4">
+                <CardTitle className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                  Client Rules
+                  <span className="text-xs font-normal text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded-full">{clientMappingRules.length}</span>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="p-0">
+                {rulesLoading ? (
+                  <div className="py-6 flex items-center justify-center gap-2 text-gray-400 text-sm">
+                    <Loader2 size={14} className="animate-spin" /> Loading…
+                  </div>
+                ) : clientMappingRules.length === 0 ? (
+                  <p className="px-5 py-4 text-xs text-gray-400">No rules yet. Assign ledgers to transactions — rules are learned automatically.</p>
+                ) : (
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b bg-gray-50 text-gray-500">
+                        <th className="text-left px-5 py-2.5 font-medium">Pattern</th>
+                        <th className="text-left px-4 py-2.5 font-medium">→ Ledger</th>
+                        <th className="text-center px-4 py-2.5 font-medium">Hits</th>
+                        <th className="text-center px-4 py-2.5 font-medium">Status</th>
+                        <th className="px-4 py-2.5" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {clientMappingRules.map((r) => (
+                        <tr key={r.id} className="border-b last:border-0 hover:bg-gray-50/50">
+                          <td className="px-5 py-2 font-mono text-gray-700">{r.pattern}</td>
+                          <td className="px-4 py-2 text-gray-800 font-medium">{r.ledger_name}</td>
+                          <td className="px-4 py-2 text-center text-gray-500">{r.match_count}</td>
+                          <td className="px-4 py-2 text-center">
+                            <button onClick={() => toggleRuleConfirmed(r.id, r.confirmed)}
+                              title={r.confirmed ? "Click to disable rule" : "Click to confirm rule"}
+                              className={`px-2 py-0.5 rounded-full text-xs font-medium transition-colors ${
+                                r.confirmed ? "bg-green-100 text-green-700 hover:bg-green-200" : "bg-gray-100 text-gray-500 hover:bg-yellow-50 hover:text-yellow-700"
+                              }`}>
+                              {r.confirmed ? "Active" : "Learning"}
+                            </button>
+                          </td>
+                          <td className="px-4 py-2 text-right">
+                            <button onClick={() => deleteMappingRule(r.id)} className="text-gray-300 hover:text-red-500 transition-colors">
+                              <Trash2 size={13} />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Industry-level rules */}
+            {industryNameForRules && (
+              <Card>
+                <CardHeader className="pb-2 pt-4">
+                  <CardTitle className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                    Industry Rules
+                    <span className="text-xs font-normal text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded-full">{industryNameForRules}</span>
+                    <span className="text-xs font-normal text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded-full">{industryMappingRules.length}</span>
+                    <span className="text-xs font-normal text-gray-400 ml-auto">Auto-promoted when 3+ clients in this industry confirm the same rule</span>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-0">
+                  {industryMappingRules.length === 0 ? (
+                    <p className="px-5 py-4 text-xs text-gray-400">No industry rules yet. Rules are promoted here automatically once 3 clients in <strong>{industryNameForRules}</strong> confirm the same pattern.</p>
+                  ) : (
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b bg-gray-50 text-gray-500">
+                          <th className="text-left px-5 py-2.5 font-medium">Pattern</th>
+                          <th className="text-left px-4 py-2.5 font-medium">→ Ledger</th>
+                          <th className="text-center px-4 py-2.5 font-medium">Clients</th>
+                          <th className="text-center px-4 py-2.5 font-medium">Status</th>
+                          <th className="px-4 py-2.5" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {industryMappingRules.map((r) => (
+                          <tr key={r.id} className="border-b last:border-0 hover:bg-gray-50/50">
+                            <td className="px-5 py-2 font-mono text-gray-700">{r.pattern}</td>
+                            <td className="px-4 py-2 text-gray-800 font-medium">{r.ledger_name}</td>
+                            <td className="px-4 py-2 text-center text-gray-500">{r.match_count}</td>
+                            <td className="px-4 py-2 text-center">
+                              <button onClick={() => toggleRuleConfirmed(r.id, r.confirmed)}
+                                title={r.confirmed ? "Click to disable rule" : "Click to confirm rule"}
+                                className={`px-2 py-0.5 rounded-full text-xs font-medium transition-colors ${
+                                  r.confirmed ? "bg-blue-100 text-blue-700 hover:bg-blue-200" : "bg-gray-100 text-gray-500 hover:bg-yellow-50 hover:text-yellow-700"
+                                }`}>
+                                {r.confirmed ? "Active" : "Paused"}
+                              </button>
+                            </td>
+                            <td className="px-4 py-2 text-right">
+                              <button onClick={() => deleteMappingRule(r.id)} className="text-gray-300 hover:text-red-500 transition-colors">
+                                <Trash2 size={13} />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+          </div>
         </div>
       )}
 

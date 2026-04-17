@@ -15,8 +15,16 @@ export async function POST(
 
   const { id: clientId } = await params;
 
-  // Fetch transactions, valid ledger names, and confirmed mapping rules in parallel
-  const [txnsResult, ledgersResult, rulesResult] = await Promise.all([
+  // Fetch client's industry for Layer 2 lookup
+  const { data: clientRow } = await supabase
+    .from("clients")
+    .select("industry_name")
+    .eq("id", clientId)
+    .single();
+  const industryName = clientRow?.industry_name ?? null;
+
+  // Fetch transactions, valid ledger names, confirmed client rules, and industry rules in parallel
+  const [txnsResult, ledgersResult, rulesResult, industryRulesResult] = await Promise.all([
     supabase
       .from("bank_transactions")
       .select("id, narration, ledger_name")
@@ -33,15 +41,30 @@ export async function POST(
       .eq("client_id", clientId)
       .eq("tenant_id", profile.tenant_id)
       .eq("confirmed", true),
+    industryName
+      ? supabase
+          .from("ledger_mapping_rules")
+          .select("pattern, ledger_name")
+          .eq("tenant_id", profile.tenant_id)
+          .eq("industry_name", industryName)
+          .is("client_id", null)
+          .eq("confirmed", true)
+      : Promise.resolve({ data: [] }),
   ]);
 
   const transactions = txnsResult.data ?? [];
   const validLedgerNames = new Set((ledgersResult.data ?? []).map((l) => l.ledger_name));
 
-  // Build pattern → ledger map from confirmed client rules (Layer 3)
-  const ruleMap: Record<string, string> = {};
+  // Build pattern → ledger maps
+  // Layer 3: confirmed client rules (highest priority)
+  const clientRuleMap: Record<string, string> = {};
   for (const rule of rulesResult.data ?? []) {
-    ruleMap[rule.pattern] = rule.ledger_name;
+    clientRuleMap[rule.pattern] = rule.ledger_name;
+  }
+  // Layer 2: confirmed industry rules (middle priority)
+  const industryRuleMap: Record<string, string> = {};
+  for (const rule of (industryRulesResult as { data: { pattern: string; ledger_name: string }[] | null }).data ?? []) {
+    industryRuleMap[rule.pattern] = rule.ledger_name;
   }
 
   const byLedger: Record<string, string[]> = {};
@@ -49,14 +72,17 @@ export async function POST(
 
   for (const txn of transactions) {
     const pattern = extractPattern(txn.narration ?? "");
-    const confirmedLedger = ruleMap[pattern] ?? null;           // Layer 3: client-learned rule
-    const globalLedger    = suggestLedger(txn.narration ?? ""); // Layer 1: global keyword rule
-    // Best suggestion: confirmed rule first, then global, then nothing
-    const bestSuggestion = confirmedLedger ?? (globalLedger && validLedgerNames.has(globalLedger) ? globalLedger : null);
+    const confirmedLedger  = clientRuleMap[pattern] ?? null;        // Layer 3: client rule
+    const industryLedger   = industryRuleMap[pattern] ?? null;      // Layer 2: industry rule
+    const globalLedger     = suggestLedger(txn.narration ?? "");    // Layer 1: global keywords
+    // Priority: client rule > industry rule > global keyword
+    const bestSuggestion = confirmedLedger
+      ?? (industryLedger && validLedgerNames.has(industryLedger) ? industryLedger : null)
+      ?? (globalLedger && validLedgerNames.has(globalLedger) ? globalLedger : null);
 
     const current = txn.ledger_name;
-    const isStale   = !!current && !validLedgerNames.has(current);           // set but ledger deleted/renamed
-    const isWrong   = !!current && !!confirmedLedger && confirmedLedger !== current && validLedgerNames.has(confirmedLedger); // confirmed rule disagrees
+    const isStale   = !!current && !validLedgerNames.has(current);                                 // set but ledger deleted/renamed
+    const isWrong   = !!current && !!confirmedLedger && confirmedLedger !== current && validLedgerNames.has(confirmedLedger); // confirmed client rule disagrees
     const isMissing = !current;
 
     if (isMissing && bestSuggestion) {
