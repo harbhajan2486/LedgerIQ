@@ -59,8 +59,12 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // No clientId: return all rules for tenant grouped
-    const { data: allRules } = await query;
+    // No clientId: return all rules for tenant grouped, with client names joined
+    const { data: allRules } = await supabase
+      .from("ledger_mapping_rules")
+      .select("id, client_id, industry_name, pattern, ledger_name, match_count, confirmed, updated_at, clients(client_name)")
+      .eq("tenant_id", profile.tenant_id)
+      .order("updated_at", { ascending: false });
 
     const clientRules = (allRules ?? []).filter((r) => r.client_id !== null);
     const industryRules = (allRules ?? []).filter((r) => r.client_id === null && r.industry_name !== null);

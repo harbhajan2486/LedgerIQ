@@ -14,6 +14,7 @@ import {
   LogOut,
   Loader2,
   Building2,
+  Library,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
@@ -27,6 +28,7 @@ const navItems = [
   { label: "Reconciliation", href: "/reconciliation",  icon: GitMerge },
   { label: "Post to Tally",  href: "/tally",           icon: BookOpen },
   { label: "Tax Summary",    href: "/tax-summary",     icon: FileText },
+  { label: "Rules Library",  href: "/rules-library",   icon: Library },
   { label: "Settings",       href: "/settings",        icon: Settings },
 ];
 
