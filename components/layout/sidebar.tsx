@@ -13,6 +13,7 @@ import {
   Loader2,
   Building2,
   Library,
+  HelpCircle,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
@@ -26,6 +27,7 @@ const navItems = [
   { label: "Tax Summary",   href: "/tax-summary",   icon: FileText },
   { label: "Rules Library", href: "/rules-library", icon: Library },
   { label: "Settings",      href: "/settings",      icon: Settings },
+  { label: "How it works",  href: "/guide",         icon: HelpCircle },
 ];
 
 export function Sidebar() {
