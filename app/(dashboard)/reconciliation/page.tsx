@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -79,17 +80,28 @@ function fmt(n: number | string | null | undefined) {
 }
 
 export default function ReconciliationPage() {
+  return (
+    <Suspense fallback={<div className="flex items-center gap-2 py-16 justify-center text-gray-400"><span className="animate-spin">⏳</span> Loading…</div>}>
+      <ReconciliationPageInner />
+    </Suspense>
+  );
+}
+
+function ReconciliationPageInner() {
+  const searchParams = useSearchParams();
+  const preselectedClientId = searchParams.get("client") ?? "";
+
   const [data, setData] = useState<ReconData | null>(null);
   const [loading, setLoading] = useState(true);
   const [matching, setMatching] = useState(false);
   const [activeTab, setActiveTab] = useState<ActiveTab>("matched");
 
-  // Upload state
-  const [uploadOpen, setUploadOpen] = useState(false);
+  // Upload state — pre-open and pre-select client if coming from client page
+  const [uploadOpen, setUploadOpen] = useState(() => !!preselectedClientId);
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [bankName, setBankName] = useState("HDFC Bank");
-  const [uploadClientId, setUploadClientId] = useState<string>("");
+  const [uploadClientId, setUploadClientId] = useState<string>(preselectedClientId);
   const [clients, setClients] = useState<{ id: string; client_name: string }[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -263,12 +275,18 @@ export default function ReconciliationPage() {
                 </div>
                 {clients.length > 0 && (
                   <div className="space-y-1">
-                    <label className="text-sm font-medium text-gray-700">Client (optional)</label>
+                    <label className="text-sm font-medium text-gray-700">
+                      Client
+                      {!preselectedClientId && <span className="text-gray-400 font-normal"> (optional)</span>}
+                    </label>
                     <select value={uploadClientId} onChange={(e) => setUploadClientId(e.target.value)}
                       className="w-full h-10 px-3 rounded-md border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                       <option value="">— All / Unassigned —</option>
                       {clients.map((c) => <option key={c.id} value={c.id}>{c.client_name}</option>)}
                     </select>
+                    {!uploadClientId && (
+                      <p className="text-xs text-amber-600">⚠ No client selected — transactions won&apos;t appear in any client&apos;s Bank tab or create ledger rules.</p>
+                    )}
                   </div>
                 )}
                 <div className="space-y-1">

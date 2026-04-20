@@ -162,6 +162,11 @@ export default function ClientDetailPage() {
   const [bankTxns, setBankTxns] = useState<BankTxn[]>([]);
   const [bankSummary, setBankSummary] = useState<BankSummary | null>(null);
   const [bankLoading, setBankLoading] = useState(false);
+  const [bankUploadOpen, setBankUploadOpen] = useState(false);
+  const [bankUploading, setBankUploading] = useState(false);
+  const [bankUploadMsg, setBankUploadMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [bankUploadBankName, setBankUploadBankName] = useState("HDFC Bank");
+  const bankUploadRef = useRef<HTMLInputElement>(null);
 
   // Reconciliation tab state
   const [reconData, setReconData] = useState<ReconData | null>(null);
@@ -437,6 +442,38 @@ export default function ClientDetailPage() {
         setBankSummary(d.summary ?? null);
       })
       .finally(() => setBankLoading(false));
+  }
+
+  async function uploadBankStatement(e: React.FormEvent) {
+    e.preventDefault();
+    const file = bankUploadRef.current?.files?.[0];
+    if (!file) return;
+    setBankUploading(true);
+    setBankUploadMsg(null);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4 * 60 * 1000);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("bank_name", bankUploadBankName);
+      formData.append("client_id", clientId);
+      const res = await fetch("/api/v1/reconciliation/upload-statement", {
+        method: "POST", body: formData, signal: controller.signal,
+      });
+      const d = await res.json();
+      if (res.ok) {
+        setBankUploadMsg({ type: "success", text: `Done — ${d.inserted ?? 0} new transactions added.` });
+        if (bankUploadRef.current) bankUploadRef.current.value = "";
+        loadBankTxns();
+      } else {
+        setBankUploadMsg({ type: "error", text: d.error ?? "Upload failed" });
+      }
+    } catch {
+      setBankUploadMsg({ type: "error", text: "Upload timed out or failed. Try a smaller file." });
+    } finally {
+      clearTimeout(timer);
+      setBankUploading(false);
+    }
   }
 
   function loadRecon() {
@@ -1603,6 +1640,48 @@ export default function ClientDetailPage() {
             </div>
           )}
 
+          {/* Inline bank statement upload panel */}
+          {bankUploadOpen && (
+            <Card className="border-blue-200 bg-blue-50/40">
+              <CardContent className="py-3 px-4">
+                <form onSubmit={uploadBankStatement} className="flex flex-wrap items-end gap-3">
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-gray-600">Bank</label>
+                    <select value={bankUploadBankName} onChange={e => setBankUploadBankName(e.target.value)}
+                      className="h-8 px-2 rounded border border-gray-300 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                      {["HDFC Bank","ICICI Bank","SBI","Axis Bank","Kotak Mahindra Bank","Yes Bank","IndusInd Bank","Other"].map(b => (
+                        <option key={b}>{b}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="space-y-1 flex-1 min-w-[200px]">
+                    <label className="text-xs font-medium text-gray-600">Statement file (CSV, Excel, or PDF)</label>
+                    <input ref={bankUploadRef} type="file" required accept=".csv,.xlsx,.xls,.pdf"
+                      className="block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-blue-100 file:text-blue-700 hover:file:bg-blue-200" />
+                  </div>
+                  <div className="flex gap-2 items-center">
+                    <button type="submit" disabled={bankUploading}
+                      className="h-8 px-3 rounded bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 disabled:opacity-50 inline-flex items-center gap-1">
+                      {bankUploading ? <><Loader2 size={11} className="animate-spin" /> Processing…</> : <><Upload size={11} /> Upload</>}
+                    </button>
+                    <button type="button" onClick={() => { setBankUploadOpen(false); setBankUploadMsg(null); }}
+                      className="h-8 px-3 rounded border border-gray-200 text-xs text-gray-500 hover:bg-gray-50">
+                      Cancel
+                    </button>
+                  </div>
+                  {bankUploading && (
+                    <p className="w-full text-xs text-blue-600">PDF statements take 30–90 seconds — please wait…</p>
+                  )}
+                  {bankUploadMsg && (
+                    <p className={`w-full text-xs font-medium ${bankUploadMsg.type === "success" ? "text-green-700" : "text-red-600"}`}>
+                      {bankUploadMsg.text}
+                    </p>
+                  )}
+                </form>
+              </CardContent>
+            </Card>
+          )}
+
           {/* Bank filter bar */}
           <div className="flex items-center gap-2">
             <input
@@ -1637,9 +1716,12 @@ export default function ClientDetailPage() {
                   className="inline-flex items-center gap-1 text-xs text-green-600 hover:text-green-800">
                   <Download size={12} /> Bank Book
                 </a>
-                <Link href={`/reconciliation?client=${clientId}`} className="text-xs text-blue-600 hover:underline">
-                  Upload bank statement →
-                </Link>
+                <button
+                  onClick={() => { setBankUploadOpen(!bankUploadOpen); setBankUploadMsg(null); }}
+                  className="text-xs text-blue-600 hover:text-blue-800 inline-flex items-center gap-1"
+                >
+                  <Upload size={11} /> Upload statement
+                </button>
               </div>
             </CardHeader>
             <CardContent className="p-0">
@@ -1749,7 +1831,9 @@ export default function ClientDetailPage() {
                           <td className="px-4 py-2.5 min-w-[160px]">
                             <div className="flex flex-col gap-1">
                               <div className="flex items-center gap-1.5 flex-wrap">
-                                <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium ${
+                                <span
+                                  title={txn.status === "unmatched" ? "No invoice matched to this transaction yet — this is normal until you reconcile" : undefined}
+                                  className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium ${
                                   txn.status === "matched" ? "bg-green-100 text-green-700" :
                                   txn.status === "possible_match" ? "bg-yellow-100 text-yellow-700" :
                                   "bg-gray-100 text-gray-500"
