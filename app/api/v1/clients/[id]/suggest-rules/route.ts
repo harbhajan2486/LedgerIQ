@@ -95,11 +95,12 @@ ${JSON.stringify(patternsToSend.map(([pattern, example]) => ({ pattern, example 
 
 RULES:
 1. Return ONLY a JSON array, no markdown, no explanation
-2. Each item: {"pattern": "...", "suggested_ledger": "...", "confidence": 0.0-1.0}
+2. Each item: {"pattern": "...", "suggested_ledger": "...", "confidence": 0.0-1.0, "reason": "one short sentence"}
 3. Use confidence < 0.6 for ambiguous patterns (person names, generic codes)
 4. If you cannot determine a ledger confidently, set suggested_ledger to null
 5. Common mappings: salary/wages→Salary Expenses, rent→Rent, jio/airtel→Telephone/Internet, epfo→PF/ESI, electricity boards→Electricity Expenses
-6. Person name payments are often salary or professional fees — use confidence 0.5 unless context is clear`;
+6. Person name payments are often salary or professional fees — use confidence 0.5 unless context is clear
+7. reason should be a short explanation e.g. "Person name + SALAR suffix suggests salary payment" or "Jio is a telecom provider"`;
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const response = await anthropic.messages.create({
@@ -113,7 +114,7 @@ RULES:
 
     // Parse AI response — strip any accidental markdown fences
     const jsonStr = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-    let aiSuggestions: Array<{ pattern: string; suggested_ledger: string | null; confidence: number }> = [];
+    let aiSuggestions: Array<{ pattern: string; suggested_ledger: string | null; confidence: number; reason?: string }> = [];
     try {
       const parsed = JSON.parse(jsonStr);
       aiSuggestions = Array.isArray(parsed) ? parsed : [];
@@ -130,6 +131,7 @@ RULES:
         example_narration: patternMap.get(s.pattern) ?? s.pattern,
         suggested_ledger: s.suggested_ledger!,
         confidence: Math.round(s.confidence * 100),
+        reason: s.reason ?? "",
       }));
 
     return NextResponse.json({ suggestions, total_patterns: patternMap.size });

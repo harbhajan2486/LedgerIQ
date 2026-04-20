@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { extractPattern, suggestLedger } from "@/lib/ledger-rules";
 
 export async function GET(
   _request: NextRequest,
@@ -16,15 +17,43 @@ export async function GET(
 
     const { id: clientId } = await params;
 
-    const { data: txns } = await supabase
-      .from("bank_transactions")
-      .select("id, transaction_date, narration, ref_number, debit_amount, credit_amount, balance, bank_name, status, category, voucher_type, ledger_name")
-      .eq("tenant_id", profile.tenant_id)
-      .eq("client_id", clientId)
-      .order("transaction_date", { ascending: false })
-      .limit(1000);
+    // Fetch client industry + confirmed rules for ledger source derivation
+    const [txnsResult, clientRow, rulesResult, industryRulesResult] = await Promise.all([
+      supabase
+        .from("bank_transactions")
+        .select("id, transaction_date, narration, ref_number, debit_amount, credit_amount, balance, bank_name, status, category, voucher_type, ledger_name")
+        .eq("tenant_id", profile.tenant_id)
+        .eq("client_id", clientId)
+        .order("transaction_date", { ascending: false })
+        .limit(1000),
+      supabase.from("clients").select("industry_name").eq("id", clientId).single(),
+      supabase.from("ledger_mapping_rules").select("pattern, ledger_name")
+        .eq("client_id", clientId).eq("tenant_id", profile.tenant_id).eq("confirmed", true),
+      supabase.from("ledger_mapping_rules").select("pattern, ledger_name, industry_name")
+        .eq("tenant_id", profile.tenant_id).is("client_id", null).eq("confirmed", true),
+    ]);
 
-    const rows = txns ?? [];
+    const txns = txnsResult;
+
+    const rows = txns.data ?? [];
+
+    // Build rule maps for ledger source derivation
+    const industryName = clientRow.data?.industry_name ?? null;
+    const clientRuleMap: Record<string, string> = {};
+    for (const r of rulesResult.data ?? []) clientRuleMap[r.pattern] = r.ledger_name;
+    const industryRuleMap: Record<string, string> = {};
+    for (const r of (industryRulesResult.data ?? []).filter(r => r.industry_name === industryName)) {
+      industryRuleMap[r.pattern] = r.ledger_name;
+    }
+
+    function deriveLedgerSource(narration: string, ledgerName: string | null): string | null {
+      if (!ledgerName) return null;
+      const pattern = extractPattern(narration);
+      if (clientRuleMap[pattern] === ledgerName) return "Layer 3 – client rule";
+      if (industryRuleMap[pattern] === ledgerName) return "Layer 2 – industry rule";
+      if (suggestLedger(narration) === ledgerName) return "Layer 1 – global keyword";
+      return "Manually assigned";
+    }
 
     // Fetch reconciliation data for matched/possible_match transactions
     const reconTxnIds = rows
@@ -79,17 +108,19 @@ export async function GET(
       }
     }
 
-    // Enrich transactions with match info
+    // Enrich transactions with match info + ledger source
     const enrichedRows = rows.map((txn) => {
       const recon = reconMap[txn.id];
-      if (!recon) return txn;
-      const docInfo = recon.document_id ? docInfoMap[recon.document_id] : null;
+      const docInfo = recon?.document_id ? docInfoMap[recon.document_id] : null;
       return {
         ...txn,
-        match_score: recon.match_score,
-        match_reasons: recon.match_reasons,
-        matched_invoice_number: docInfo?.invoice_number ?? null,
-        matched_doc_filename: docInfo?.filename ?? null,
+        ledger_source: deriveLedgerSource(txn.narration ?? "", txn.ledger_name),
+        ...(recon ? {
+          match_score: recon.match_score,
+          match_reasons: recon.match_reasons,
+          matched_invoice_number: docInfo?.invoice_number ?? null,
+          matched_doc_filename: docInfo?.filename ?? null,
+        } : {}),
       };
     });
 

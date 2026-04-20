@@ -50,6 +50,7 @@ interface BankTxn {
   category: string | null;
   voucher_type: string | null;
   ledger_name: string | null;
+  ledger_source?: string | null;
   // match reasoning (only present for matched/possible_match)
   match_score?: number | null;
   match_reasons?: string[] | null;
@@ -98,6 +99,27 @@ const CATEGORIES = [
   "Inter-bank Transfer","Other Payment","Other Receipt",
 ];
 const VOUCHER_TYPES = ["Payment","Receipt","Journal","Contra","Purchase","Sales"];
+
+// Transactions in these categories never have an invoice — hide "unmatched" for them
+const DIRECT_EXPENSE_CATEGORIES = new Set([
+  "Bank Charges","Salary","GST Payment","TDS Payment","Loan Repayment",
+  "Insurance","Interest Income","Interest Expense","Inter-bank Transfer",
+]);
+// Ledger keywords that also indicate no invoice expected
+const DIRECT_EXPENSE_LEDGER_PATTERNS = [
+  "bank charges","salary","payroll","wages","gst cash","tds payable",
+  "pf / esi","pf/esi","provident fund","loan repayment","interest income",
+  "interest expense","insurance","electricity","telephone","internet",
+];
+
+function needsInvoiceMatch(txn: { category?: string | null; ledger_name?: string | null }): boolean {
+  if (txn.category && DIRECT_EXPENSE_CATEGORIES.has(txn.category)) return false;
+  if (txn.ledger_name) {
+    const l = txn.ledger_name.toLowerCase();
+    if (DIRECT_EXPENSE_LEDGER_PATTERNS.some(p => l.includes(p))) return false;
+  }
+  return true;
+}
 
 function MiniCategoryChip({ txnId, value, field, editingTxn, setEditingTxn, onSave }: {
   txnId: string; value: string | null | undefined; field: "category" | "voucher_type";
@@ -214,7 +236,7 @@ export default function ClientDetailPage() {
   const [addingRule, setAddingRule] = useState(false);
 
   // AI bulk rule suggestion state
-  interface RuleSuggestion { pattern: string; example_narration: string; suggested_ledger: string; confidence: number }
+  interface RuleSuggestion { pattern: string; example_narration: string; suggested_ledger: string; confidence: number; reason: string }
   const [suggestions, setSuggestions] = useState<RuleSuggestion[]>([]);
   const [suggestionOverrides, setSuggestionOverrides] = useState<Record<string, string>>({});
   const [suggestLoading, setSuggestLoading] = useState(false);
@@ -1813,6 +1835,9 @@ export default function ClientDetailPage() {
                                 loadBankTxns();
                               }}
                             />
+                            {txn.ledger_source && (
+                              <p className="text-xs text-gray-400 mt-0.5 italic" title={txn.ledger_source}>{txn.ledger_source}</p>
+                            )}
                           </td>
                           <td className="px-4 py-2.5">
                             {txn.category && (
@@ -1829,42 +1854,56 @@ export default function ClientDetailPage() {
                             {txn.balance != null ? `₹${Number(txn.balance).toLocaleString("en-IN")}` : ""}
                           </td>
                           <td className="px-4 py-2.5 min-w-[160px]">
-                            <div className="flex flex-col gap-1">
-                              <div className="flex items-center gap-1.5 flex-wrap">
-                                <span
-                                  title={txn.status === "unmatched" ? "No invoice matched to this transaction yet — this is normal until you reconcile" : undefined}
-                                  className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium ${
-                                  txn.status === "matched" ? "bg-green-100 text-green-700" :
-                                  txn.status === "possible_match" ? "bg-yellow-100 text-yellow-700" :
-                                  "bg-gray-100 text-gray-500"
-                                }`}>
-                                  {txn.status === "matched" ? <CheckCircle2 size={9} /> : null}
-                                  {txn.status.replace(/_/g, " ")}
-                                </span>
-                                {rInfo?.score != null && (
-                                  <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-xs font-semibold ${
-                                    rInfo.score >= 70 ? "bg-green-100 text-green-800" :
-                                    rInfo.score >= 40 ? "bg-yellow-100 text-yellow-800" :
-                                    "bg-gray-100 text-gray-600"
+                            {(() => {
+                              const isDirectExp = !needsInvoiceMatch(txn);
+                              // For direct expenses that are unmatched: show ledger status only
+                              if (isDirectExp && txn.status === "unmatched") {
+                                return (
+                                  <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium ${
+                                    txn.ledger_name ? "bg-green-50 text-green-600" : "bg-gray-100 text-gray-400"
                                   }`}>
-                                    {rInfo.score}%
+                                    {txn.ledger_name ? <><CheckCircle2 size={9} /> Ledger set</> : "No ledger"}
                                   </span>
-                                )}
-                              </div>
-                              {(rInfo?.invoiceNum || rInfo?.filename) && (
-                                <p className="text-gray-500 text-xs truncate max-w-[180px]" title={rInfo.invoiceNum ?? rInfo.filename ?? ""}>
-                                  <span className="text-gray-400">Invoice:</span>{" "}
-                                  {rInfo.invoiceNum ?? rInfo.filename}
-                                </p>
-                              )}
-                              {rInfo?.reasons && rInfo.reasons.length > 0 && (
-                                <div className="flex flex-wrap gap-1 mt-0.5">
-                                  {rInfo.reasons.map((reason, i) => (
-                                    <span key={i} className="px-1 py-px rounded text-xs bg-blue-50 text-blue-600 border border-blue-100">{reason}</span>
-                                  ))}
+                                );
+                              }
+                              // All other cases: show full reconciliation status + match info
+                              return (
+                                <div className="flex flex-col gap-1">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium ${
+                                      txn.status === "matched" ? "bg-green-100 text-green-700" :
+                                      txn.status === "possible_match" ? "bg-yellow-100 text-yellow-700" :
+                                      "bg-gray-100 text-gray-500"
+                                    }`}>
+                                      {txn.status === "matched" ? <CheckCircle2 size={9} /> : null}
+                                      {txn.status === "unmatched" ? "needs matching" : txn.status.replace(/_/g, " ")}
+                                    </span>
+                                    {rInfo?.score != null && (
+                                      <span className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-xs font-semibold ${
+                                        rInfo.score >= 70 ? "bg-green-100 text-green-800" :
+                                        rInfo.score >= 40 ? "bg-yellow-100 text-yellow-800" :
+                                        "bg-gray-100 text-gray-600"
+                                      }`}>
+                                        {rInfo.score}%
+                                      </span>
+                                    )}
+                                  </div>
+                                  {(rInfo?.invoiceNum || rInfo?.filename) && (
+                                    <p className="text-gray-500 text-xs truncate max-w-[180px]" title={rInfo.invoiceNum ?? rInfo.filename ?? ""}>
+                                      <span className="text-gray-400">Invoice:</span>{" "}
+                                      {rInfo.invoiceNum ?? rInfo.filename}
+                                    </p>
+                                  )}
+                                  {rInfo?.reasons && rInfo.reasons.length > 0 && (
+                                    <div className="flex flex-wrap gap-1 mt-0.5">
+                                      {rInfo.reasons.map((reason, i) => (
+                                        <span key={i} className="px-1 py-px rounded text-xs bg-blue-50 text-blue-600 border border-blue-100">{reason}</span>
+                                      ))}
+                                    </div>
+                                  )}
                                 </div>
-                              )}
-                            </div>
+                              );
+                            })()}
                           </td>
                         </tr>
                         );
@@ -2569,6 +2608,7 @@ export default function ClientDetailPage() {
                         <th className="text-left px-5 py-2 font-medium">Pattern</th>
                         <th className="text-left px-4 py-2 font-medium">Example narration</th>
                         <th className="text-left px-4 py-2 font-medium">Suggested ledger</th>
+                        <th className="text-left px-4 py-2 font-medium">Reason</th>
                         <th className="text-center px-4 py-2 font-medium">Confidence</th>
                         <th className="px-4 py-2" />
                       </tr>
@@ -2587,6 +2627,7 @@ export default function ClientDetailPage() {
                                 className="w-full h-7 px-2 rounded border border-gray-200 text-xs focus:outline-none focus:ring-1 focus:ring-purple-400"
                               />
                             </td>
+                            <td className="px-4 py-2 text-gray-500 max-w-[200px] italic" title={s.reason}>{s.reason || "—"}</td>
                             <td className="px-4 py-2 text-center">
                               <span className={`text-xs font-medium ${s.confidence >= 80 ? "text-green-600" : s.confidence >= 60 ? "text-amber-600" : "text-gray-400"}`}>
                                 {s.confidence}%
