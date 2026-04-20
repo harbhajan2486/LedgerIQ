@@ -28,9 +28,9 @@ export async function GET() {
 
     if (error) throw error;
 
-    // Enrich with document counts
+    // Enrich with document + bank transaction counts
     const clientIds = (clients ?? []).map((c) => c.id);
-    const [{ data: docCounts }, { data: pendingCounts }] = await Promise.all([
+    const [{ data: docCounts }, { data: pendingCounts }, { data: unreconciledCounts }] = await Promise.all([
       supabase
         .from("documents")
         .select("client_id")
@@ -42,21 +42,32 @@ export async function GET() {
         .eq("tenant_id", profile.tenant_id)
         .eq("status", "review_required")
         .in("client_id", clientIds),
+      supabase
+        .from("bank_transactions")
+        .select("client_id")
+        .eq("tenant_id", profile.tenant_id)
+        .eq("status", "unmatched")
+        .in("client_id", clientIds),
     ]);
 
     const docCountMap: Record<string, number> = {};
     const pendingCountMap: Record<string, number> = {};
+    const unreconciledMap: Record<string, number> = {};
     (docCounts ?? []).forEach((d) => {
       if (d.client_id) docCountMap[d.client_id] = (docCountMap[d.client_id] ?? 0) + 1;
     });
     (pendingCounts ?? []).forEach((d) => {
       if (d.client_id) pendingCountMap[d.client_id] = (pendingCountMap[d.client_id] ?? 0) + 1;
     });
+    (unreconciledCounts ?? []).forEach((d) => {
+      if (d.client_id) unreconciledMap[d.client_id] = (unreconciledMap[d.client_id] ?? 0) + 1;
+    });
 
     const enriched = (clients ?? []).map((c) => ({
       ...c,
       document_count: docCountMap[c.id] ?? 0,
       pending_review: pendingCountMap[c.id] ?? 0,
+      unreconciled: unreconciledMap[c.id] ?? 0,
     }));
 
     return NextResponse.json({ clients: enriched });

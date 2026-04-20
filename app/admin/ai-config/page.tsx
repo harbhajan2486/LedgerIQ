@@ -43,7 +43,7 @@ export default function AiConfigPage() {
   const [config, setConfig] = useState<AiConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [activeSection, setActiveSection] = useState<"models" | "params" | "prompts" | "budget">("models");
+  const [activeSection, setActiveSection] = useState<"models" | "params" | "prompts" | "budget" | "suggestions">("models");
 
   useEffect(() => {
     fetch("/api/v1/admin/ai-config")
@@ -82,10 +82,11 @@ export default function AiConfigPage() {
   }
 
   const SECTIONS = [
-    { id: "models",  label: "Models",      icon: <Bot size={14} /> },
-    { id: "params",  label: "Parameters",  icon: <SlidersHorizontal size={14} /> },
-    { id: "prompts", label: "Prompts",     icon: <FileText size={14} /> },
-    { id: "budget",  label: "Budget",      icon: <DollarSign size={14} /> },
+    { id: "models",      label: "Models",           icon: <Bot size={14} /> },
+    { id: "params",      label: "Parameters",       icon: <SlidersHorizontal size={14} /> },
+    { id: "prompts",     label: "Prompts",          icon: <FileText size={14} /> },
+    { id: "budget",      label: "Budget",           icon: <DollarSign size={14} /> },
+    { id: "suggestions", label: "Rule Suggestions", icon: <Bot size={14} /> },
   ] as const;
 
   if (loading) return (
@@ -322,6 +323,111 @@ export default function AiConfigPage() {
               <p className="text-xs text-gray-400 mt-1">
                 {config.user_prompt.length} characters
               </p>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* ─── RULE SUGGESTIONS ───────────────────────────────────────── */}
+      {activeSection === "suggestions" && (
+        <div className="space-y-4">
+          <div className="p-3 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-700 flex items-start gap-2">
+            <Info size={14} className="flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="font-medium">AI Bulk Rule Suggestion</p>
+              <p className="mt-0.5">
+                When a CA opens a client with unrecognised bank narrations, they can trigger an AI scan.
+                The AI reads all narrations with no ledger match and suggests mappings in bulk.
+                The CA reviews and accepts/rejects each suggestion — nothing is applied automatically.
+              </p>
+            </div>
+          </div>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base flex items-center justify-between">
+                Enable Rule Suggestion
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={config.rule_suggestion_enabled}
+                    onChange={(e) => update("rule_suggestion_enabled", e.target.checked)}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-gray-200 rounded-full peer peer-checked:bg-blue-600 transition-colors after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-full" />
+                </label>
+              </CardTitle>
+              <p className="text-sm text-gray-500">
+                When disabled, the &quot;Suggest rules&quot; button is hidden from all client pages.
+              </p>
+            </CardHeader>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Model for Rule Suggestion</CardTitle>
+              <p className="text-sm text-gray-500">
+                Haiku is recommended — each suggestion call typically covers 50–100 narrations in one request.
+                Cost per call: ~$0.001–0.005 with Haiku.
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {MODELS.map((m) => (
+                <label key={m.id}
+                  className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                    config.rule_suggestion_model === m.id
+                      ? "border-blue-400 bg-blue-50"
+                      : "border-gray-200 hover:border-gray-300"
+                  }`}>
+                  <input type="radio" name="rule_suggestion_model" value={m.id}
+                    checked={config.rule_suggestion_model === m.id}
+                    onChange={() => update("rule_suggestion_model", m.id as AiConfig["rule_suggestion_model"])}
+                    className="mt-1 accent-blue-600" />
+                  <div>
+                    <p className="text-sm font-medium text-gray-900">{m.label}</p>
+                    <p className="text-xs text-gray-500">{m.note}</p>
+                  </div>
+                </label>
+              ))}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Max Patterns per Call</CardTitle>
+              <p className="text-sm text-gray-500">
+                Maximum unique narration patterns sent to AI in one suggestion request.
+                Higher = more coverage but larger prompt and marginally higher cost.
+              </p>
+            </CardHeader>
+            <CardContent>
+              <Slider
+                label="Max patterns"
+                value={config.rule_suggestion_max_patterns}
+                min={10} max={200} step={10}
+                onChange={(v) => update("rule_suggestion_max_patterns", v)}
+                hint="100 is optimal for most clients"
+              />
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Minimum Confidence to Show</CardTitle>
+              <p className="text-sm text-gray-500">
+                Suggestions below this confidence are hidden from the CA.
+                Higher threshold = fewer but more reliable suggestions.
+                Lower threshold = more suggestions but more noise (person names, generic codes).
+              </p>
+            </CardHeader>
+            <CardContent>
+              <Slider
+                label="Min confidence threshold"
+                value={config.rule_suggestion_min_confidence}
+                min={0.3} max={0.9} step={0.05}
+                onChange={(v) => update("rule_suggestion_min_confidence", v)}
+                hint="0.5 recommended — filters out ambiguous person-name payments"
+              />
             </CardContent>
           </Card>
         </div>

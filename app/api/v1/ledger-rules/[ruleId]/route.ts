@@ -6,6 +6,7 @@ const patchSchema = z.object({
   ledger_name: z.string().min(1).optional(),
   pattern: z.string().min(1).max(50).optional(),
   confirmed: z.boolean().optional(),
+  promote_to_industry: z.boolean().optional(), // if true, creates/upserts an industry-level rule
 });
 
 export async function PATCH(
@@ -26,9 +27,42 @@ export async function PATCH(
     const parsed = patchSchema.safeParse(body);
     if (!parsed.success) return NextResponse.json({ error: "Invalid request" }, { status: 400 });
 
+    const { promote_to_industry, ...updateFields } = parsed.data;
+
+    // If promote_to_industry, fetch the rule + its client's industry, then upsert industry rule
+    if (promote_to_industry) {
+      const { data: rule } = await supabase
+        .from("ledger_mapping_rules")
+        .select("pattern, ledger_name, client_id")
+        .eq("id", ruleId)
+        .eq("tenant_id", profile.tenant_id)
+        .single();
+      if (!rule) return NextResponse.json({ error: "Rule not found" }, { status: 404 });
+      if (!rule.client_id) return NextResponse.json({ error: "Only client rules can be promoted" }, { status: 400 });
+
+      const { data: clientRow } = await supabase
+        .from("clients").select("industry_name").eq("id", rule.client_id).single();
+      if (!clientRow?.industry_name) return NextResponse.json({ error: "Client has no industry set" }, { status: 400 });
+
+      const { error: promoteError } = await supabase
+        .from("ledger_mapping_rules")
+        .upsert({
+          tenant_id: profile.tenant_id,
+          client_id: null,
+          industry_name: clientRow.industry_name,
+          pattern: rule.pattern,
+          ledger_name: updateFields.ledger_name ?? rule.ledger_name,
+          match_count: 1,
+          confirmed: true,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "tenant_id,pattern,client_id" });
+      if (promoteError) return NextResponse.json({ error: promoteError.message }, { status: 500 });
+      return NextResponse.json({ success: true, promoted_to: clientRow.industry_name });
+    }
+
     const { error } = await supabase
       .from("ledger_mapping_rules")
-      .update({ ...parsed.data, updated_at: new Date().toISOString() })
+      .update({ ...updateFields, updated_at: new Date().toISOString() })
       .eq("id", ruleId)
       .eq("tenant_id", profile.tenant_id);
 

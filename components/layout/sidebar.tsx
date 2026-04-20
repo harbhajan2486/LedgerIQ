@@ -5,9 +5,7 @@ import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 import {
   LayoutDashboard,
-  Upload,
   ClipboardCheck,
-  GitMerge,
   FileText,
   BookOpen,
   Settings,
@@ -21,15 +19,13 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 const navItems = [
-  { label: "Dashboard",      href: "/dashboard",       icon: LayoutDashboard },
-  { label: "Clients",        href: "/clients",         icon: Building2 },
-  { label: "Upload",         href: "/upload",          icon: Upload },
-  { label: "Review Queue",   href: "/review",          icon: ClipboardCheck },
-  { label: "Reconciliation", href: "/reconciliation",  icon: GitMerge },
-  { label: "Post to Tally",  href: "/tally",           icon: BookOpen },
-  { label: "Tax Summary",    href: "/tax-summary",     icon: FileText },
-  { label: "Rules Library",  href: "/rules-library",   icon: Library },
-  { label: "Settings",       href: "/settings",        icon: Settings },
+  { label: "Dashboard",     href: "/dashboard",     icon: LayoutDashboard },
+  { label: "Clients",       href: "/clients",       icon: Building2 },
+  { label: "Inbox",         href: "/review",        icon: ClipboardCheck },
+  { label: "Post to Tally", href: "/tally",         icon: BookOpen },
+  { label: "Tax Summary",   href: "/tax-summary",   icon: FileText },
+  { label: "Rules Library", href: "/rules-library", icon: Library },
+  { label: "Settings",      href: "/settings",      icon: Settings },
 ];
 
 export function Sidebar() {

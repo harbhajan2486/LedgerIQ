@@ -208,6 +208,14 @@ export default function ClientDetailPage() {
   const [newRuleScope, setNewRuleScope] = useState<"client" | "industry">("client");
   const [addingRule, setAddingRule] = useState(false);
 
+  // AI bulk rule suggestion state
+  interface RuleSuggestion { pattern: string; example_narration: string; suggested_ledger: string; confidence: number }
+  const [suggestions, setSuggestions] = useState<RuleSuggestion[]>([]);
+  const [suggestionOverrides, setSuggestionOverrides] = useState<Record<string, string>>({});
+  const [suggestLoading, setSuggestLoading] = useState(false);
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const [acceptingPatterns, setAcceptingPatterns] = useState<Set<string>>(new Set());
+
   // Summary note state
   interface ClientSummary { id: string; summary_md: string; generated_at: string; period_from: string | null; period_to: string | null; }
   const [summary, setSummary] = useState<ClientSummary | null>(null);
@@ -582,6 +590,49 @@ export default function ClientDetailPage() {
   async function deleteMappingRule(ruleId: string) {
     await fetch(`/api/v1/ledger-rules/${ruleId}`, { method: "DELETE" });
     loadMappingRules();
+  }
+
+  async function fetchSuggestions() {
+    setSuggestLoading(true);
+    setSuggestOpen(true);
+    setSuggestions([]);
+    setSuggestionOverrides({});
+    try {
+      const res = await fetch(`/api/v1/clients/${clientId}/suggest-rules`, { method: "POST" });
+      const d = await res.json();
+      if (res.ok) {
+        setSuggestions(d.suggestions ?? []);
+        if ((d.suggestions ?? []).length === 0) {
+          toast.info(d.message ?? "No new suggestions — all transactions already mapped");
+          setSuggestOpen(false);
+        }
+      } else {
+        toast.error(d.error ?? "Failed to get suggestions");
+        setSuggestOpen(false);
+      }
+    } finally {
+      setSuggestLoading(false);
+    }
+  }
+
+  async function acceptSuggestion(pattern: string, ledger: string) {
+    setAcceptingPatterns(prev => new Set([...prev, pattern]));
+    try {
+      const res = await fetch("/api/v1/ledger-rules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_id: clientId, pattern, ledger_name: ledger }),
+      });
+      if (res.ok) {
+        setSuggestions(prev => prev.filter(s => s.pattern !== pattern));
+        loadMappingRules();
+      } else {
+        const d = await res.json();
+        toast.error(d.error ?? "Could not save rule");
+      }
+    } finally {
+      setAcceptingPatterns(prev => { const s = new Set(prev); s.delete(pattern); return s; });
+    }
   }
 
   async function toggleRuleConfirmed(ruleId: string, current: boolean) {
@@ -2347,47 +2398,141 @@ export default function ClientDetailPage() {
               <div>
                 <h3 className="text-sm font-semibold text-gray-900">Auto-Mapping Rules</h3>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  Narration keyword → Ledger. The system learns these automatically as you assign ledgers.
+                  Narration keyword → Ledger. Learned automatically as you assign ledgers.
                   {industryNameForRules && (
-                    <span className="ml-1 text-blue-600">Industry rules for <strong>{industryNameForRules}</strong> are shown separately below.</span>
+                    <span className="ml-1 text-blue-600">Industry rules for <strong>{industryNameForRules}</strong> shown below.</span>
                   )}
                 </p>
               </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={fetchSuggestions}
+                  disabled={suggestLoading}
+                  className="text-xs px-2.5 py-1.5 rounded border border-purple-200 text-purple-700 hover:bg-purple-50 inline-flex items-center gap-1 disabled:opacity-50"
+                  title="AI scans unrecognised transactions and suggests ledger mappings"
+                >
+                  {suggestLoading ? <Loader2 size={11} className="animate-spin" /> : <span>✦</span>} AI Suggest
+                </button>
+                <button
+                  onClick={() => { setNewRulePattern(""); setNewRuleLedger(""); setAddingRule(false); document.getElementById("quick-rule-modal")?.classList.remove("hidden"); }}
+                  className="text-xs px-2.5 py-1.5 rounded border border-gray-200 text-gray-600 hover:bg-gray-50 inline-flex items-center gap-1"
+                >
+                  <Plus size={11} /> Quick add
+                </button>
+                <a href="/rules-library" className="text-xs text-blue-600 hover:text-blue-800">
+                  Manage all →
+                </a>
+              </div>
             </div>
 
-            {/* Add rule form */}
-            <Card className="mb-3">
-              <CardContent className="pt-4 pb-4">
-                <form onSubmit={addMappingRule} className="flex gap-2 items-end flex-wrap">
-                  <div className="flex-1 min-w-[140px] space-y-1">
-                    <label className="text-xs font-medium text-gray-600">Keyword / Pattern</label>
-                    <input value={newRulePattern} onChange={(e) => setNewRulePattern(e.target.value)}
-                      placeholder="e.g. neft swiggy"
-                      className="w-full h-9 px-3 rounded-md border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                  </div>
-                  <div className="flex-1 min-w-[140px] space-y-1">
-                    <label className="text-xs font-medium text-gray-600">Ledger Name</label>
-                    <select value={newRuleLedger} onChange={(e) => setNewRuleLedger(e.target.value)}
-                      className="w-full h-9 px-2 rounded-md border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                      <option value="">Select ledger…</option>
-                      {ledgers.map((l) => <option key={l.id} value={l.ledger_name}>{l.ledger_name}</option>)}
-                    </select>
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-xs font-medium text-gray-600">Scope</label>
-                    <select value={newRuleScope} onChange={(e) => setNewRuleScope(e.target.value as "client" | "industry")}
-                      className="h-9 px-2 rounded-md border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                      <option value="client">This client only</option>
-                      {industryNameForRules && <option value="industry">Whole industry ({industryNameForRules})</option>}
-                    </select>
-                  </div>
-                  <button type="submit" disabled={addingRule || !newRulePattern.trim() || !newRuleLedger}
-                    className="h-9 px-4 rounded-md bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 inline-flex items-center gap-1">
-                    {addingRule ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />} Add Rule
-                  </button>
-                </form>
-              </CardContent>
-            </Card>
+            {/* Quick-add inline form (hidden by default) */}
+            <div id="quick-rule-modal" className="hidden mb-3">
+              <Card className="border-blue-200 bg-blue-50/30">
+                <CardContent className="pt-3 pb-3">
+                  <form onSubmit={addMappingRule} className="flex gap-2 items-end flex-wrap">
+                    <div className="flex-1 min-w-[120px] space-y-1">
+                      <label className="text-xs font-medium text-gray-600">Keyword</label>
+                      <input value={newRulePattern} onChange={(e) => setNewRulePattern(e.target.value)}
+                        placeholder="e.g. swiggy"
+                        className="w-full h-8 px-2 rounded border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    </div>
+                    <div className="flex-1 min-w-[120px] space-y-1">
+                      <label className="text-xs font-medium text-gray-600">Ledger</label>
+                      <select value={newRuleLedger} onChange={(e) => setNewRuleLedger(e.target.value)}
+                        className="w-full h-8 px-2 rounded border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="">Select…</option>
+                        {ledgers.map((l) => <option key={l.id} value={l.ledger_name}>{l.ledger_name}</option>)}
+                      </select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-medium text-gray-600">Scope</label>
+                      <select value={newRuleScope} onChange={(e) => setNewRuleScope(e.target.value as "client" | "industry")}
+                        className="h-8 px-2 rounded border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="client">This client</option>
+                        {industryNameForRules && <option value="industry">Industry</option>}
+                      </select>
+                    </div>
+                    <div className="flex gap-1">
+                      <button type="submit" disabled={!newRulePattern.trim() || !newRuleLedger}
+                        className="h-8 px-3 rounded bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 disabled:opacity-50">
+                        Save
+                      </button>
+                      <button type="button"
+                        onClick={() => document.getElementById("quick-rule-modal")?.classList.add("hidden")}
+                        className="h-8 px-3 rounded border border-gray-200 text-xs text-gray-500 hover:bg-gray-50">
+                        Cancel
+                      </button>
+                    </div>
+                  </form>
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* AI suggestion review panel */}
+            {suggestOpen && suggestions.length > 0 && (
+              <Card className="mb-3 border-purple-200">
+                <CardHeader className="pb-2 pt-3">
+                  <CardTitle className="text-sm font-medium text-purple-800 flex items-center justify-between">
+                    <span>✦ AI Suggestions — {suggestions.length} pattern{suggestions.length !== 1 ? "s" : ""} found</span>
+                    <button onClick={() => setSuggestOpen(false)} className="text-xs text-gray-400 hover:text-gray-600 font-normal">Dismiss</button>
+                  </CardTitle>
+                  <p className="text-xs text-gray-500">Review each suggestion. Edit the ledger if needed, then Accept. Skip anything you&apos;re unsure about.</p>
+                </CardHeader>
+                <CardContent className="p-0">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b bg-purple-50 text-gray-500">
+                        <th className="text-left px-5 py-2 font-medium">Pattern</th>
+                        <th className="text-left px-4 py-2 font-medium">Example narration</th>
+                        <th className="text-left px-4 py-2 font-medium">Suggested ledger</th>
+                        <th className="text-center px-4 py-2 font-medium">Confidence</th>
+                        <th className="px-4 py-2" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {suggestions.map(s => {
+                        const ledger = suggestionOverrides[s.pattern] ?? s.suggested_ledger;
+                        return (
+                          <tr key={s.pattern} className="border-b last:border-0 hover:bg-gray-50/50">
+                            <td className="px-5 py-2 font-mono text-gray-700">{s.pattern}</td>
+                            <td className="px-4 py-2 text-gray-500 max-w-[180px] truncate" title={s.example_narration}>{s.example_narration}</td>
+                            <td className="px-4 py-2">
+                              <input
+                                value={ledger}
+                                onChange={e => setSuggestionOverrides(prev => ({ ...prev, [s.pattern]: e.target.value }))}
+                                className="w-full h-7 px-2 rounded border border-gray-200 text-xs focus:outline-none focus:ring-1 focus:ring-purple-400"
+                              />
+                            </td>
+                            <td className="px-4 py-2 text-center">
+                              <span className={`text-xs font-medium ${s.confidence >= 80 ? "text-green-600" : s.confidence >= 60 ? "text-amber-600" : "text-gray-400"}`}>
+                                {s.confidence}%
+                              </span>
+                            </td>
+                            <td className="px-4 py-2 text-right">
+                              <div className="flex items-center justify-end gap-1.5">
+                                <button
+                                  onClick={() => acceptSuggestion(s.pattern, ledger)}
+                                  disabled={acceptingPatterns.has(s.pattern) || !ledger}
+                                  className="text-xs px-2.5 py-1 rounded bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50"
+                                >
+                                  {acceptingPatterns.has(s.pattern) ? <Loader2 size={10} className="animate-spin" /> : "Accept"}
+                                </button>
+                                <button
+                                  onClick={() => setSuggestions(prev => prev.filter(x => x.pattern !== s.pattern))}
+                                  className="text-xs px-2 py-1 rounded border border-gray-200 text-gray-400 hover:text-gray-600"
+                                >
+                                  Skip
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </CardContent>
+              </Card>
+            )}
 
             {/* Client-level rules */}
             <Card className="mb-3">

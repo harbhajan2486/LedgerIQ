@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Loader2, Trash2, Plus, Search, ShieldCheck, Building2, User,
-  ChevronDown, ChevronUp, BookOpen, Scale,
+  ChevronDown, ChevronUp, BookOpen, Scale, TrendingUp, Copy,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -79,6 +79,11 @@ export default function RulesLibraryPage() {
   const [newIndustry, setNewIndustry] = useState("");
   const [saving, setSaving] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [promotingId, setPromotingId] = useState<string | null>(null);
+  const [copySourceId, setCopySourceId] = useState<string>("");
+  const [copyTargetId, setCopyTargetId] = useState<string>("");
+  const [copyOpen, setCopyOpen] = useState<string | null>(null); // clientId whose copy panel is open
+  const [copying, setCopying] = useState(false);
 
   const loadLedger = useCallback(async () => {
     setLoadingLedger(true);
@@ -157,6 +162,50 @@ export default function RulesLibraryPage() {
       else toast.error("Failed to delete rule");
     } finally {
       setDeletingId(null);
+    }
+  }
+
+  async function promoteRule(id: string) {
+    setPromotingId(id);
+    try {
+      const res = await fetch(`/api/v1/ledger-rules/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ promote_to_industry: true }),
+      });
+      const d = await res.json();
+      if (res.ok) {
+        toast.success(`Promoted to industry rule${d.promoted_to ? ` (${d.promoted_to})` : ""}`);
+        loadLedger();
+      } else {
+        toast.error(d.error ?? "Failed to promote rule");
+      }
+    } finally {
+      setPromotingId(null);
+    }
+  }
+
+  async function copyRules(fromClientId: string, toClientId: string) {
+    setCopying(true);
+    try {
+      const res = await fetch("/api/v1/ledger-rules/copy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from_client_id: fromClientId, to_client_id: toClientId }),
+      });
+      const d = await res.json();
+      if (res.ok) {
+        const msg = d.copied === 0
+          ? "No new rules to copy (all patterns already exist)"
+          : `Copied ${d.copied} rule${d.copied !== 1 ? "s" : ""}${d.skipped ? ` (${d.skipped} already existed)` : ""}`;
+        toast.success(msg);
+        setCopyOpen(null);
+        loadLedger();
+      } else {
+        toast.error(d.error ?? "Failed to copy rules");
+      }
+    } finally {
+      setCopying(false);
     }
   }
 
@@ -389,9 +438,28 @@ export default function RulesLibraryPage() {
                   {Object.keys(grouped).length === 0 ? (
                     <EmptyState message="No client-specific rules yet. They are created automatically as you assign ledgers to bank transactions." />
                   ) : (
-                    Object.entries(grouped).sort(([a], [b]) => a.localeCompare(b)).map(([clientName, rules]) => (
-                      <ClientGroup key={clientName} clientName={clientName} rules={rules} deletingId={deletingId} onDelete={deleteRule} />
-                    ))
+                    Object.entries(grouped).sort(([a], [b]) => a.localeCompare(b)).map(([clientName, rules]) => {
+                      const thisClientId = rules[0]?.client_id ?? "";
+                      return (
+                        <ClientGroup
+                          key={clientName}
+                          clientName={clientName}
+                          clientId={thisClientId}
+                          rules={rules}
+                          allClients={clients}
+                          deletingId={deletingId}
+                          promotingId={promotingId}
+                          copyOpen={copyOpen}
+                          setCopyOpen={setCopyOpen}
+                          copyTargetId={copyTargetId}
+                          setCopyTargetId={setCopyTargetId}
+                          copying={copying}
+                          onDelete={deleteRule}
+                          onPromote={promoteRule}
+                          onCopy={copyRules}
+                        />
+                      );
+                    })
                   )}
                 </div>
               )}
@@ -406,7 +474,7 @@ export default function RulesLibraryPage() {
                   {filteredIndustry.length === 0 ? (
                     <EmptyState message="No industry rules yet. They appear automatically when enough clients in the same industry confirm a pattern." />
                   ) : (
-                    <RulesTable rules={filteredIndustry} showCol="industry" deletingId={deletingId} onDelete={deleteRule} />
+                    <RulesTable rules={filteredIndustry} showCol="industry" deletingId={deletingId} onDelete={deleteRule} promotingId={null} />
                   )}
                 </div>
               )}
@@ -794,21 +862,39 @@ function GstRateBadge({ rate, exempt }: { rate: number; exempt?: boolean }) {
   return <span className={`inline-block text-xs px-1.5 py-0.5 rounded font-mono font-semibold ${color}`}>{rate}%</span>;
 }
 
-function ClientGroup({ clientName, rules, deletingId, onDelete }: {
+function ClientGroup({
+  clientName, clientId, rules, allClients,
+  deletingId, promotingId, copyOpen, setCopyOpen,
+  copyTargetId, setCopyTargetId, copying,
+  onDelete, onPromote, onCopy,
+}: {
   clientName: string;
+  clientId: string;
   rules: DbRule[];
+  allClients: ClientForSelect[];
   deletingId: string | null;
+  promotingId: string | null;
+  copyOpen: string | null;
+  setCopyOpen: (id: string | null) => void;
+  copyTargetId: string;
+  setCopyTargetId: (id: string) => void;
+  copying: boolean;
   onDelete: (id: string) => void;
+  onPromote: (id: string) => void;
+  onCopy: (from: string, to: string) => void;
 }) {
   const [open, setOpen] = useState(true);
   const confirmed = rules.filter(r => r.confirmed).length;
+  const isCopyOpen = copyOpen === clientId;
+  const otherClients = allClients.filter(c => c.id !== clientId);
+
   return (
     <div className="border border-gray-200 rounded-lg overflow-hidden">
-      <button
-        className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
-        onClick={() => setOpen(!open)}
-      >
-        <div className="flex items-center gap-2">
+      <div className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50">
+        <button
+          className="flex items-center gap-2 flex-1 text-left hover:text-gray-900 transition-colors"
+          onClick={() => setOpen(!open)}
+        >
           <User size={13} className="text-gray-400" />
           <span className="text-sm font-medium text-gray-800">{clientName}</span>
           <span className="text-xs text-gray-400">{rules.length} rule{rules.length !== 1 ? "s" : ""}</span>
@@ -817,21 +903,69 @@ function ClientGroup({ clientName, rules, deletingId, onDelete }: {
               {confirmed} confirmed
             </Badge>
           )}
+        </button>
+        <div className="flex items-center gap-2">
+          {otherClients.length > 0 && (
+            <button
+              onClick={() => { setCopyOpen(isCopyOpen ? null : clientId); setCopyTargetId(""); }}
+              className="flex items-center gap-1 text-xs px-2 py-1 rounded border border-gray-200 text-gray-500 hover:bg-white transition-colors"
+              title="Copy rules to another client"
+            >
+              <Copy size={11} /> Copy to…
+            </button>
+          )}
+          <button onClick={() => setOpen(!open)}>
+            {open ? <ChevronUp size={14} className="text-gray-400" /> : <ChevronDown size={14} className="text-gray-400" />}
+          </button>
         </div>
-        {open ? <ChevronUp size={14} className="text-gray-400" /> : <ChevronDown size={14} className="text-gray-400" />}
-      </button>
+      </div>
+
+      {/* Copy panel */}
+      {isCopyOpen && (
+        <div className="px-4 py-3 bg-blue-50 border-b border-blue-100 flex items-center gap-2">
+          <span className="text-xs text-blue-700">Copy all confirmed rules to:</span>
+          <select
+            value={copyTargetId}
+            onChange={e => setCopyTargetId(e.target.value)}
+            className="text-xs border border-blue-200 rounded px-2 py-1 bg-white text-gray-700"
+          >
+            <option value="">Select client…</option>
+            {otherClients.map(c => <option key={c.id} value={c.id}>{c.client_name}</option>)}
+          </select>
+          <button
+            disabled={!copyTargetId || copying}
+            onClick={() => onCopy(clientId, copyTargetId)}
+            className="text-xs px-3 py-1 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 inline-flex items-center gap-1"
+          >
+            {copying ? <Loader2 size={11} className="animate-spin" /> : <Copy size={11} />} Copy
+          </button>
+          <button onClick={() => setCopyOpen(null)} className="text-xs text-gray-400 hover:text-gray-600">Cancel</button>
+        </div>
+      )}
+
       {open && (
-        <RulesTable rules={rules} showCol="none" deletingId={deletingId} onDelete={onDelete} />
+        <RulesTable
+          rules={rules}
+          showCol="none"
+          deletingId={deletingId}
+          promotingId={promotingId}
+          onDelete={onDelete}
+          onPromote={onPromote}
+          showPromote
+        />
       )}
     </div>
   );
 }
 
-function RulesTable({ rules, showCol, deletingId, onDelete }: {
+function RulesTable({ rules, showCol, deletingId, promotingId, onDelete, onPromote, showPromote }: {
   rules: DbRule[];
   showCol: "industry" | "client" | "none";
   deletingId: string | null;
+  promotingId?: string | null;
   onDelete: (id: string) => void;
+  onPromote?: (id: string) => void;
+  showPromote?: boolean;
 }) {
   return (
     <table className="w-full text-sm border-collapse">
@@ -867,17 +1001,32 @@ function RulesTable({ rules, showCol, deletingId, onDelete }: {
               }
             </td>
             <td className="px-3 py-2.5">
-              <button
-                onClick={() => onDelete(r.id)}
-                disabled={deletingId === r.id}
-                className="text-gray-300 hover:text-red-500 transition-colors disabled:opacity-50"
-                title="Delete rule"
-              >
-                {deletingId === r.id
-                  ? <Loader2 size={13} className="animate-spin" />
-                  : <Trash2 size={13} />
-                }
-              </button>
+              <div className="flex items-center justify-end gap-1">
+                {showPromote && r.confirmed && onPromote && (
+                  <button
+                    onClick={() => onPromote(r.id)}
+                    disabled={promotingId === r.id}
+                    className="text-gray-300 hover:text-blue-500 transition-colors disabled:opacity-50"
+                    title="Promote to industry rule"
+                  >
+                    {promotingId === r.id
+                      ? <Loader2 size={13} className="animate-spin" />
+                      : <TrendingUp size={13} />
+                    }
+                  </button>
+                )}
+                <button
+                  onClick={() => onDelete(r.id)}
+                  disabled={deletingId === r.id}
+                  className="text-gray-300 hover:text-red-500 transition-colors disabled:opacity-50"
+                  title="Delete rule"
+                >
+                  {deletingId === r.id
+                    ? <Loader2 size={13} className="animate-spin" />
+                    : <Trash2 size={13} />
+                  }
+                </button>
+              </div>
             </td>
           </tr>
         ))}

@@ -22,6 +22,12 @@ const configSchema = z.object({
   // Cost controls
   monthly_budget_usd: z.number().positive().max(500),
   alert_threshold_pct: z.number().min(50).max(99),  // % of budget before alert
+
+  // Rule suggestion AI (bulk narration → ledger suggestion at onboarding)
+  rule_suggestion_enabled:       z.boolean(),
+  rule_suggestion_model:         z.enum(["claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-6"]),
+  rule_suggestion_max_patterns:  z.number().int().min(10).max(200),
+  rule_suggestion_min_confidence: z.number().min(0.3).max(0.9), // suggestions below this are hidden
 });
 
 export type AiConfig = z.infer<typeof configSchema>;
@@ -76,6 +82,12 @@ Return JSON in this exact format:
 }`,
   monthly_budget_usd:  50,
   alert_threshold_pct: 80,
+
+  // Rule suggestion defaults
+  rule_suggestion_enabled:        true,
+  rule_suggestion_model:          "claude-haiku-4-5-20251001",
+  rule_suggestion_max_patterns:   100,
+  rule_suggestion_min_confidence: 0.5,
 };
 
 async function isAdmin(supabase: Awaited<ReturnType<typeof createClient>>, userId: string) {

@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ClipboardCheck, FileText, ChevronRight, AlertTriangle, Upload, RefreshCw, Loader2 } from "lucide-react";
+import { ClipboardCheck, FileText, ChevronRight, AlertTriangle, RefreshCw, Loader2 } from "lucide-react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { toast } from "sonner";
@@ -42,7 +42,7 @@ const STATUS_LABELS: Record<string, string> = {
   failed:     "Extraction failed",
 };
 
-export default function ReviewQueuePage() {
+export default function InboxPage() {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [stuck, setStuck] = useState<StuckItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -109,9 +109,9 @@ export default function ReviewQueuePage() {
     <div className="space-y-6 max-w-4xl">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-gray-900">Review Queue</h1>
+          <h1 className="text-2xl font-semibold text-gray-900">Inbox</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Check and correct AI-extracted fields. Every correction teaches the system.
+            Documents waiting for your review across all clients. Every correction teaches the system.
           </p>
         </div>
         {queue.length > 0 && (
@@ -170,10 +170,10 @@ export default function ReviewQueuePage() {
             </div>
             <h3 className="text-base font-medium text-gray-900 mb-1">All caught up!</h3>
             <p className="text-sm text-gray-500 max-w-sm mb-6">
-              No documents waiting for review. Upload invoices or bank statements to get started.
+              No documents waiting for review. Open a client to get started.
             </p>
-            <Link href="/upload" className={buttonVariants()}>
-              <Upload size={14} className="mr-2" /> Upload documents
+            <Link href="/clients" className={buttonVariants()}>
+              Go to Clients
             </Link>
           </CardContent>
         </Card>
