@@ -269,7 +269,7 @@ export default function TallyPage() {
                 <p className="text-gray-700 font-medium">Nothing in the posting queue</p>
                 <p className="text-sm text-gray-500 mt-1">
                   Reviewed invoices will appear here. Go to{" "}
-                  <Link href="/review" className="text-blue-600 hover:underline">Review Queue</Link>{" "}
+                  <Link href="/review" className="text-blue-600 hover:underline">Inbox</Link>{" "}
                   to process pending documents.
                 </p>
               </CardContent>

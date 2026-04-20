@@ -9,7 +9,7 @@ import {
   CheckCircle2,
   AlertTriangle,
   Clock,
-  Upload,
+  Building2,
 } from "lucide-react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
@@ -116,7 +116,7 @@ export default async function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard title="Processed Today" value={stats?.todayDocs ?? 0} icon={<FileText size={18} className="text-blue-500" />} href="/upload" emptyHint="Upload your first document" />
+        <StatCard title="Processed Today" value={stats?.todayDocs ?? 0} icon={<FileText size={18} className="text-blue-500" />} href="/clients" emptyHint="Go to Clients to upload" />
         <StatCard title="Pending Review" value={stats?.pendingReview ?? 0} icon={<ClipboardCheck size={18} className="text-amber-500" />} href="/review" badge={stats?.pendingReview ? { label: "Action needed", variant: "destructive" } : undefined} />
         <StatCard title="Matched This Week" value={stats?.matchedThisWeek ?? 0} icon={<CheckCircle2 size={18} className="text-green-500" />} href="/reconciliation" />
         <StatCard title="Exceptions" value={stats?.exceptions ?? 0} icon={<AlertTriangle size={18} className="text-red-500" />} href="/reconciliation" badge={stats?.exceptions ? { label: "Review needed", variant: "destructive" } : undefined} />
@@ -126,14 +126,14 @@ export default async function DashboardPage() {
         <Card className="border-dashed border-2 border-gray-200">
           <CardContent className="flex flex-col items-center justify-center py-16 text-center">
             <div className="w-12 h-12 bg-blue-50 rounded-full flex items-center justify-center mb-4">
-              <Upload size={24} className="text-blue-500" />
+              <Building2 size={24} className="text-blue-500" />
             </div>
-            <h3 className="text-base font-medium text-gray-900 mb-1">Upload your first documents</h3>
+            <h3 className="text-base font-medium text-gray-900 mb-1">Get started with a client</h3>
             <p className="text-sm text-gray-500 max-w-sm mb-6">
-              LedgerIQ will read your invoices, map GST and TDS, and match them to your bank transactions automatically.
+              Add a client, then upload their invoices and bank statements. LedgerIQ will read them, map GST and TDS, and match to bank transactions automatically.
             </p>
             <div className="flex gap-3">
-              <Link href="/upload" className={buttonVariants()}>Upload documents</Link>
+              <Link href="/clients" className={buttonVariants()}>Go to Clients</Link>
               <Link href="/settings" className={buttonVariants({ variant: "outline" })}>Configure Tally</Link>
             </div>
           </CardContent>
@@ -164,12 +164,11 @@ export default async function DashboardPage() {
       )}
 
       <div className="flex gap-3">
-        <Link href="/upload" className={buttonVariants()}>
-          <Upload size={16} className="mr-2" />
-          Upload documents
+        <Link href="/clients" className={buttonVariants()}>
+          <Building2 size={16} className="mr-2" />
+          Go to Clients
         </Link>
-        <Link href="/review" className={buttonVariants({ variant: "outline" })}>Go to review queue</Link>
-        <Link href="/reconciliation" className={buttonVariants({ variant: "outline" })}>View exceptions</Link>
+        <Link href="/review" className={buttonVariants({ variant: "outline" })}>Go to Inbox</Link>
       </div>
     </div>
   );

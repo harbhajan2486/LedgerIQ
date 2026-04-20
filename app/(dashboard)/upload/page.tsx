@@ -274,8 +274,8 @@ function UploadPageInner() {
                     )}
                     {item.status === "pending" && item.documentType === "bank_statement" && (
                       <p className="text-xs text-amber-600 mt-1.5">
-                        Bank statements are uploaded via{" "}
-                        <Link href="/reconciliation" className="underline font-medium">Reconciliation → Upload bank statement</Link>
+                        Bank statements are best uploaded from a client's Reconciliation tab{" "}
+                        (<Link href="/clients" className="underline font-medium">go to Clients</Link>)
                         {" "}— supports PDF, CSV, and Excel.
                       </p>
                     )}
@@ -289,7 +289,7 @@ function UploadPageInner() {
                     )}
                     {item.status === "done" && (
                       <p className="text-xs text-green-600 mt-1">
-                        Ready for review — <Link href="/review" className="underline">go to review queue</Link>
+                        Ready for review — <Link href="/review" className="underline">go to Inbox</Link>
                       </p>
                     )}
                     {item.status === "queued" && (
@@ -308,7 +308,7 @@ function UploadPageInner() {
             </p>
             <div className="flex gap-3">
               {doneCount > 0 && (
-                <Link href="/review" className={buttonVariants({ variant: "outline" })}>View review queue</Link>
+                <Link href="/review" className={buttonVariants({ variant: "outline" })}>View Inbox</Link>
               )}
               {pendingCount > 0 && (
                 <button onClick={uploadAll} className={buttonVariants()}>

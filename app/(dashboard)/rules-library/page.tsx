@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { GLOBAL_RULES_DISPLAY, COMMON_LEDGERS } from "@/lib/ledger-rules";
+import { TDS_SECTIONS, HSN_ROWS, SAC_ROWS, RCM_ROWS, ITC_ROWS } from "@/lib/taxation-data";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -30,23 +31,6 @@ interface ClientForSelect {
   client_name: string;
 }
 
-interface GlobalTaxRule {
-  id: string;
-  rule_type: string;
-  pattern: Record<string, unknown>;
-  action: Record<string, unknown>;
-  source: string;
-  confidence: number;
-}
-
-interface TaxationData {
-  tds_sections: GlobalTaxRule[];
-  hsn_gst_rates: GlobalTaxRule[];
-  sac_gst_rates: GlobalTaxRule[];
-  reverse_charges: GlobalTaxRule[];
-  itc_eligibility: GlobalTaxRule[];
-}
-
 type TopTab = "ledger" | "taxation";
 type LayerTab = "layer3" | "layer2" | "layer1";
 type TaxTab = "tds" | "hsn" | "sac" | "rcm" | "itc";
@@ -66,8 +50,6 @@ export default function RulesLibraryPage() {
 
   // Taxation rules state
   const [taxTab, setTaxTab] = useState<TaxTab>("tds");
-  const [taxData, setTaxData] = useState<TaxationData | null>(null);
-  const [loadingTax, setLoadingTax] = useState(false);
   const [taxSearch, setTaxSearch] = useState("");
 
   // Add rule form
@@ -80,7 +62,6 @@ export default function RulesLibraryPage() {
   const [saving, setSaving] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [promotingId, setPromotingId] = useState<string | null>(null);
-  const [copySourceId, setCopySourceId] = useState<string>("");
   const [copyTargetId, setCopyTargetId] = useState<string>("");
   const [copyOpen, setCopyOpen] = useState<string | null>(null); // clientId whose copy panel is open
   const [copying, setCopying] = useState(false);
@@ -106,24 +87,7 @@ export default function RulesLibraryPage() {
     }
   }, []);
 
-  const loadTax = useCallback(async () => {
-    if (taxData) return; // already loaded
-    setLoadingTax(true);
-    try {
-      const res = await fetch("/api/v1/taxation-rules");
-      if (res.ok) {
-        const d = await res.json();
-        setTaxData(d);
-      }
-    } finally {
-      setLoadingTax(false);
-    }
-  }, [taxData]);
-
   useEffect(() => { loadLedger(); }, [loadLedger]);
-  useEffect(() => {
-    if (topTab === "taxation") loadTax();
-  }, [topTab, loadTax]);
 
   async function addRule() {
     if (!newPattern.trim() || !newLedger) return;
@@ -564,15 +528,7 @@ export default function RulesLibraryPage() {
             />
           </div>
 
-          {loadingTax ? (
-            <div className="flex items-center gap-2 text-gray-400 py-8">
-              <Loader2 size={16} className="animate-spin" /> Loading taxation rules…
-            </div>
-          ) : !taxData ? (
-            <EmptyState message="Could not load taxation rules." />
-          ) : (
-            <TaxationSection tab={taxTab} data={taxData} search={taxSearch} />
-          )}
+          <TaxationSection tab={taxTab} search={taxSearch} />
         </>
       )}
     </div>
@@ -581,22 +537,19 @@ export default function RulesLibraryPage() {
 
 // ─── Taxation Section ─────────────────────────────────────────────────────────
 
-function TaxationSection({ tab, data, search }: { tab: TaxTab; data: TaxationData; search: string }) {
+function TaxationSection({ tab, search }: { tab: TaxTab; search: string }) {
   const q = search.toLowerCase();
 
   if (tab === "tds") {
-    const rows = data.tds_sections.filter(r => {
-      const p = r.pattern as { section: string; description: string };
-      return (
-        p.section.toLowerCase().includes(q) ||
-        p.description.toLowerCase().includes(q) ||
-        r.source.toLowerCase().includes(q)
-      );
-    });
+    const rows = TDS_SECTIONS.filter(r =>
+      r.section.toLowerCase().includes(q) ||
+      r.description.toLowerCase().includes(q) ||
+      r.notes.toLowerCase().includes(q)
+    );
     return (
       <div className="space-y-2">
         <p className="text-xs text-gray-500">
-          TDS rates under Income Tax Act 1961. The AI checks these when validating TDS deductions on invoices.
+          TDS rates under Income Tax Act 1961. The AI validates TDS deductions against these when reviewing invoices.
         </p>
         <table className="w-full text-sm border-collapse">
           <thead>
@@ -605,53 +558,29 @@ function TaxationSection({ tab, data, search }: { tab: TaxTab; data: TaxationDat
               <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs">Description</th>
               <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs w-24">Rate (Indiv.)</th>
               <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs w-24">Rate (Co.)</th>
-              <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs w-28">Threshold</th>
+              <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs">Threshold</th>
               <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs">Notes</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map(r => {
-              const p = r.pattern as { section: string; description: string };
-              const a = r.action as {
-                rate_individual?: number;
-                rate_company?: number;
-                rate_professional?: number;
-                rate_technical?: number;
-                rate_land_building?: number;
-                threshold_inr?: number;
-                threshold_inr_single?: number;
-                threshold_inr_aggregate?: number;
-                threshold_inr_monthly?: number;
-                notes?: string;
-              };
-              const rateIndiv = a.rate_individual ?? a.rate_land_building ?? a.rate_professional ?? "—";
-              const rateComp  = a.rate_company ?? a.rate_technical ?? "—";
-              const threshold = a.threshold_inr
-                ? `₹${(a.threshold_inr).toLocaleString("en-IN")}`
-                : a.threshold_inr_single
-                  ? `₹${(a.threshold_inr_single).toLocaleString("en-IN")} / ₹${((a.threshold_inr_aggregate ?? 0)).toLocaleString("en-IN")}`
-                  : a.threshold_inr_monthly
-                    ? `₹${(a.threshold_inr_monthly).toLocaleString("en-IN")}/mo`
-                    : "—";
-              return (
-                <tr key={r.id} className="border-b border-gray-100 hover:bg-gray-50 align-top">
-                  <td className="px-3 py-2.5">
-                    <span className="font-mono text-xs bg-blue-50 text-blue-700 border border-blue-200 px-1.5 py-0.5 rounded font-semibold">
-                      §{p.section}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2.5 text-gray-800 text-xs">{p.description}</td>
-                  <td className="px-3 py-2.5 text-gray-700 text-xs">
-                    {rateIndiv === 0 ? <span className="text-gray-400">Per slab</span> : `${rateIndiv}%`}
-                  </td>
-                  <td className="px-3 py-2.5 text-gray-700 text-xs">
-                    {rateComp === 0 ? <span className="text-gray-400">Per slab</span> : `${rateComp}%`}
-                  </td>
-                  <td className="px-3 py-2.5 text-gray-600 text-xs">{threshold}</td>
-                  <td className="px-3 py-2.5 text-gray-500 text-xs max-w-xs">{a.notes || "—"}</td>
-                </tr>
-              );
-            })}
+            {rows.map(r => (
+              <tr key={r.section} className="border-b border-gray-100 hover:bg-gray-50 align-top">
+                <td className="px-3 py-2.5">
+                  <span className="font-mono text-xs bg-blue-50 text-blue-700 border border-blue-200 px-1.5 py-0.5 rounded font-semibold">
+                    §{r.section}
+                  </span>
+                </td>
+                <td className="px-3 py-2.5 text-gray-800 text-xs">{r.description}</td>
+                <td className="px-3 py-2.5 text-gray-700 text-xs">
+                  {r.rate_individual === "Per slab" ? <span className="text-gray-400">Per slab</span> : `${r.rate_individual}%`}
+                </td>
+                <td className="px-3 py-2.5 text-gray-700 text-xs">
+                  {r.rate_company === "—" ? <span className="text-gray-400">—</span> : `${r.rate_company}%`}
+                </td>
+                <td className="px-3 py-2.5 text-gray-600 text-xs">{r.threshold}</td>
+                <td className="px-3 py-2.5 text-gray-500 text-xs max-w-xs">{r.notes || "—"}</td>
+              </tr>
+            ))}
           </tbody>
         </table>
         {rows.length === 0 && <EmptyState message="No TDS sections match your search." />}
@@ -660,19 +589,19 @@ function TaxationSection({ tab, data, search }: { tab: TaxTab; data: TaxationDat
   }
 
   if (tab === "hsn") {
-    const rows = data.hsn_gst_rates.filter(r => {
-      const p = r.pattern as { hsn_prefix: string; description: string };
-      return p.hsn_prefix.includes(q) || p.description.toLowerCase().includes(q);
-    });
+    const rows = HSN_ROWS.filter(r =>
+      r.hsn_prefix.toLowerCase().includes(q) ||
+      r.description.toLowerCase().includes(q)
+    );
     return (
       <div className="space-y-2">
         <p className="text-xs text-gray-500">
-          GST rates by HSN code prefix. CGST + SGST = IGST for intra-state supplies; IGST applies for inter-state.
+          GST rates by HSN code prefix. CGST + SGST applies for intra-state; IGST for inter-state supplies.
         </p>
         <table className="w-full text-sm border-collapse">
           <thead>
             <tr className="bg-gray-50 text-left">
-              <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs w-24">HSN Prefix</th>
+              <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs w-28">HSN Prefix</th>
               <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs">Description</th>
               <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs w-20 text-center">CGST</th>
               <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs w-20 text-center">SGST</th>
@@ -681,29 +610,25 @@ function TaxationSection({ tab, data, search }: { tab: TaxTab; data: TaxationDat
             </tr>
           </thead>
           <tbody>
-            {rows.map(r => {
-              const p = r.pattern as { hsn_prefix: string; description: string };
-              const a = r.action as { cgst_rate: number; sgst_rate: number; igst_rate: number; exempt?: boolean };
-              return (
-                <tr key={r.id} className="border-b border-gray-100 hover:bg-gray-50 align-top">
-                  <td className="px-3 py-2.5">
-                    <code className="text-xs bg-gray-100 text-gray-800 px-1.5 py-0.5 rounded font-mono">{p.hsn_prefix}</code>
-                  </td>
-                  <td className="px-3 py-2.5 text-gray-800 text-xs">{p.description}</td>
-                  <td className="px-3 py-2.5 text-center text-gray-700 text-xs">{a.cgst_rate}%</td>
-                  <td className="px-3 py-2.5 text-center text-gray-700 text-xs">{a.sgst_rate}%</td>
-                  <td className="px-3 py-2.5 text-center">
-                    <GstRateBadge rate={a.igst_rate} exempt={a.exempt} />
-                  </td>
-                  <td className="px-3 py-2.5 text-center">
-                    {a.exempt
-                      ? <Badge variant="secondary" className="text-xs bg-gray-100 text-gray-500">Exempt</Badge>
-                      : <Badge variant="secondary" className="text-xs bg-green-50 text-green-700 border-green-200">Taxable</Badge>
-                    }
-                  </td>
-                </tr>
-              );
-            })}
+            {rows.map((r, i) => (
+              <tr key={i} className="border-b border-gray-100 hover:bg-gray-50 align-top">
+                <td className="px-3 py-2.5">
+                  <code className="text-xs bg-gray-100 text-gray-800 px-1.5 py-0.5 rounded font-mono">{r.hsn_prefix}</code>
+                </td>
+                <td className="px-3 py-2.5 text-gray-800 text-xs">{r.description}</td>
+                <td className="px-3 py-2.5 text-center text-gray-700 text-xs">{r.exempt ? "—" : `${r.cgst_rate}%`}</td>
+                <td className="px-3 py-2.5 text-center text-gray-700 text-xs">{r.exempt ? "—" : `${r.sgst_rate}%`}</td>
+                <td className="px-3 py-2.5 text-center">
+                  <GstRateBadge rate={r.igst_rate} exempt={r.exempt} />
+                </td>
+                <td className="px-3 py-2.5 text-center">
+                  {r.exempt
+                    ? <Badge variant="secondary" className="text-xs bg-gray-100 text-gray-500">Exempt</Badge>
+                    : <Badge variant="secondary" className="text-xs bg-green-50 text-green-700 border-green-200">Taxable</Badge>
+                  }
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
         {rows.length === 0 && <EmptyState message="No HSN codes match your search." />}
@@ -712,19 +637,19 @@ function TaxationSection({ tab, data, search }: { tab: TaxTab; data: TaxationDat
   }
 
   if (tab === "sac") {
-    const rows = data.sac_gst_rates.filter(r => {
-      const p = r.pattern as { sac: string; description: string };
-      return p.sac.includes(q) || p.description.toLowerCase().includes(q);
-    });
+    const rows = SAC_ROWS.filter(r =>
+      r.sac.includes(q) ||
+      r.description.toLowerCase().includes(q)
+    );
     return (
       <div className="space-y-2">
         <p className="text-xs text-gray-500">
-          GST rates by SAC (Service Accounting Code). Most B2B services attract 18% GST; exceptions shown below.
+          GST rates by SAC (Service Accounting Code). Most B2B services attract 18% GST; exceptions listed below.
         </p>
         <table className="w-full text-sm border-collapse">
           <thead>
             <tr className="bg-gray-50 text-left">
-              <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs w-24">SAC Code</th>
+              <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs w-28">SAC Code</th>
               <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs">Description</th>
               <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs w-20 text-center">CGST</th>
               <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs w-20 text-center">SGST</th>
@@ -732,23 +657,19 @@ function TaxationSection({ tab, data, search }: { tab: TaxTab; data: TaxationDat
             </tr>
           </thead>
           <tbody>
-            {rows.map(r => {
-              const p = r.pattern as { sac: string; description: string };
-              const a = r.action as { cgst_rate: number; sgst_rate: number; igst_rate: number; exempt?: boolean };
-              return (
-                <tr key={r.id} className="border-b border-gray-100 hover:bg-gray-50 align-top">
-                  <td className="px-3 py-2.5">
-                    <code className="text-xs bg-gray-100 text-gray-800 px-1.5 py-0.5 rounded font-mono">{p.sac}</code>
-                  </td>
-                  <td className="px-3 py-2.5 text-gray-800 text-xs">{p.description}</td>
-                  <td className="px-3 py-2.5 text-center text-gray-700 text-xs">{a.cgst_rate}%</td>
-                  <td className="px-3 py-2.5 text-center text-gray-700 text-xs">{a.sgst_rate}%</td>
-                  <td className="px-3 py-2.5 text-center">
-                    <GstRateBadge rate={a.igst_rate} exempt={a.exempt} />
-                  </td>
-                </tr>
-              );
-            })}
+            {rows.map((r, i) => (
+              <tr key={i} className="border-b border-gray-100 hover:bg-gray-50 align-top">
+                <td className="px-3 py-2.5">
+                  <code className="text-xs bg-gray-100 text-gray-800 px-1.5 py-0.5 rounded font-mono">{r.sac}</code>
+                </td>
+                <td className="px-3 py-2.5 text-gray-800 text-xs">{r.description}</td>
+                <td className="px-3 py-2.5 text-center text-gray-700 text-xs">{r.cgst_rate === 0 ? "Exempt" : `${r.cgst_rate}%`}</td>
+                <td className="px-3 py-2.5 text-center text-gray-700 text-xs">{r.sgst_rate === 0 ? "Exempt" : `${r.sgst_rate}%`}</td>
+                <td className="px-3 py-2.5 text-center">
+                  <GstRateBadge rate={r.igst_rate} exempt={r.igst_rate === 0} />
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
         {rows.length === 0 && <EmptyState message="No SAC codes match your search." />}
@@ -757,14 +678,15 @@ function TaxationSection({ tab, data, search }: { tab: TaxTab; data: TaxationDat
   }
 
   if (tab === "rcm") {
-    const rows = data.reverse_charges.filter(r => {
-      const p = r.pattern as { service: string; sac: string };
-      return p.service.toLowerCase().includes(q) || p.sac.toLowerCase().includes(q);
-    });
+    const rows = RCM_ROWS.filter(r =>
+      r.service.toLowerCase().includes(q) ||
+      r.sac.toLowerCase().includes(q) ||
+      r.notes.toLowerCase().includes(q)
+    );
     return (
       <div className="space-y-2">
         <p className="text-xs text-gray-500">
-          Reverse Charge Mechanism — services where the <strong>recipient</strong> (not the supplier) is liable to pay GST directly to the government.
+          Reverse Charge Mechanism — the <strong>recipient</strong> (not the supplier) pays GST directly. Common for GTA, legal, imported services.
         </p>
         <table className="w-full text-sm border-collapse">
           <thead>
@@ -773,28 +695,23 @@ function TaxationSection({ tab, data, search }: { tab: TaxTab; data: TaxationDat
               <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs w-20">SAC</th>
               <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs w-16 text-center">Rate</th>
               <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs">Notes</th>
-              <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs w-32">Notification</th>
+              <th className="px-3 py-2 font-medium text-gray-600 border-b text-xs w-36">Notification</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map(r => {
-              const p = r.pattern as { service: string; sac: string };
-              const a = r.action as { rcm_applicable: boolean; rate?: number; rate_igst?: number; notes?: string };
-              const rate = a.rate ?? a.rate_igst ?? 0;
-              return (
-                <tr key={r.id} className="border-b border-gray-100 hover:bg-gray-50 align-top">
-                  <td className="px-3 py-2.5 text-gray-800 text-xs font-medium">{p.service}</td>
-                  <td className="px-3 py-2.5">
-                    <code className="text-xs bg-gray-100 text-gray-800 px-1.5 py-0.5 rounded font-mono">{p.sac}</code>
-                  </td>
-                  <td className="px-3 py-2.5 text-center">
-                    <GstRateBadge rate={rate} />
-                  </td>
-                  <td className="px-3 py-2.5 text-gray-500 text-xs">{a.notes}</td>
-                  <td className="px-3 py-2.5 text-gray-400 text-xs">{r.source}</td>
-                </tr>
-              );
-            })}
+            {rows.map((r, i) => (
+              <tr key={i} className="border-b border-gray-100 hover:bg-gray-50 align-top">
+                <td className="px-3 py-2.5 text-gray-800 text-xs font-medium">{r.service}</td>
+                <td className="px-3 py-2.5">
+                  <code className="text-xs bg-gray-100 text-gray-800 px-1.5 py-0.5 rounded font-mono">{r.sac}</code>
+                </td>
+                <td className="px-3 py-2.5 text-center">
+                  <GstRateBadge rate={r.rate} />
+                </td>
+                <td className="px-3 py-2.5 text-gray-500 text-xs">{r.notes}</td>
+                <td className="px-3 py-2.5 text-gray-400 text-xs">{r.notification}</td>
+              </tr>
+            ))}
           </tbody>
         </table>
         {rows.length === 0 && <EmptyState message="No RCM rules match your search." />}
@@ -803,15 +720,14 @@ function TaxationSection({ tab, data, search }: { tab: TaxTab; data: TaxationDat
   }
 
   if (tab === "itc") {
-    const rows = data.itc_eligibility.filter(r => {
-      const p = r.pattern as { category: string };
-      const a = r.action as { reason: string };
-      return p.category.toLowerCase().includes(q) || a.reason.toLowerCase().includes(q);
-    });
+    const rows = ITC_ROWS.filter(r =>
+      r.category.toLowerCase().includes(q) ||
+      r.reason.toLowerCase().includes(q)
+    );
     return (
       <div className="space-y-2">
         <p className="text-xs text-gray-500">
-          Input Tax Credit eligibility under CGST Act Section 17(5). Blocked ITC means the GST paid cannot be offset against output tax liability.
+          Input Tax Credit eligibility under CGST Act Section 17(5). Blocked ITC = GST paid <strong>cannot</strong> be offset against output tax.
         </p>
         <table className="w-full text-sm border-collapse">
           <thead>
@@ -822,22 +738,18 @@ function TaxationSection({ tab, data, search }: { tab: TaxTab; data: TaxationDat
             </tr>
           </thead>
           <tbody>
-            {rows.map(r => {
-              const p = r.pattern as { category: string };
-              const a = r.action as { itc_allowed: boolean; reason: string };
-              return (
-                <tr key={r.id} className="border-b border-gray-100 hover:bg-gray-50 align-top">
-                  <td className="px-3 py-2.5 text-gray-800 text-xs font-medium">{p.category}</td>
-                  <td className="px-3 py-2.5 text-center">
-                    {a.itc_allowed
-                      ? <Badge variant="secondary" className="text-xs bg-green-50 text-green-700 border-green-200">Allowed</Badge>
-                      : <Badge variant="secondary" className="text-xs bg-red-50 text-red-700 border-red-200">Blocked</Badge>
-                    }
-                  </td>
-                  <td className="px-3 py-2.5 text-gray-500 text-xs">{a.reason}</td>
-                </tr>
-              );
-            })}
+            {rows.map((r, i) => (
+              <tr key={i} className="border-b border-gray-100 hover:bg-gray-50 align-top">
+                <td className="px-3 py-2.5 text-gray-800 text-xs font-medium">{r.category}</td>
+                <td className="px-3 py-2.5 text-center">
+                  {r.itc_allowed
+                    ? <Badge variant="secondary" className="text-xs bg-green-50 text-green-700 border-green-200">Allowed</Badge>
+                    : <Badge variant="secondary" className="text-xs bg-red-50 text-red-700 border-red-200">Blocked</Badge>
+                  }
+                </td>
+                <td className="px-3 py-2.5 text-gray-500 text-xs">{r.reason}</td>
+              </tr>
+            ))}
           </tbody>
         </table>
         {rows.length === 0 && <EmptyState message="No ITC rules match your search." />}
