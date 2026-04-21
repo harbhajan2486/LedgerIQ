@@ -175,6 +175,9 @@ const GLOBAL_RULES: GlobalRule[] = [
   // Swiggy/Zomato in a business bank account is almost always team lunch/office food
   { pattern: /\bSWIGGY\b|\bZOMATO\b|\bDUNZO\b|\bBLINKIT\b|\bZEPTO\b|\bBIGBASKET\b/i,
     ledger: "Staff Welfare Expenses" },
+  // Common food chains / QSR — UPI payments to these are almost always meals
+  { pattern: /\bMC\s*DONALDS?\b|\bMCDONALD|\bMCDONALD'?S\b|\bBURGER\s*KING\b|\bKFC\b|\bDOMINOS?\b|\bPIZZA\s*HUT\b|\bSUBWAY\b|\bCAFE\s*COFFEE\b|\bCOFFEE\s*DAY\b|\bCCD\b|\bSTARBUCKS\b|\bCHAI\s*POINT\b/i,
+    ledger: "Staff Welfare Expenses" },
 ];
 
 /** Suggest a ledger name using global Layer 1 rules. Returns null if no match. */

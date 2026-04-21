@@ -38,18 +38,18 @@ export async function POST(
     const suggestionModel = (aiConfig?.rule_suggestion_model as string | undefined) ?? "claude-haiku-4-5-20251001";
     const maxPatterns = (aiConfig?.rule_suggestion_max_patterns as number | undefined) ?? 100;
 
-    // Fetch bank transactions with no suggested_ledger (debit only — expenses)
+    // Fetch debit transactions with no ledger assigned (all 3 rule layers returned no match)
     const { data: txns } = await supabase
       .from("bank_transactions")
       .select("narration")
       .eq("tenant_id", profile.tenant_id)
       .eq("client_id", clientId)
-      .is("suggested_ledger", null)
+      .is("ledger_name", null)
       .gt("debit_amount", 0)
       .not("narration", "is", null)
       .limit(500);
 
-    if (!txns?.length) return NextResponse.json({ suggestions: [], message: "No unrecognised transactions found" });
+    if (!txns?.length) return NextResponse.json({ suggestions: [], message: "All transactions already have a ledger assigned" });
 
     // Extract + deduplicate patterns
     const patternMap = new Map<string, string>(); // pattern → example narration
@@ -62,7 +62,7 @@ export async function POST(
       if (!patternMap.has(pat)) patternMap.set(pat, txn.narration);
     }
 
-    if (patternMap.size === 0) return NextResponse.json({ suggestions: [], message: "All transactions already mapped" });
+    if (patternMap.size === 0) return NextResponse.json({ suggestions: [], message: "All transactions already have a ledger assigned" });
 
     // Get existing client rules to pass as context (avoid re-suggesting what's already mapped)
     const { data: existingRules } = await supabase

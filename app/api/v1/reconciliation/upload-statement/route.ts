@@ -214,25 +214,48 @@ export async function POST(request: NextRequest) {
     return s;
   }
 
-  // Classify each transaction by category + voucher type
-  function classifyTransaction(narration: string, isDebit: boolean): { category: string; voucher_type: string } {
+  // Derive category + voucher_type from the already-resolved ledger name.
+  // This keeps category and ledger in sync — one source of truth.
+  // Falls back to narration-based heuristics only when no ledger was matched.
+  function categoryFromLedger(
+    ledgerName: string | null,
+    narration: string,
+    isDebit: boolean,
+  ): { category: string; voucher_type: string } {
+    if (ledgerName) {
+      switch (ledgerName) {
+        case "GST Cash Ledger":              return { category: "GST Payment",        voucher_type: "Payment" };
+        case "TDS Payable":                  return { category: "TDS Payment",         voucher_type: "Journal" };
+        case "Salary Expenses":              return { category: "Salary",              voucher_type: "Payment" };
+        case "PF / ESI Contributions":       return { category: "Salary",              voucher_type: "Payment" };
+        case "Bank Charges":                 return { category: "Bank Charges",        voucher_type: "Journal" };
+        case "Loan Repayment":               return { category: "Loan Repayment",      voucher_type: "Payment" };
+        case "Rent":                         return { category: "Rent",                voucher_type: "Payment" };
+        case "Insurance Expenses":           return { category: "Insurance",           voucher_type: "Payment" };
+        case "Interest Income":              return { category: "Interest Income",     voucher_type: "Journal" };
+        case "Interest Expense":             return { category: "Interest Expense",    voucher_type: "Journal" };
+        case "Electricity Expenses":         return { category: "Utility",             voucher_type: "Payment" };
+        case "Telephone / Internet Expenses":return { category: "Utility",             voucher_type: "Payment" };
+        case "Travelling Expenses":          return { category: "Travel",              voucher_type: "Payment" };
+        case "Staff Welfare Expenses":       return { category: "Staff Welfare",       voucher_type: "Payment" };
+        case "Computer / IT Expenses":       return { category: "Software / IT",       voucher_type: "Payment" };
+        case "Advertising & Marketing":      return { category: "Marketing",           voucher_type: "Payment" };
+        case "Petrol / Vehicle Expenses":    return { category: "Fuel / Vehicle",      voucher_type: "Payment" };
+        case "Courier & Freight Expenses":   return { category: "Courier / Freight",   voucher_type: "Payment" };
+        case "Professional Fees":            return { category: "Professional Fees",   voucher_type: "Payment" };
+        case "Repair & Maintenance":         return { category: "Repair / Maintenance",voucher_type: "Payment" };
+        case "Rates & Taxes":                return { category: "Rates & Taxes",       voucher_type: "Payment" };
+        case "Printing & Stationery":        return { category: "Stationery",          voucher_type: "Payment" };
+        case "Staff Training & Development": return { category: "Training",            voucher_type: "Payment" };
+        case "Miscellaneous Expenses":       return { category: "Miscellaneous",       voucher_type: "Payment" };
+        // Inter-bank / capital movement narrations
+        default:
+          // Client/industry custom ledger — use narration fallback for voucher type only
+          break;
+      }
+    }
+    // Fallback: narration-based heuristics for unrecognized transactions
     const n = narration.toUpperCase();
-    if (/\bGSTIN\b|\bGST\s*PAY|\bGSTP\b|\bCGST\b|\bSGST\b|\bIGST\b/.test(n))
-      return { category: "GST Payment", voucher_type: "Payment" };
-    if (/\bTDS\b|\b26QB\b|\b26QC\b|\bINCOME.?TAX\b/.test(n))
-      return { category: "TDS Payment", voucher_type: "Journal" };
-    if (/\bSALARY\b|\bSALARIES\b|\bPAYROLL\b|\bWAGES\b|\bSTIPEND\b/.test(n))
-      return { category: "Salary", voucher_type: "Payment" };
-    if (/\bCHARGES\b|\bSERVICE FEE\b|\bANNUAL FEE\b|\bSMS CHARGE|\bATM CHARGE|\bBANK FEE|\bPROCESSING FEE|\bMAINTENANCE CHARGE/.test(n))
-      return { category: "Bank Charges", voucher_type: "Journal" };
-    if (/\bEMI\b|\bLOAN\b|\bREPAYMENT\b|\bINSTAL/.test(n))
-      return { category: "Loan Repayment", voucher_type: "Payment" };
-    if (/\bRENT\b|\bRENTAL\b|\bLEASE\b/.test(n))
-      return { category: "Rent", voucher_type: "Payment" };
-    if (/\bINSURANCE\b|\bPREMIUM\b|\bLIC\b|\bPOLICY\b/.test(n))
-      return { category: "Insurance", voucher_type: "Payment" };
-    if (/\bINTEREST\b/.test(n))
-      return { category: isDebit ? "Interest Expense" : "Interest Income", voucher_type: "Journal" };
     if (/\bSELF TRANSFER\b|\bFD TRANSFER\b|\bSWEEP\b|\bOD ACCOUNT\b|\bOWN ACCOUNT\b/.test(n))
       return { category: "Inter-bank Transfer", voucher_type: "Contra" };
     if (!isDebit)
@@ -279,11 +302,12 @@ export async function POST(request: NextRequest) {
   for (const txn of transactions) {
     const isoDate = toISODate(txn.date);
     const isDebit = !!txn.debit;
-    const { category, voucher_type } = classifyTransaction(txn.narration ?? "", isDebit);
 
-    // Suggest ledger_name: Layer 3 client rules > Layer 2 industry rules > Layer 1 global keywords
+    // Compute ledger first (Layer 3 → Layer 2 → Layer 1), then derive category from it.
+    // This keeps category and ledger in sync — no more "Bank Charges ledger / Vendor Payment category" splits.
     const pattern = extractPattern(txn.narration ?? "");
     const ledger_name = clientRules.get(pattern) ?? industryRules.get(pattern) ?? suggestLedger(txn.narration ?? "") ?? null;
+    const { category, voucher_type } = categoryFromLedger(ledger_name, txn.narration ?? "", isDebit);
 
     // Hash = bank + date + narration (normalised) + debit + credit for dedup
     const hashStr = `${bankName}|${isoDate}|${(txn.narration ?? "").toLowerCase().trim()}|${txn.debit ?? ""}|${txn.credit ?? ""}`;
