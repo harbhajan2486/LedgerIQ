@@ -87,7 +87,7 @@ interface Reconciliation {
 }
 
 interface ReconData {
-  summary: { matched: number; possible: number; exceptions: number; unmatched_transactions: number; unmatched_invoices: number };
+  summary: { matched: number; possible: number; exceptions: number; unmatched_transactions: number; unresolved: number; categorized_no_invoice: number; unmatched_invoices: number; total_bank_transactions: number; explained: number };
   reconciliations: Reconciliation[];
   unmatched_transactions: BankTxn[];
   unmatched_invoices: ReconDoc[];
@@ -195,7 +195,8 @@ export default function ClientDetailPage() {
   const [reconLoading, setReconLoading] = useState(false);
   const [reconMatching, setReconMatching] = useState(false);
   const [bankMatching, setBankMatching] = useState(false);
-  const [reconTab, setReconTab] = useState<"matched" | "possible" | "unmatched">("matched");
+  const [showCategorised, setShowCategorised] = useState(false);
+  const [reconTab, setReconTab] = useState<"matched" | "possible" | "unmatched">("unmatched");
   const [reconFilter, setReconFilter] = useState("");
   const [bankFilter, setBankFilter] = useState("");
   const [linkingTxn, setLinkingTxn] = useState<BankTxn | null>(null);
@@ -1280,36 +1281,76 @@ export default function ClientDetailPage() {
             </div>
           )}
 
-          {/* Summary + actions */}
-          <div className="flex items-center justify-between">
-            <div className="flex gap-3">
-              {reconData && ([
-                { label: "Matched",   value: reconData.summary.matched,               cls: "text-green-700" },
-                { label: "Possible",  value: reconData.summary.possible,              cls: "text-yellow-700" },
-                { label: "Needs attention", value: (reconData.unmatched_transactions ?? []).filter(t => !t.category).length, cls: (reconData.unmatched_transactions ?? []).filter(t => !t.category).length > 0 ? "text-red-600" : "text-gray-500" },
-                { label: "Unmatched invoices", value: reconData.summary.unmatched_invoices, cls: "text-gray-700" },
-              ].map(({ label, value, cls }) => (
-                <div key={label} className="text-center px-3 py-2 rounded-lg bg-gray-50 border border-gray-200">
-                  <p className="text-xs text-gray-500">{label}</p>
-                  <p className={`text-xl font-bold ${cls}`}>{value}</p>
+          {/* Summary + progress */}
+          {reconData && (() => {
+            const total = reconData.summary.total_bank_transactions;
+            const explained = reconData.summary.explained;
+            const pct = total > 0 ? Math.round((explained / total) * 100) : 0;
+            const unresolved = reconData.summary.unresolved;
+            return (
+              <div className="space-y-3">
+                {/* Progress bar */}
+                <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+                  <span className="font-medium text-gray-700">{explained} of {total} transactions explained</span>
+                  <div className="flex items-center gap-3">
+                    <span className={pct === 100 ? "text-green-600 font-semibold" : "text-gray-400"}>{pct}% complete</span>
+                    <button onClick={runReconMatch} disabled={reconMatching}
+                      className="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
+                      <RefreshCw size={11} className={reconMatching ? "animate-spin" : ""} />
+                      {reconMatching ? "Matching…" : "Re-run matching"}
+                    </button>
+                  </div>
                 </div>
-              )))}
-            </div>
-            <button onClick={runReconMatch} disabled={reconMatching}
-              className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
-              <RefreshCw size={13} className={reconMatching ? "animate-spin" : ""} />
-              {reconMatching ? "Matching…" : "Re-run matching"}
-            </button>
-          </div>
+                <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
+                  <div className="h-full bg-green-500 rounded-full transition-all" style={{ width: `${pct}%` }} />
+                </div>
+
+                {/* Stat chips */}
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-green-50 border border-green-200 text-xs font-medium text-green-700">
+                    <CheckCircle2 size={12} /> {reconData.summary.matched} invoice matched
+                  </div>
+                  <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-gray-100 border border-gray-200 text-xs font-medium text-gray-600">
+                    {reconData.summary.categorized_no_invoice} categorised (no invoice)
+                  </div>
+                  {reconData.summary.possible > 0 && (
+                    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-yellow-50 border border-yellow-200 text-xs font-medium text-yellow-700 cursor-pointer hover:bg-yellow-100" onClick={() => setReconTab("possible")}>
+                      <AlertTriangle size={12} /> {reconData.summary.possible} to review
+                    </div>
+                  )}
+                  {unresolved > 0 ? (
+                    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-50 border border-red-200 text-xs font-medium text-red-700 cursor-pointer hover:bg-red-100" onClick={() => setReconTab("unmatched")}>
+                      <AlertTriangle size={12} /> {unresolved} unexplained
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-green-50 border border-green-200 text-xs font-medium text-green-600">
+                      <CheckCircle2 size={12} /> All transactions explained
+                    </div>
+                  )}
+                  {reconData.summary.unmatched_invoices > 0 && (
+                    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-50 border border-blue-200 text-xs font-medium text-blue-700">
+                      {reconData.summary.unmatched_invoices} invoice{reconData.summary.unmatched_invoices !== 1 ? "s" : ""} awaiting payment
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Sub-tabs */}
           <div className="flex gap-1 border-b border-gray-200">
-            {(["matched","possible","unmatched"] as const).map((t) => (
-              <button key={t} onClick={() => setReconTab(t)}
-                className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors capitalize ${reconTab === t ? "border-blue-500 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
-                {t === "unmatched" ? "Unmatched" : t === "possible" ? "Possible matches" : "Matched"}
-              </button>
-            ))}
+            <button onClick={() => setReconTab("unmatched")}
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${reconTab === "unmatched" ? "border-blue-500 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
+              Unexplained {reconData && reconData.summary.unresolved > 0 && <span className="ml-1 bg-red-100 text-red-700 text-xs px-1.5 py-0.5 rounded-full font-semibold">{reconData.summary.unresolved}</span>}
+            </button>
+            <button onClick={() => setReconTab("possible")}
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${reconTab === "possible" ? "border-blue-500 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
+              Possible matches {reconData && reconData.summary.possible > 0 && <span className="ml-1 bg-yellow-100 text-yellow-700 text-xs px-1.5 py-0.5 rounded-full font-semibold">{reconData.summary.possible}</span>}
+            </button>
+            <button onClick={() => setReconTab("matched")}
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${reconTab === "matched" ? "border-blue-500 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
+              Invoice matched {reconData && <span className="ml-1 bg-gray-100 text-gray-500 text-xs px-1.5 py-0.5 rounded-full">{reconData.summary.matched}</span>}
+            </button>
           </div>
 
           {/* Filter bar — shown for matched + possible tabs */}
@@ -1586,31 +1627,43 @@ export default function ClientDetailPage() {
 
                 return (
                 <div className="space-y-4">
-                  {/* Needs attention — no category set */}
+                  {/* Unexplained — no category, no invoice match */}
                   <Card><CardContent className="p-0">
-                    <div className="px-4 py-3 border-b bg-red-50 flex items-center justify-between">
+                    <div className={`px-4 py-3 border-b flex items-center justify-between ${needsAttention.length > 0 ? "bg-red-50" : "bg-green-50"}`}>
                       <div>
-                        <span className="text-xs font-semibold text-red-700">Needs attention — no category set ({needsAttention.length})</span>
-                        <p className="text-xs text-red-500 mt-0.5">These transactions have no invoice and no category. Set a category or link to an invoice.</p>
+                        {needsAttention.length > 0 ? (
+                          <>
+                            <span className="text-xs font-semibold text-red-700">Unexplained transactions ({needsAttention.length}) — action needed</span>
+                            <p className="text-xs text-red-500 mt-0.5">No invoice and no category. Set a category or link to an invoice to explain each payment.</p>
+                          </>
+                        ) : (
+                          <>
+                            <span className="text-xs font-semibold text-green-700 flex items-center gap-1"><CheckCircle2 size={13} /> All transactions explained</span>
+                            <p className="text-xs text-green-600 mt-0.5">Every bank payment has either matched an invoice or been categorised.</p>
+                          </>
+                        )}
                       </div>
                     </div>
                     {needsAttention.length === 0 ? (
-                      <div className="py-8 text-center text-gray-400 text-sm">All unmatched transactions have been categorised.</div>
+                      <div className="py-8 text-center text-gray-400 text-sm">Nothing left to do here.</div>
                     ) : (
                       <TxnTable txns={needsAttention} />
                     )}
                   </CardContent></Card>
 
-                  {/* Categorised — resolved, no invoice needed */}
+                  {/* Categorised — already done, collapsible */}
                   {categorised.length > 0 && (
                     <Card><CardContent className="p-0">
-                      <div className="px-4 py-3 border-b bg-gray-50 flex items-center justify-between">
-                        <div>
-                          <span className="text-xs font-semibold text-gray-500">Categorised / resolved ({categorised.length})</span>
-                          <p className="text-xs text-gray-400 mt-0.5">Already classified as salary, bank charges, tax payments, etc. No invoice needed.</p>
+                      <button
+                        onClick={() => setShowCategorised(v => !v)}
+                        className="w-full px-4 py-3 border-b bg-gray-50 flex items-center justify-between hover:bg-gray-100 transition-colors">
+                        <div className="text-left">
+                          <span className="text-xs font-semibold text-gray-500">Done — categorised, no invoice needed ({categorised.length})</span>
+                          <p className="text-xs text-gray-400 mt-0.5">Salary, bank charges, GST/TDS payments, etc. Already accounted for.</p>
                         </div>
-                      </div>
-                      <TxnTable txns={categorised} dimmed />
+                        <span className="text-gray-400 text-xs ml-4">{showCategorised ? "▲ Hide" : "▼ Show"}</span>
+                      </button>
+                      {showCategorised && <TxnTable txns={categorised} dimmed />}
                     </CardContent></Card>
                   )}
                   <Card><CardContent className="p-0">

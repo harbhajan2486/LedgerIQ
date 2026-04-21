@@ -76,7 +76,7 @@ export async function GET(request: NextRequest) {
     doc_invoice_number: reconExtMap[r.document_id]?.invoice_number ?? null,
   }));
 
-  // Fetch unmatched bank transactions
+  // Fetch unmatched bank transactions + total count in parallel
   let txnQuery = supabase
     .from("bank_transactions")
     .select("id, transaction_date, narration, ref_number, debit_amount, credit_amount, bank_name, status, category, voucher_type")
@@ -85,7 +85,14 @@ export async function GET(request: NextRequest) {
     .order("transaction_date", { ascending: false })
     .limit(1000);
   if (clientId) txnQuery = txnQuery.eq("client_id", clientId);
-  const { data: allTxns } = await txnQuery;
+
+  let totalTxnQuery = supabase
+    .from("bank_transactions")
+    .select("*", { count: "exact", head: true })
+    .eq("tenant_id", tenantId);
+  if (clientId) totalTxnQuery = totalTxnQuery.eq("client_id", clientId);
+
+  const [{ data: allTxns }, { count: totalBankTxns }] = await Promise.all([txnQuery, totalTxnQuery]);
 
   // Fetch unreconciled invoices — scoped to client if provided
   let docsQuery = supabase
@@ -114,10 +121,22 @@ export async function GET(request: NextRequest) {
   const matched    = enrichedRecons.filter((r) => r.status === "matched").length;
   const possible   = enrichedRecons.filter((r) => r.status === "possible_match").length;
   const exceptions = enrichedRecons.filter((r) => r.status === "exception").length;
-  const unmatched  = (allTxns ?? []).length;
+  const unmatchedTxns = allTxns ?? [];
+  const unresolved = unmatchedTxns.filter((t) => !t.category).length;
+  const categorized_no_invoice = unmatchedTxns.filter((t) => !!t.category).length;
+  // explained = invoice-matched + categorized (both are "done" — no action needed)
+  const explained = matched + categorized_no_invoice;
 
   return NextResponse.json({
-    summary: { matched, possible, exceptions, unmatched_transactions: unmatched, unmatched_invoices: (unmatchedDocs ?? []).length },
+    summary: {
+      matched, possible, exceptions,
+      unmatched_transactions: unmatchedTxns.length,
+      unresolved,
+      categorized_no_invoice,
+      unmatched_invoices: (unmatchedDocs ?? []).length,
+      total_bank_transactions: totalBankTxns ?? 0,
+      explained,
+    },
     reconciliations: enrichedRecons,
     unmatched_transactions: allTxns ?? [],
     unmatched_invoices: (unmatchedDocs ?? []).map((d) => ({
