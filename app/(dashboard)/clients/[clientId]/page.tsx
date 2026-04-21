@@ -194,6 +194,7 @@ export default function ClientDetailPage() {
   const [reconData, setReconData] = useState<ReconData | null>(null);
   const [reconLoading, setReconLoading] = useState(false);
   const [reconMatching, setReconMatching] = useState(false);
+  const [bankMatching, setBankMatching] = useState(false);
   const [reconTab, setReconTab] = useState<"matched" | "possible" | "unmatched">("matched");
   const [reconFilter, setReconFilter] = useState("");
   const [bankFilter, setBankFilter] = useState("");
@@ -515,6 +516,17 @@ export default function ClientDetailPage() {
     });
     setReconMatching(false);
     loadRecon();
+  }
+
+  async function runBankMatch() {
+    setBankMatching(true);
+    await fetch("/api/v1/reconciliation/auto-match", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    setBankMatching(false);
+    loadBankTxns();
   }
 
   async function updateTxnField(txnId: string, field: "category" | "voucher_type", value: string) {
@@ -1726,6 +1738,11 @@ export default function ClientDetailPage() {
                   className="text-xs text-gray-500 hover:text-gray-700 inline-flex items-center gap-1 disabled:opacity-50">
                   {reapplying ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
                   Re-apply ledger rules
+                </button>
+                <button onClick={runBankMatch} disabled={bankMatching}
+                  className="text-xs text-gray-500 hover:text-gray-700 inline-flex items-center gap-1 disabled:opacity-50">
+                  {bankMatching ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+                  {bankMatching ? "Matching…" : "Re-run matching"}
                 </button>
                 <button onClick={() => openClaimModal()} className="text-xs text-gray-500 hover:text-gray-700 inline-flex items-center gap-1">
                   <Link2 size={11} /> Link existing

@@ -47,6 +47,16 @@ export async function POST(
     entity_id: documentId,
   });
 
+  // Re-run auto-match so invoices reviewed after bank statement upload get paired
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL;
+  if (appUrl && profile?.tenant_id) {
+    fetch(`${appUrl}/api/v1/reconciliation/auto-match`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tenantId: profile.tenant_id }),
+    }).catch(() => {});
+  }
+
   return NextResponse.json({ success: true, nextStatus: "reviewed" });
   } catch (err) {
     console.error("[review/complete] Unhandled error:", err);

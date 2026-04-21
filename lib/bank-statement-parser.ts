@@ -96,7 +96,10 @@ function parseAmount(val: string | undefined | null): number | null {
   if (!val || val.trim() === "" || val.trim() === "-") return null;
   const cleaned = val.replace(/[₹,\s]/g, "").replace(/[()]/g, "");
   const num = parseFloat(cleaned);
-  return isNaN(num) ? null : num;
+  // Treat 0 / 0.00 as null — banks fill the inactive column with zero instead of leaving blank.
+  // A genuine zero-amount bank transaction doesn't exist.
+  if (isNaN(num) || num === 0) return null;
+  return num;
 }
 
 function parseDate(val: string | undefined | null): string {

@@ -24,7 +24,7 @@ export async function GET(
         .select("id, transaction_date, narration, ref_number, debit_amount, credit_amount, balance, bank_name, status, category, voucher_type, ledger_name")
         .eq("tenant_id", profile.tenant_id)
         .eq("client_id", clientId)
-        .order("transaction_date", { ascending: false })
+        .order("transaction_date", { ascending: true })
         .limit(1000),
       supabase.from("clients").select("industry_name").eq("id", clientId).single(),
       supabase.from("ledger_mapping_rules").select("pattern, ledger_name")
