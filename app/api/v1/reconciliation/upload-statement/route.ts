@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { parseCSV, parseXLSX } from "@/lib/bank-statement-parser";
 import Anthropic from "@anthropic-ai/sdk";
-import { suggestLedger, extractPattern } from "@/lib/ledger-rules";
+import { suggestLedger, extractPattern, ledgerToMeta } from "@/lib/ledger-rules";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
@@ -214,47 +214,17 @@ export async function POST(request: NextRequest) {
     return s;
   }
 
-  // Derive category + voucher_type from the already-resolved ledger name.
-  // This keeps category and ledger in sync — one source of truth.
-  // Falls back to narration-based heuristics only when no ledger was matched.
+  // Derive category + voucher_type from ledger name (shared ledgerToMeta),
+  // falling back to narration heuristics for unrecognized/custom ledgers.
   function categoryFromLedger(
     ledgerName: string | null,
     narration: string,
     isDebit: boolean,
   ): { category: string; voucher_type: string } {
     if (ledgerName) {
-      switch (ledgerName) {
-        case "GST Cash Ledger":              return { category: "GST Payment",        voucher_type: "Payment" };
-        case "TDS Payable":                  return { category: "TDS Payment",         voucher_type: "Journal" };
-        case "Salary Expenses":              return { category: "Salary",              voucher_type: "Payment" };
-        case "PF / ESI Contributions":       return { category: "Salary",              voucher_type: "Payment" };
-        case "Bank Charges":                 return { category: "Bank Charges",        voucher_type: "Journal" };
-        case "Loan Repayment":               return { category: "Loan Repayment",      voucher_type: "Payment" };
-        case "Rent":                         return { category: "Rent",                voucher_type: "Payment" };
-        case "Insurance Expenses":           return { category: "Insurance",           voucher_type: "Payment" };
-        case "Interest Income":              return { category: "Interest Income",     voucher_type: "Journal" };
-        case "Interest Expense":             return { category: "Interest Expense",    voucher_type: "Journal" };
-        case "Electricity Expenses":         return { category: "Utility",             voucher_type: "Payment" };
-        case "Telephone / Internet Expenses":return { category: "Utility",             voucher_type: "Payment" };
-        case "Travelling Expenses":          return { category: "Travel",              voucher_type: "Payment" };
-        case "Staff Welfare Expenses":       return { category: "Staff Welfare",       voucher_type: "Payment" };
-        case "Computer / IT Expenses":       return { category: "Software / IT",       voucher_type: "Payment" };
-        case "Advertising & Marketing":      return { category: "Marketing",           voucher_type: "Payment" };
-        case "Petrol / Vehicle Expenses":    return { category: "Fuel / Vehicle",      voucher_type: "Payment" };
-        case "Courier & Freight Expenses":   return { category: "Courier / Freight",   voucher_type: "Payment" };
-        case "Professional Fees":            return { category: "Professional Fees",   voucher_type: "Payment" };
-        case "Repair & Maintenance":         return { category: "Repair / Maintenance",voucher_type: "Payment" };
-        case "Rates & Taxes":                return { category: "Rates & Taxes",       voucher_type: "Payment" };
-        case "Printing & Stationery":        return { category: "Stationery",          voucher_type: "Payment" };
-        case "Staff Training & Development": return { category: "Training",            voucher_type: "Payment" };
-        case "Miscellaneous Expenses":       return { category: "Miscellaneous",       voucher_type: "Payment" };
-        // Inter-bank / capital movement narrations
-        default:
-          // Client/industry custom ledger — use narration fallback for voucher type only
-          break;
-      }
+      const meta = ledgerToMeta(ledgerName);
+      if (meta) return meta;
     }
-    // Fallback: narration-based heuristics for unrecognized transactions
     const n = narration.toUpperCase();
     if (/\bSELF TRANSFER\b|\bFD TRANSFER\b|\bSWEEP\b|\bOD ACCOUNT\b|\bOWN ACCOUNT\b/.test(n))
       return { category: "Inter-bank Transfer", voucher_type: "Contra" };

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { extractPattern, suggestLedger } from "@/lib/ledger-rules";
+import { extractPattern, suggestLedger, ledgerToMeta } from "@/lib/ledger-rules";
 
 export async function POST(
   _req: NextRequest,
@@ -109,9 +109,12 @@ export async function POST(
   if (totalUpdated === 0) return NextResponse.json({ updated: 0 });
 
   await Promise.all([
-    ...Object.entries(byLedger).map(([name, ids]) =>
-      supabase.from("bank_transactions").update({ ledger_name: name }).in("id", ids).then()
-    ),
+    ...Object.entries(byLedger).map(([name, ids]) => {
+      const meta = ledgerToMeta(name);
+      const payload: Record<string, unknown> = { ledger_name: name };
+      if (meta) { payload.category = meta.category; payload.voucher_type = meta.voucher_type; }
+      return supabase.from("bank_transactions").update(payload).in("id", ids).then();
+    }),
     clearIds.length > 0
       ? supabase.from("bank_transactions").update({ ledger_name: null }).in("id", clearIds).then()
       : null,

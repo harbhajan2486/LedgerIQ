@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { z } from "zod";
-import { extractPattern } from "@/lib/ledger-rules";
+import { extractPattern, ledgerToMeta } from "@/lib/ledger-rules";
 
 const patchSchema = z.object({
   category:     z.string().optional(),
@@ -27,9 +27,16 @@ export async function PATCH(
     const parsed = patchSchema.safeParse(body);
     if (!parsed.success) return NextResponse.json({ error: "Invalid request" }, { status: 400 });
 
+    // When ledger_name is being set, also sync category + voucher_type
+    const updatePayload: Record<string, unknown> = { ...parsed.data };
+    if (parsed.data.ledger_name && !parsed.data.category) {
+      const meta = ledgerToMeta(parsed.data.ledger_name);
+      if (meta) { updatePayload.category = meta.category; updatePayload.voucher_type = meta.voucher_type; }
+    }
+
     const { error } = await supabase
       .from("bank_transactions")
-      .update(parsed.data)
+      .update(updatePayload)
       .eq("id", id)
       .eq("tenant_id", profile.tenant_id);
 
