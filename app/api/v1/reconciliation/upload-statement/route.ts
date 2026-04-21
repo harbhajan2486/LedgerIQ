@@ -360,8 +360,17 @@ export async function POST(request: NextRequest) {
   const existingHashes = new Set((existingRows ?? []).map((r) => r.txn_hash));
   const alreadyPresent = existingHashes.size;
 
-  // 3. Only insert rows whose hash isn't already in the DB
-  const newRows = rowsToInsert.filter((r) => !existingHashes.has(r.txn_hash as string));
+  // 3. Only insert rows whose hash isn't already in the DB, deduplicating within the file too.
+  // Two rows in the same file can produce the same hash (identical date+narration+amount —
+  // e.g. two small equal charges on the same day). The DB check above catches existing rows
+  // but not intra-file duplicates; the second one would hit the unique constraint.
+  const seenInFile = new Set<string>();
+  const newRows = rowsToInsert.filter((r) => {
+    const h = r.txn_hash as string;
+    if (existingHashes.has(h) || seenInFile.has(h)) return false;
+    seenInFile.add(h);
+    return true;
+  });
 
   if (newRows.length === 0) {
     return NextResponse.json({
