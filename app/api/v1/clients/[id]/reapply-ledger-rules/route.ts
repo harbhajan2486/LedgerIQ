@@ -23,11 +23,20 @@ export async function POST(
     .single();
   const industryName = clientRow?.industry_name ?? null;
 
+  // Step 0: Delete bogus rows (no debit AND no credit) — left over from pre-fix parser uploads
+  await supabase
+    .from("bank_transactions")
+    .delete()
+    .eq("tenant_id", profile.tenant_id)
+    .eq("client_id", clientId)
+    .is("debit_amount", null)
+    .is("credit_amount", null);
+
   // Fetch transactions, valid ledger names, confirmed client rules, and industry rules in parallel
   const [txnsResult, ledgersResult, rulesResult, industryRulesResult] = await Promise.all([
     supabase
       .from("bank_transactions")
-      .select("id, narration, ledger_name")
+      .select("id, narration, ledger_name, category")
       .eq("tenant_id", profile.tenant_id)
       .eq("client_id", clientId),
     supabase
@@ -69,43 +78,49 @@ export async function POST(
 
   const byLedger: Record<string, string[]> = {};
   const clearIds: string[] = [];
+  // Rows where ledger is already correct but category is stale — just resync meta
+  const categoryFixIds: Record<string, string[]> = {};
 
   for (const txn of transactions) {
     const pattern = extractPattern(txn.narration ?? "");
-    const confirmedLedger  = clientRuleMap[pattern] ?? null;        // Layer 3: client rule
-    const industryLedger   = industryRuleMap[pattern] ?? null;      // Layer 2: industry rule
-    const globalLedger     = suggestLedger(txn.narration ?? "");    // Layer 1: global keywords
-    // Priority: client rule > industry rule > global keyword
+    const confirmedLedger  = clientRuleMap[pattern] ?? null;
+    const industryLedger   = industryRuleMap[pattern] ?? null;
+    const globalLedger     = suggestLedger(txn.narration ?? "");
     const bestSuggestion = confirmedLedger
       ?? (industryLedger && validLedgerNames.has(industryLedger) ? industryLedger : null)
       ?? (globalLedger && validLedgerNames.has(globalLedger) ? globalLedger : null);
 
     const current = txn.ledger_name;
-    const isStale   = !!current && !validLedgerNames.has(current);                                 // set but ledger deleted/renamed
-    const isWrong   = !!current && !!confirmedLedger && confirmedLedger !== current && validLedgerNames.has(confirmedLedger); // confirmed client rule disagrees
+    const isStale   = !!current && !validLedgerNames.has(current);
+    const isWrong   = !!current && !!confirmedLedger && confirmedLedger !== current && validLedgerNames.has(confirmedLedger);
     const isMissing = !current;
 
     if (isMissing && bestSuggestion) {
-      // Fill missing with best available suggestion
       if (!byLedger[bestSuggestion]) byLedger[bestSuggestion] = [];
       byLedger[bestSuggestion].push(txn.id);
     } else if (isStale) {
       if (bestSuggestion) {
-        // Replace stale name with best suggestion
         if (!byLedger[bestSuggestion]) byLedger[bestSuggestion] = [];
         byLedger[bestSuggestion].push(txn.id);
       } else {
-        // No rule matches → clear to amber so CA manually picks
         clearIds.push(txn.id);
       }
     } else if (isWrong) {
-      // Confirmed rule overrides previously set (now-wrong) value
       if (!byLedger[confirmedLedger]) byLedger[confirmedLedger] = [];
       byLedger[confirmedLedger].push(txn.id);
+    } else if (current) {
+      // Ledger is correct — check if category is out of sync
+      const meta = ledgerToMeta(current);
+      if (meta && txn.category !== meta.category) {
+        if (!categoryFixIds[current]) categoryFixIds[current] = [];
+        categoryFixIds[current].push(txn.id);
+      }
     }
   }
 
-  const totalUpdated = Object.values(byLedger).reduce((s, ids) => s + ids.length, 0) + clearIds.length;
+  const totalUpdated = Object.values(byLedger).reduce((s, ids) => s + ids.length, 0)
+    + Object.values(categoryFixIds).reduce((s, ids) => s + ids.length, 0)
+    + clearIds.length;
   if (totalUpdated === 0) return NextResponse.json({ updated: 0 });
 
   await Promise.all([
@@ -114,6 +129,12 @@ export async function POST(
       const payload: Record<string, unknown> = { ledger_name: name };
       if (meta) { payload.category = meta.category; payload.voucher_type = meta.voucher_type; }
       return supabase.from("bank_transactions").update(payload).in("id", ids).then();
+    }),
+    ...Object.entries(categoryFixIds).map(([name, ids]) => {
+      const meta = ledgerToMeta(name)!;
+      return supabase.from("bank_transactions")
+        .update({ category: meta.category, voucher_type: meta.voucher_type })
+        .in("id", ids).then();
     }),
     clearIds.length > 0
       ? supabase.from("bank_transactions").update({ ledger_name: null }).in("id", clearIds).then()
