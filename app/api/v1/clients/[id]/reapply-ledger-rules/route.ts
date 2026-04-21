@@ -23,7 +23,29 @@ export async function POST(
     .single();
   const industryName = clientRow?.industry_name ?? null;
 
-  // Step 0: Delete bogus rows (no debit AND no credit) — left over from pre-fix parser uploads
+  // Step 0: Delete bogus rows — both amounts null OR both zero (pre-fix parser artifacts)
+  await supabase
+    .from("bank_transactions")
+    .delete()
+    .eq("tenant_id", profile.tenant_id)
+    .eq("client_id", clientId)
+    .or("and(debit_amount.is.null,credit_amount.is.null),and(debit_amount.eq.0,credit_amount.eq.0)");
+
+  // Step 0b: Null-out zero debit/credit amounts stored by old parser (banks fill inactive column with 0.00)
+  // Run sequentially so nullified rows don't then get nullified on the other side
+  await supabase
+    .from("bank_transactions")
+    .update({ debit_amount: null })
+    .eq("tenant_id", profile.tenant_id)
+    .eq("client_id", clientId)
+    .eq("debit_amount", 0);
+  await supabase
+    .from("bank_transactions")
+    .update({ credit_amount: null })
+    .eq("tenant_id", profile.tenant_id)
+    .eq("client_id", clientId)
+    .eq("credit_amount", 0);
+  // One more pass: rows that were (debit=0, credit=null) or (debit=null, credit=0) are now both null — delete them
   await supabase
     .from("bank_transactions")
     .delete()

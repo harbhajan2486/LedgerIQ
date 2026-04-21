@@ -42,7 +42,7 @@ export async function POST(request: NextRequest) {
     txnQuery,
     supabase.from("documents").select("id, document_type").eq("tenant_id", tenantId)
       .in("status", ["reviewed", "reconciled", "posted"]), // only human-verified docs
-    supabase.from("reconciliations").select("document_id, bank_transaction_id")
+    supabase.from("reconciliations").select("document_id, bank_transaction_id, status")
       .eq("tenant_id", tenantId).neq("status", "exception"),
   ]);
 
@@ -67,12 +67,15 @@ export async function POST(request: NextRequest) {
   const docTypeMap: Record<string, string> = {};
   for (const d of docs ?? []) docTypeMap[d.id] = (d as { id: string; document_type: string }).document_type;
 
-  const reconciledDocIds = new Set((existingRecons ?? []).map((r) => r.document_id));
+  // Only exclude docs that are firmly matched — possible_match is tentative and can be re-scored
+  const firmlyMatchedDocIds = new Set(
+    (existingRecons ?? []).filter((r) => (r as { status: string }).status === "matched").map((r) => r.document_id)
+  );
   const reconciledTxnIds = new Set((existingRecons ?? []).map((r) => r.bank_transaction_id));
 
-  // Only invoices that have ANY extraction data and aren't already matched
+  // Only invoices that have ANY extraction data and aren't already firmly matched
   const unmatchedInvoices = Object.entries(invoiceMap)
-    .filter(([id]) => !reconciledDocIds.has(id))
+    .filter(([id]) => !firmlyMatchedDocIds.has(id))
     .map(([id, fields]) => ({
       id,
       doc_type: docTypeMap[id] ?? null,
@@ -93,10 +96,12 @@ export async function POST(request: NextRequest) {
   const matchedDocIds: string[] = [];
   const usedDocIds = new Set<string>();
 
-  // Build map: txn_id → already-paired doc_id (for re-scoring existing pairs)
+  // Build map: txn_id → already-paired doc_id (only firm matches — possible_match pairs get re-evaluated freely)
   const existingPairMap: Record<string, string> = {};
   for (const r of existingRecons ?? []) {
-    if (r.bank_transaction_id && r.document_id) existingPairMap[r.bank_transaction_id] = r.document_id;
+    if (r.bank_transaction_id && r.document_id && (r as { status: string }).status === "matched") {
+      existingPairMap[r.bank_transaction_id] = r.document_id;
+    }
   }
 
   for (const txn of transactions) {
