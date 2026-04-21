@@ -20,15 +20,15 @@ export async function POST(
     .eq("id", user.id)
     .single();
 
-  // Auto-accept null-value pending fields (nothing to review on blank fields).
-  // Fields with actual values must be explicitly reviewed by the human — enforced in the UI.
+  // Auto-accept all remaining pending fields. The CA has made the deliberate
+  // decision to mark the document reviewed — any fields they didn't individually
+  // check are accepted as-is (same as the AI's extracted value).
   await supabase
     .from("extractions")
     .update({ status: "accepted" })
     .eq("document_id", documentId)
     .eq("tenant_id", profile?.tenant_id)
-    .eq("status", "pending")
-    .or("extracted_value.is.null,extracted_value.eq.");
+    .eq("status", "pending");
 
   // Move document to reconciliation queue
   const { error } = await supabase

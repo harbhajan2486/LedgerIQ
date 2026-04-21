@@ -116,7 +116,7 @@ export default async function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard title="Processed Today" value={stats?.todayDocs ?? 0} icon={<FileText size={18} className="text-blue-500" />} href="/clients" emptyHint="Go to Clients to upload" />
+        <StatCard title="Uploaded Today" value={stats?.todayDocs ?? 0} icon={<FileText size={18} className="text-blue-500" />} href="/clients" emptyHint="Go to Clients to upload" />
         <StatCard title="Pending Review" value={stats?.pendingReview ?? 0} icon={<ClipboardCheck size={18} className="text-amber-500" />} href="/review" badge={stats?.pendingReview ? { label: "Action needed", variant: "destructive" } : undefined} />
         <StatCard title="Matched This Week" value={stats?.matchedThisWeek ?? 0} icon={<CheckCircle2 size={18} className="text-green-500" />} href="/reconciliation" />
         <StatCard title="Exceptions" value={stats?.exceptions ?? 0} icon={<AlertTriangle size={18} className="text-red-500" />} href="/reconciliation" badge={stats?.exceptions ? { label: "Review needed", variant: "destructive" } : undefined} />
