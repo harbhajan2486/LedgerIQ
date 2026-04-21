@@ -15,6 +15,100 @@ export interface BankTransaction {
   raw_row: Record<string, string>;  // original row for debugging
 }
 
+// ---- CSV pre-processor: fix unquoted comma-formatted numbers ----
+//
+// Problem: Indian bank CSVs often contain amounts like 11,947.00 or 1,00,000.00
+// WITHOUT quoting. PapaParse treats the commas as delimiters, splitting the amount
+// across columns: debit="11", credit="947.00" instead of debit="11,947.00".
+// This causes wrong debit/credit values AND inflated row counts.
+//
+// Fix: before passing to PapaParse, count expected columns from the header row.
+// For any data row with more columns than expected, merge adjacent fields that
+// together form a comma-formatted number (e.g. "11"+"947.00" → "11,947.00").
+
+/** Split a single CSV line correctly — respects quoted fields. */
+function splitCsvLine(line: string): string[] {
+  const fields: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') { current += '"'; i++; } // escaped quote
+      else inQuotes = !inQuotes;
+    } else if (ch === "," && !inQuotes) {
+      fields.push(current.trim());
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  fields.push(current.trim());
+  return fields;
+}
+
+/**
+ * Merge adjacent fields that are numeric fragments of a comma-formatted number.
+ *
+ * Criteria for a merge:
+ *   field A: 1–3 digits, optionally already has comma-groups (e.g. "1,00" from a prior pass)
+ *   field B: exactly 2–3 digits, optionally followed by a decimal part (e.g. "947.00")
+ *
+ * Iterates until row reaches targetCount or no more merges are possible.
+ * Handles both international (1,234) and Indian lakh (1,23,456) formats in multiple passes.
+ */
+function mergeNumericFragments(fields: string[], targetCount: number): string[] {
+  const isFragmentA = (s: string) => /^\d{1,3}(,\d{2,3})*$/.test(s);
+  const isFragmentB = (s: string) => /^\d{2,3}(?:\.\d{1,2})?$/.test(s);
+
+  const result = [...fields];
+  let maxIter = result.length * 2; // safety cap
+
+  while (result.length > targetCount && maxIter-- > 0) {
+    let merged = false;
+    for (let i = 0; i < result.length - 1; i++) {
+      if (isFragmentA(result[i]) && isFragmentB(result[i + 1])) {
+        result.splice(i, 2, `${result[i]},${result[i + 1]}`);
+        merged = true;
+        break; // restart scan — earlier pair might now be eligible
+      }
+    }
+    if (!merged) break;
+  }
+
+  return result;
+}
+
+/**
+ * Pre-process raw CSV text so that unquoted comma-formatted numbers
+ * (e.g. 11,947.00 or 1,00,000.00) are re-quoted before PapaParse runs.
+ *
+ * Only affects rows that have MORE columns than the header.
+ * Rows with the correct column count pass through unchanged.
+ */
+function fixUnquotedAmounts(csvText: string): string {
+  const lines = csvText.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  if (lines.length < 2) return csvText;
+
+  const expectedCols = splitCsvLine(lines[0]).length;
+
+  return lines.map((line, idx) => {
+    if (idx === 0) return line; // header: never touch
+    if (!line.trim()) return line;
+
+    const fields = splitCsvLine(line);
+    if (fields.length <= expectedCols) return line; // already correct
+
+    const merged = mergeNumericFragments(fields, expectedCols);
+
+    // Reconstruct: quote any field that now contains a comma (merged number)
+    return merged.map((f) => {
+      const bare = f.startsWith('"') && f.endsWith('"') ? f.slice(1, -1) : f;
+      return bare.includes(",") ? `"${bare.replace(/"/g, '""')}"` : f;
+    }).join(",");
+  }).join("\n");
+}
+
 // ---- Column name normalizers per bank ----
 // Each entry is { date, narration, ref, debit, credit, balance }
 const BANK_COLUMN_MAPS: Array<{
@@ -188,7 +282,10 @@ function rowsToTransactions(
 // ---- Public API ----
 
 export function parseCSV(content: string): BankTransaction[] {
-  const result = Papa.parse<Record<string, string>>(content, {
+  // Fix unquoted comma-formatted amounts (e.g. "11,947.00" → "11,947.00" properly quoted)
+  // before PapaParse sees the content, preventing column-shift errors.
+  const fixed = fixUnquotedAmounts(content);
+  const result = Papa.parse<Record<string, string>>(fixed, {
     header: true,
     skipEmptyLines: true,
     transformHeader: (h) => h.trim(),

@@ -308,32 +308,72 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  // Smart incremental merge:
-  // 1. Remove old NULL-hash rows in same bank+date range (pre-migration duplicates)
-  if (minDate !== "9999-12-31") {
-    await supabase
+  // ── Clean re-upload strategy ──────────────────────────────────────────────
+  //
+  // PROBLEM with the old incremental approach:
+  //   1. Hash check used `.in("txn_hash", 434 hashes)` → ~28 KB URL → Supabase
+  //      silently returns empty → all hashes look "new" → INSERT all → duplicate
+  //      key constraint error on the second upload of the same file.
+  //   2. When the CSV parser had bugs (split amounts), old wrong rows (hash based
+  //      on "11" + "947.00") stayed in the DB forever. Uploading fixed parser
+  //      produced different hashes → rows stacked on top → 447 + 434 = 881 rows.
+  //
+  // SOLUTION: for a scoped (client-specific) upload, DELETE all existing rows
+  // for this client + bank + date range, then INSERT the freshly parsed rows.
+  // This is the right semantics: re-uploading a statement replaces it.
+  // Reconciliation entries linked to those transactions are deleted first to
+  // avoid FK violations.
+  //
+  // For uploads without a clientId (rare / global), fall back to hash dedup
+  // in batches of 100 to stay well under URL limits.
+
+  let alreadyPresent = 0;
+
+  if (minDate !== "9999-12-31" && clientId) {
+    // Step 1: find IDs of existing rows in this period
+    const { data: existingTxns } = await supabase
       .from("bank_transactions")
-      .delete()
+      .select("id")
       .eq("tenant_id", tenantId)
+      .eq("client_id", clientId)
       .eq("bank_name", bankName)
-      .is("txn_hash", null)
       .gte("transaction_date", minDate)
       .lte("transaction_date", maxDate);
+
+    const existingIds = (existingTxns ?? []).map((t) => (t as { id: string }).id);
+    alreadyPresent = existingIds.length;
+
+    if (existingIds.length > 0) {
+      // Step 2: delete reconciliation rows linked to these transactions (FK safety)
+      for (let i = 0; i < existingIds.length; i += 100) {
+        await supabase.from("reconciliations").delete()
+          .eq("tenant_id", tenantId)
+          .in("bank_transaction_id", existingIds.slice(i, i + 100));
+      }
+      // Step 3: delete the bank transaction rows themselves
+      await supabase.from("bank_transactions").delete()
+        .eq("tenant_id", tenantId)
+        .eq("client_id", clientId)
+        .eq("bank_name", bankName)
+        .gte("transaction_date", minDate)
+        .lte("transaction_date", maxDate);
+    }
+  } else if (minDate !== "9999-12-31") {
+    // No clientId: batch hash-check (100 at a time to stay under URL limits)
+    const existingHashSet = new Set<string>();
+    for (let i = 0; i < allHashes.length; i += 100) {
+      const batch = allHashes.slice(i, i + 100);
+      const { data } = await supabase.from("bank_transactions")
+        .select("txn_hash").eq("tenant_id", tenantId).in("txn_hash", batch);
+      for (const r of data ?? []) existingHashSet.add(r.txn_hash);
+    }
+    alreadyPresent = existingHashSet.size;
+    rowsToInsert.splice(0, rowsToInsert.length,
+      ...rowsToInsert.filter((r) => !existingHashSet.has(r.txn_hash as string))
+    );
   }
 
-  // 2. Check which hashes already exist — only insert the missing ones
-  const { data: existingRows } = await supabase
-    .from("bank_transactions")
-    .select("txn_hash")
-    .eq("tenant_id", tenantId)
-    .in("txn_hash", allHashes);
-  const existingHashes = new Set((existingRows ?? []).map((r) => r.txn_hash));
-  const alreadyPresent = existingHashes.size;
-
-  // 3. Only insert rows whose hash isn't already in the DB
-  const newRows = rowsToInsert.filter((r) => !existingHashes.has(r.txn_hash as string));
-
-  if (newRows.length === 0) {
+  if (rowsToInsert.length === 0) {
     return NextResponse.json({
       success: true,
       count: 0,
@@ -345,7 +385,7 @@ export async function POST(request: NextRequest) {
 
   const { data: inserted, error: insertError } = await supabase
     .from("bank_transactions")
-    .insert(newRows)
+    .insert(rowsToInsert)
     .select("id");
 
   if (insertError) {
@@ -375,10 +415,8 @@ export async function POST(request: NextRequest) {
 
   // Build a user-friendly message
   let message: string;
-  if (newlyAdded === 0 && alreadyPresent > 0) {
-    message = `All ${total} transactions already present — no duplicates added.`;
-  } else if (alreadyPresent > 0) {
-    message = `${newlyAdded} new transactions added. ${alreadyPresent} already present (skipped). Statement has ${total} total transactions.`;
+  if (alreadyPresent > 0) {
+    message = `${newlyAdded} transactions imported (replaced ${alreadyPresent} previous rows for this period).`;
   } else {
     message = `${newlyAdded} transactions imported successfully.`;
   }
