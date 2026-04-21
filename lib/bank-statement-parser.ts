@@ -163,8 +163,9 @@ function rowsToTransactions(
     const debit = parseAmount(debitCol ? row[debitCol] : null);
     const credit = parseAmount(creditCol ? row[creditCol] : null);
 
-    // Skip completely empty rows or header re-occurrences
-    if (!narration.trim() && debit === null && credit === null) continue;
+    // Every real bank transaction must have a debit or credit amount.
+    // Rows with neither are metadata, summary totals, or repeated header rows — skip them all.
+    if (debit === null && credit === null) continue;
     if (narration.toLowerCase().includes("opening balance") || narration.toLowerCase().includes("closing balance")) continue;
 
     transactions.push({
