@@ -13,6 +13,7 @@ import {
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { toast } from "sonner";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 interface Client {
   id: string;
@@ -195,6 +196,9 @@ export default function ClientDetailPage() {
   const [reconLoading, setReconLoading] = useState(false);
   const [reconMatching, setReconMatching] = useState(false);
   const [bankMatching, setBankMatching] = useState(false);
+  const [wipingBank, setWipingBank] = useState(false);
+  const [wipeDialogOpen, setWipeDialogOpen] = useState(false);
+  const [deleteDocTarget, setDeleteDocTarget] = useState<{ id: string; fileName: string } | null>(null);
   const [showCategorised, setShowCategorised] = useState(false);
   const [reconTab, setReconTab] = useState<"matched" | "possible" | "unmatched">("unmatched");
   const [reconFilter, setReconFilter] = useState("");
@@ -530,6 +534,20 @@ export default function ClientDetailPage() {
     loadBankTxns();
   }
 
+  async function doWipeBankData() {
+    setWipingBank(true);
+    const res = await fetch(`/api/v1/clients/${clientId}/bank-transactions`, { method: "DELETE" });
+    setWipingBank(false);
+    setWipeDialogOpen(false);
+    if (res.ok) {
+      setBankTxns([]);
+      setBankSummary(null);
+      toast.success("All bank transactions wiped. Upload a fresh statement.");
+    } else {
+      toast.error("Failed to wipe bank data. Please try again.");
+    }
+  }
+
   async function updateTxnField(txnId: string, field: "category" | "voucher_type", value: string) {
     await fetch(`/api/v1/reconciliation/transactions/${txnId}`, {
       method: "PATCH",
@@ -848,17 +866,17 @@ export default function ClientDetailPage() {
     }
   }
 
-  async function deleteDocument(docId: string, fileName: string) {
-    if (!window.confirm(`Delete "${fileName}"?\n\nThis will permanently remove the document and all extracted fields. This cannot be undone.`)) return;
+  async function performDeleteDocument(docId: string, fileName: string) {
     setDeleting(docId);
     try {
       const res = await fetch(`/api/v1/documents/${docId}`, { method: "DELETE" });
       if (res.ok) {
         setDocuments((prev) => prev.filter((d) => d.id !== docId));
-        toast.success(`"${fileName}" deleted.`);
+        toast.success(`"${fileName}" archived.`);
+        setDeleteDocTarget(null);
       } else {
         const data = await res.json();
-        toast.error(data.error ?? "Delete failed.");
+        toast.error(data.error ?? "Archive failed.");
       }
     } finally {
       setDeleting(null);
@@ -1215,9 +1233,9 @@ export default function ClientDetailPage() {
                                     <RefreshCw size={11} /> Re-run
                                   </button>
                                 )}
-                                <button onClick={() => deleteDocument(doc.id, doc.original_filename)} disabled={deleting === doc.id}
+                                <button onClick={() => setDeleteDocTarget({ id: doc.id, fileName: doc.original_filename })} disabled={deleting === doc.id}
                                   className="inline-flex items-center gap-1 text-xs text-gray-300 hover:text-red-500 disabled:opacity-50"
-                                  title="Delete document">
+                                  title="Archive document">
                                   {deleting === doc.id ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
                                 </button>
                               </div>
@@ -1813,6 +1831,12 @@ export default function ClientDetailPage() {
                   className="text-xs text-blue-600 hover:text-blue-800 inline-flex items-center gap-1"
                 >
                   <Upload size={11} /> Upload statement
+                </button>
+                <button onClick={() => setWipeDialogOpen(true)} disabled={wipingBank}
+                  className="text-xs text-red-400 hover:text-red-600 inline-flex items-center gap-1 disabled:opacity-50"
+                  title="Wipe all bank data and re-upload">
+                  {wipingBank ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
+                  Wipe & re-upload
                 </button>
               </div>
             </CardHeader>
@@ -3080,6 +3104,31 @@ export default function ClientDetailPage() {
           </Card>
         </div>
       )}
+
+      {/* Wipe bank data — two-step confirm (type WIPE) */}
+      <ConfirmDialog
+        open={wipeDialogOpen}
+        onOpenChange={setWipeDialogOpen}
+        title="Wipe all bank transactions?"
+        description="This will delete every bank transaction and reconciliation match for this client. The data cannot be recovered. Only do this if you need to re-upload a corrected bank statement."
+        confirmWord="WIPE"
+        confirmLabel="Wipe all transactions"
+        loading={wipingBank}
+        onConfirm={doWipeBankData}
+        variant="danger"
+      />
+
+      {/* Archive document — single confirm (soft delete, retained for compliance) */}
+      <ConfirmDialog
+        open={!!deleteDocTarget}
+        onOpenChange={(open) => { if (!open) setDeleteDocTarget(null); }}
+        title={`Archive "${deleteDocTarget?.fileName}"?`}
+        description="This document will be removed from your active workspace. It is retained permanently in our records as required by CGST Act Section 35 (6-year retention). Contact support to recover it."
+        confirmLabel="Archive document"
+        loading={!!deleting}
+        onConfirm={() => deleteDocTarget && performDeleteDocument(deleteDocTarget.id, deleteDocTarget.fileName)}
+        variant="warning"
+      />
     </div>
   );
 }

@@ -57,29 +57,26 @@ export async function DELETE(
 
   const { id: documentId } = await params;
 
-  // Fetch storage path before deleting the row
-  const { data: doc } = await supabase
-    .from("documents")
-    .select("storage_path")
-    .eq("id", documentId)
-    .eq("tenant_id", profile.tenant_id)
-    .single();
-
-  if (!doc) return NextResponse.json({ error: "Document not found" }, { status: 404 });
-
-  // Delete DB row first (extractions cascade automatically)
+  // Soft delete: set deleted_at timestamp. File stays in storage.
+  // CGST Act Section 35 — accounting records must be retained for 6 years.
+  // Hard deletes are blocked by RLS (migration 020).
   const { error } = await supabase
     .from("documents")
-    .delete()
+    .update({ deleted_at: new Date().toISOString() })
     .eq("id", documentId)
-    .eq("tenant_id", profile.tenant_id);
+    .eq("tenant_id", profile.tenant_id)
+    .is("deleted_at", null); // only archive if not already archived
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  // Best-effort: remove file from storage (don't fail if already missing)
-  if (doc.storage_path) {
-    await supabase.storage.from("documents").remove([doc.storage_path]);
-  }
+  // Audit trail
+  await supabase.from("audit_log").insert({
+    tenant_id: profile.tenant_id,
+    user_id: user.id,
+    action: "archive_document",
+    entity_type: "documents",
+    entity_id: documentId,
+  });
 
   return NextResponse.json({ ok: true });
 }

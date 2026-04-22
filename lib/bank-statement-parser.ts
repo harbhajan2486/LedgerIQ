@@ -117,7 +117,7 @@ const BANK_COLUMN_MAPS: Array<{
 }> = [
   // HDFC Bank
   {
-    match: /hdfc|value date|withdrawal amt/i,
+    match: /hdfc|withdrawal amt/i,
     map: {
       date: ["date", "txn date", "transaction date", "value date"],
       narration: ["narration", "description", "particulars", "remarks"],
@@ -129,7 +129,7 @@ const BANK_COLUMN_MAPS: Array<{
   },
   // ICICI Bank
   {
-    match: /icici|transaction date|s no\.|transaction id/i,
+    match: /icici|transaction remarks|s no\./i,
     map: {
       date: ["transaction date", "date", "value date"],
       narration: ["transaction remarks", "narration", "description", "particulars"],
@@ -139,9 +139,57 @@ const BANK_COLUMN_MAPS: Array<{
       balance: ["balance(in rs.)", "balance", "closing balance"],
     },
   },
+  // Axis Bank
+  {
+    match: /axis|tran date|chq no|tran particular/i,
+    map: {
+      date: ["tran date", "date", "transaction date", "value date"],
+      narration: ["tran particulars", "particulars", "narration", "description"],
+      ref: ["chq no", "chq/ref no", "ref no", "utr"],
+      debit: ["debit", "dr", "withdrawal amount", "withdrawal"],
+      credit: ["credit", "cr", "deposit amount", "deposit"],
+      balance: ["balance", "closing balance", "running balance"],
+    },
+  },
+  // Kotak Mahindra Bank
+  {
+    match: /kotak|dr \/ cr|transaction reference/i,
+    map: {
+      date: ["date", "transaction date", "value date"],
+      narration: ["description", "narration", "particulars", "transaction description"],
+      ref: ["transaction reference", "reference number", "ref no", "cheque number"],
+      debit: ["debit", "dr", "withdrawal"],
+      credit: ["credit", "cr", "deposit"],
+      balance: ["balance", "closing balance"],
+    },
+  },
+  // Yes Bank
+  {
+    match: /yes bank|yes_bank|instabiz/i,
+    map: {
+      date: ["date", "transaction date", "value date"],
+      narration: ["description", "narration", "remarks", "particulars"],
+      ref: ["reference", "utr no", "chq no", "ref no"],
+      debit: ["debit amount", "debit", "dr"],
+      credit: ["credit amount", "credit", "cr"],
+      balance: ["balance", "closing balance"],
+    },
+  },
+  // IndusInd Bank
+  {
+    match: /indusind|indus ind/i,
+    map: {
+      date: ["date", "txn date", "transaction date"],
+      narration: ["narration", "particulars", "description"],
+      ref: ["reference number", "ref no", "cheque no"],
+      debit: ["debit", "withdrawal amount", "dr"],
+      credit: ["credit", "deposit amount", "cr"],
+      balance: ["balance", "closing balance"],
+    },
+  },
   // SBI
   {
-    match: /sbi|txn date|description|ref no\/ cheque no/i,
+    match: /sbi|txn date|ref no\/ cheque no/i,
     map: {
       date: ["txn date", "date", "value date"],
       narration: ["description", "particulars", "narration", "remarks"],
@@ -156,8 +204,8 @@ const BANK_COLUMN_MAPS: Array<{
     match: /.*/,
     map: {
       date: ["date", "txn date", "transaction date", "value date", "posting date"],
-      narration: ["narration", "description", "particulars", "remarks", "details", "transaction details"],
-      ref: ["ref", "ref no", "reference", "utr", "cheque", "chq no", "transaction id"],
+      narration: ["narration", "description", "particulars", "remarks", "details", "transaction details", "tran particulars"],
+      ref: ["ref", "ref no", "reference", "utr", "cheque", "chq no", "transaction id", "transaction reference"],
       debit: ["debit", "dr", "withdrawal", "withdrawal amount", "debit amount", "amount dr"],
       credit: ["credit", "cr", "deposit", "deposit amount", "credit amount", "amount cr"],
       balance: ["balance", "closing balance", "running balance", "available balance"],
@@ -196,32 +244,53 @@ function parseAmount(val: string | undefined | null): number | null {
   return num;
 }
 
+const MONTH_MAP: Record<string, string> = {
+  jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
+  jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12",
+};
+
 function parseDate(val: string | undefined | null): string {
   if (!val || val.trim() === "") return new Date().toISOString().slice(0, 10);
 
-  // Try common Indian date formats: DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD
   const v = val.trim();
 
-  // DD/MM/YYYY or DD-MM-YYYY
-  const dmy = v.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
-  if (dmy) {
-    const [, d, m, y] = dmy;
+  // ISO format: YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}/.test(v)) return v.slice(0, 10);
+
+  // DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY (4-digit year)
+  const dmy4 = v.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})$/);
+  if (dmy4) {
+    const [, d, m, y] = dmy4;
     return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
   }
 
-  // DD MMM YYYY (e.g. "15 Jan 2024")
-  const dmmy = v.match(/^(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{4})$/);
-  if (dmmy) {
-    const [, d, m, y] = dmmy;
-    const date = new Date(`${m} ${d} ${y}`);
-    if (!isNaN(date.getTime())) return date.toISOString().slice(0, 10);
+  // DD-Mon-YYYY or DD/Mon/YYYY or DD Mon YYYY (e.g. "15-Jan-2024", "15 Jan 2024")
+  const dMonY = v.match(/^(\d{1,2})[\s\-\/]([A-Za-z]{3,9})[\s\-\/](\d{4})$/);
+  if (dMonY) {
+    const mm = MONTH_MAP[dMonY[2].slice(0, 3).toLowerCase()];
+    if (mm) return `${dMonY[3]}-${mm}-${dMonY[1].padStart(2, "0")}`;
   }
 
-  // ISO format already
-  const iso = v.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (iso) return v.slice(0, 10);
+  // DD-Mon-YY or DD/Mon/YY (2-digit year, e.g. "15-Jan-24") — common in HDFC/Axis XLSX
+  const dMonYY = v.match(/^(\d{1,2})[\s\-\/]([A-Za-z]{3,9})[\s\-\/](\d{2})$/);
+  if (dMonYY) {
+    const mm = MONTH_MAP[dMonYY[2].slice(0, 3).toLowerCase()];
+    if (mm) {
+      const yr = parseInt(dMonYY[3], 10);
+      const fullYear = yr >= 0 && yr <= 30 ? 2000 + yr : 1900 + yr;
+      return `${fullYear}-${mm}-${dMonYY[1].padStart(2, "0")}`;
+    }
+  }
 
-  // Fallback: try native Date parse
+  // DD/MM/YY (2-digit year, e.g. "15/01/24")
+  const dmy2 = v.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2})$/);
+  if (dmy2) {
+    const yr = parseInt(dmy2[3], 10);
+    const fullYear = yr >= 0 && yr <= 30 ? 2000 + yr : 1900 + yr;
+    return `${fullYear}-${dmy2[2].padStart(2, "0")}-${dmy2[1].padStart(2, "0")}`;
+  }
+
+  // Fallback: try native Date parse (handles many other formats)
   const d = new Date(v);
   if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
 
@@ -229,11 +298,23 @@ function parseDate(val: string | undefined | null): string {
 }
 
 function extractUTR(narration: string): string | null {
-  // UTR: 22-character alphanumeric, or NEFT/RTGS reference patterns
-  const utrMatch = narration.match(/\b([A-Z]{4}\d{18}|[A-Z0-9]{22})\b/);
+  // NEFT/RTGS UTR: exactly 22 chars, letter-prefixed (e.g. HDFC0000012345678901)
+  const utrMatch = narration.match(/\b([A-Z]{4}\d{18})\b/);
   if (utrMatch) return utrMatch[1];
-  const neftMatch = narration.match(/(?:NEFT|RTGS|IMPS)[\/\-\s]([A-Z0-9]+)/i);
+
+  // NEFT / RTGS / IMPS reference after slash or space
+  const neftMatch = narration.match(/(?:NEFT|RTGS|IMPS)[\/\-\s]([A-Z0-9]{8,22})/i);
   if (neftMatch) return neftMatch[1];
+
+  // UPI transaction reference number (12-digit number in UPI narrations)
+  // Pattern: UPI/ref_number/... or UPI-ref_number
+  const upiRefMatch = narration.match(/UPI[\/\-\s](?:[A-Z0-9]+[\/\-])?(\d{10,15})/i);
+  if (upiRefMatch) return upiRefMatch[1];
+
+  // Standalone 12-digit reference number (common in IMPS)
+  const impsMatch = narration.match(/\b(\d{12})\b/);
+  if (impsMatch) return impsMatch[1];
+
   return null;
 }
 
@@ -438,8 +519,21 @@ export function scoreMatch(
 
   // UTR / payment reference (strongest possible signal)
   if (invoice.payment_reference && txn.ref_number) {
-    if (txn.ref_number.trim() === invoice.payment_reference.trim()) {
+    const txnRef = txn.ref_number.trim();
+    const invRef = invoice.payment_reference.trim();
+    if (txnRef === invRef) {
       score += 55; reasons.push("UTR/reference number matches");
+    } else if (txnRef.length >= 8 && invRef.length >= 8 && (txnRef.includes(invRef) || invRef.includes(txnRef))) {
+      score += 35; reasons.push("Reference number partial match");
+    }
+  }
+
+  // UPI reference in narration vs invoice payment reference
+  if (invoice.payment_reference) {
+    const invRef = invoice.payment_reference.replace(/\s/g, "");
+    const narrClean = narr.replace(/\s/g, "");
+    if (invRef.length >= 8 && narrClean.includes(invRef)) {
+      score += 45; reasons.push("Payment reference found in narration");
     }
   }
 

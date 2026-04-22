@@ -145,3 +145,60 @@ export async function GET(
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+// DELETE — wipe all bank transactions for a client (and their reconciliation entries)
+export async function DELETE(
+  _request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+
+    const { data: profile } = await supabase.from("users").select("tenant_id").eq("id", user.id).single();
+    if (!profile?.tenant_id) return NextResponse.json({ error: "Tenant not found" }, { status: 400 });
+
+    const { id: clientId } = await params;
+
+    // Get all transaction IDs for this client
+    const { data: txns } = await supabase
+      .from("bank_transactions")
+      .select("id")
+      .eq("tenant_id", profile.tenant_id)
+      .eq("client_id", clientId);
+
+    const txnIds = (txns ?? []).map((t) => t.id);
+
+    if (txnIds.length > 0) {
+      // Delete reconciliation rows first (FK safety), in batches
+      for (let i = 0; i < txnIds.length; i += 100) {
+        await supabase.from("reconciliations").delete()
+          .eq("tenant_id", profile.tenant_id)
+          .in("bank_transaction_id", txnIds.slice(i, i + 100));
+      }
+    }
+
+    // Delete all bank transactions for this client
+    const { error } = await supabase
+      .from("bank_transactions")
+      .delete()
+      .eq("tenant_id", profile.tenant_id)
+      .eq("client_id", clientId);
+
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+    await supabase.from("audit_log").insert({
+      tenant_id: profile.tenant_id,
+      user_id: user.id,
+      action: "wipe_bank_transactions",
+      entity_type: "bank_transactions",
+      entity_id: clientId,
+    });
+
+    return NextResponse.json({ ok: true, deleted: txnIds.length });
+  } catch (err) {
+    console.error("[clients/bank-transactions DELETE]", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
+}

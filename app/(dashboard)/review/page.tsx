@@ -3,10 +3,11 @@
 import { useEffect, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ClipboardCheck, FileText, ChevronRight, AlertTriangle, RefreshCw, Loader2 } from "lucide-react";
+import { ClipboardCheck, FileText, ChevronRight, AlertTriangle, RefreshCw, Loader2, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { toast } from "sonner";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 interface QueueItem {
   id: string;
@@ -48,6 +49,8 @@ export default function InboxPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; fileName: string } | null>(null);
 
   function loadQueue() {
     fetch("/api/v1/review/queue")
@@ -61,6 +64,24 @@ export default function InboxPage() {
   }
 
   useEffect(() => { loadQueue(); }, []);
+
+  async function performDelete(docId: string, fileName: string) {
+    setDeleting(docId);
+    try {
+      const res = await fetch(`/api/v1/documents/${docId}`, { method: "DELETE" });
+      if (res.ok) {
+        toast.success(`"${fileName}" archived.`);
+        setQueue((prev) => prev.filter((d) => d.id !== docId));
+        setStuck((prev) => prev.filter((d) => d.id !== docId));
+        setDeleteTarget(null);
+      } else {
+        const data = await res.json();
+        toast.error(data.error ?? "Could not archive document.");
+      }
+    } finally {
+      setDeleting(null);
+    }
+  }
 
   async function retryExtraction(docId: string, fileName: string) {
     setRetrying(docId);
@@ -144,16 +165,26 @@ export default function InboxPage() {
                       {STATUS_LABELS[item.status] ?? item.status} · uploaded {new Date(item.uploadedAt).toLocaleDateString("en-IN")}
                     </p>
                   </div>
-                  <button
-                    onClick={() => retryExtraction(item.id, item.fileName)}
-                    disabled={retrying === item.id}
-                    className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded border border-amber-300 text-amber-700 hover:bg-amber-100 disabled:opacity-50 transition-colors"
-                  >
-                    {retrying === item.id
-                      ? <><Loader2 size={12} className="animate-spin" /> Retrying…</>
-                      : <><RefreshCw size={12} /> Retry</>
-                    }
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => retryExtraction(item.id, item.fileName)}
+                      disabled={retrying === item.id}
+                      className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded border border-amber-300 text-amber-700 hover:bg-amber-100 disabled:opacity-50 transition-colors"
+                    >
+                      {retrying === item.id
+                        ? <><Loader2 size={12} className="animate-spin" /> Retrying…</>
+                        : <><RefreshCw size={12} /> Retry</>
+                      }
+                    </button>
+                    <button
+                      onClick={() => setDeleteTarget({ id: item.id, fileName: item.fileName })}
+                      disabled={deleting === item.id}
+                      className="inline-flex items-center gap-1 text-xs px-2 py-1.5 rounded border border-gray-200 text-gray-400 hover:border-red-300 hover:text-red-500 disabled:opacity-50 transition-colors"
+                      title="Delete document"
+                    >
+                      {deleting === item.id ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                    </button>
+                  </div>
                 </div>
               </CardContent>
             </Card>
@@ -183,46 +214,67 @@ export default function InboxPage() {
       {queue.length > 0 && (
         <div className="space-y-2">
           {queue.map((item) => (
-            <Link key={item.id} href={`/review/${item.id}`}>
-              <Card className="hover:shadow-md transition-shadow cursor-pointer">
-                <CardContent className="p-4">
-                  <div className="flex items-center gap-4">
-                    <div className="w-9 h-9 bg-gray-100 rounded-lg flex items-center justify-center flex-shrink-0">
-                      <FileText size={16} className="text-gray-500" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-1">
-                        <p className="text-sm font-medium text-gray-900 truncate">{item.fileName}</p>
-                        <span className="text-xs text-gray-400 flex-shrink-0">
-                          {DOC_TYPE_LABELS[item.type] ?? item.type}
-                        </span>
+            <div key={item.id} className="relative group">
+              <Link href={`/review/${item.id}`}>
+                <Card className="hover:shadow-md transition-shadow cursor-pointer">
+                  <CardContent className="p-4">
+                    <div className="flex items-center gap-4">
+                      <div className="w-9 h-9 bg-gray-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                        <FileText size={16} className="text-gray-500" />
                       </div>
-                      <div className="flex items-center gap-3 text-xs text-gray-400">
-                        <span>{item.totalFields} fields extracted</span>
-                        <span>·</span>
-                        <span>{new Date(item.uploadedAt).toLocaleDateString("en-IN")}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-1">
+                          <p className="text-sm font-medium text-gray-900 truncate">{item.fileName}</p>
+                          <span className="text-xs text-gray-400 flex-shrink-0">
+                            {DOC_TYPE_LABELS[item.type] ?? item.type}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-3 text-xs text-gray-400">
+                          <span>{item.totalFields} fields extracted</span>
+                          <span>·</span>
+                          <span>{new Date(item.uploadedAt).toLocaleDateString("en-IN")}</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3 flex-shrink-0">
+                        {item.lowConfidenceFields > 0 ? (
+                          <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 font-medium">
+                            <AlertTriangle size={10} />
+                            {item.lowConfidenceFields} need attention
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-green-50 text-green-700 font-medium">
+                            {item.avgConfidence}% confident
+                          </span>
+                        )}
+                        <ChevronRight size={16} className="text-gray-400" />
                       </div>
                     </div>
-                    <div className="flex items-center gap-3 flex-shrink-0">
-                      {item.lowConfidenceFields > 0 ? (
-                        <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 font-medium">
-                          <AlertTriangle size={10} />
-                          {item.lowConfidenceFields} need attention
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-green-50 text-green-700 font-medium">
-                          {item.avgConfidence}% confident
-                        </span>
-                      )}
-                      <ChevronRight size={16} className="text-gray-400" />
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            </Link>
+                  </CardContent>
+                </Card>
+              </Link>
+              <button
+                onClick={(e) => { e.preventDefault(); setDeleteTarget({ id: item.id, fileName: item.fileName }); }}
+                disabled={deleting === item.id}
+                className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1.5 rounded bg-white border border-gray-200 text-gray-400 hover:text-red-500 hover:border-red-300 transition-all shadow-sm disabled:opacity-50"
+                title="Delete document"
+              >
+                {deleting === item.id ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+              </button>
+            </div>
           ))}
         </div>
       )}
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
+        title={`Archive "${deleteTarget?.fileName}"?`}
+        description="This document will be removed from your active workspace. It is retained permanently in our records as required by CGST Act Section 35 (6-year retention). You can request recovery by contacting support."
+        confirmLabel="Archive document"
+        loading={!!deleting}
+        onConfirm={() => deleteTarget && performDelete(deleteTarget.id, deleteTarget.fileName)}
+        variant="warning"
+      />
     </div>
   );
 }

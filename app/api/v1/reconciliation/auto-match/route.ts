@@ -90,13 +90,14 @@ export async function POST(request: NextRequest) {
       suggested_ledger: fields.suggested_ledger ?? null,
     }));
 
-  // ── 3. Score all transactions in memory (no DB writes) ────────────────────
-  const reconRows: Record<string, unknown>[] = [];
-  const matchedTxnUpdates: { id: string; status: string }[] = [];
-  const matchedDocIds: string[] = [];
-  const usedDocIds = new Set<string>();
+  // ── 3. Score all pairs, then assign highest-confidence matches first ────────
+  //
+  // WHY: Greedy matching in transaction order (chronological) is unfair — the
+  // first txn chronologically "claims" a document even if a later txn scores 95
+  // vs the first one scoring 65. By scoring all pairs upfront and sorting by
+  // score descending, the best evidence locks in first.
 
-  // Build map: txn_id → already-paired doc_id (only firm matches — possible_match pairs get re-evaluated freely)
+  // Build map: txn_id → already-paired doc_id (only firm matches)
   const existingPairMap: Record<string, string> = {};
   for (const r of existingRecons ?? []) {
     if (r.bank_transaction_id && r.document_id && (r as { status: string }).status === "matched") {
@@ -104,9 +105,18 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  // Score every (txn, invoice) combination
+  interface ScoredPair {
+    txnId: string;
+    invoiceId: string;
+    score: number;
+    reasons: string[];
+    alreadyPaired: boolean; // this txn was previously firmly matched to this invoice
+  }
+  const allPairs: ScoredPair[] = [];
+
   for (const txn of transactions) {
     const alreadyPairedDocId = existingPairMap[txn.id] ?? null;
-
     const txnForScoring = {
       id: txn.id,
       date: txn.transaction_date,
@@ -118,44 +128,56 @@ export async function POST(request: NextRequest) {
       raw_row: {},
     };
 
-    let bestScore = 0;
-    let bestInvoice: (typeof unmatchedInvoices)[0] | null = null;
-    let bestReasons: string[] = [];
-
     for (const invoice of unmatchedInvoices) {
-      // For already-paired txns: only re-score against their existing paired document
+      // For already-paired txns, only score against their original document
       if (alreadyPairedDocId && invoice.id !== alreadyPairedDocId) continue;
-      if (!alreadyPairedDocId && usedDocIds.has(invoice.id)) continue; // already claimed by a better-scoring txn
       const { score, reasons } = scoreMatch(txnForScoring, invoice);
-      if (score > bestScore) {
-        bestScore = score;
-        bestInvoice = invoice;
-        bestReasons = reasons;
+      if (score >= POSSIBLE_THRESHOLD || alreadyPairedDocId) {
+        allPairs.push({
+          txnId: txn.id,
+          invoiceId: invoice.id,
+          score,
+          reasons,
+          alreadyPaired: !!alreadyPairedDocId,
+        });
       }
     }
+  }
 
-    if (bestInvoice && (bestScore >= POSSIBLE_THRESHOLD || alreadyPairedDocId)) {
-      // For already-paired: keep existing status unless score now qualifies for an upgrade/downgrade
-      let status: string;
-      if (alreadyPairedDocId) {
-        status = bestScore >= MATCH_THRESHOLD ? "matched" : bestScore >= POSSIBLE_THRESHOLD ? "possible_match" : "possible_match";
-      } else {
-        status = bestScore >= MATCH_THRESHOLD ? "matched" : "possible_match";
-      }
-      if (status === "matched" && !alreadyPairedDocId) usedDocIds.add(bestInvoice.id);
+  // Sort descending by score — best evidence claims its match first
+  allPairs.sort((a, b) => b.score - a.score);
 
-      reconRows.push({
-        tenant_id: tenantId,
-        document_id: bestInvoice.id,
-        bank_transaction_id: txn.id,
-        match_score: bestScore,
-        match_reasons: bestReasons,
-        status,
-        matched_at: new Date().toISOString(),
-      });
-      matchedTxnUpdates.push({ id: txn.id, status });
-      if (status === "matched") matchedDocIds.push(bestInvoice.id);
+  const reconRows: Record<string, unknown>[] = [];
+  const matchedTxnUpdates: { id: string; status: string }[] = [];
+  const matchedDocIds: string[] = [];
+  const usedDocIds = new Set<string>();
+  const usedTxnIds = new Set<string>();
+
+  for (const pair of allPairs) {
+    // Skip if either side is already claimed (except re-evaluation of existing pairs)
+    if (!pair.alreadyPaired && usedDocIds.has(pair.invoiceId)) continue;
+    if (usedTxnIds.has(pair.txnId)) continue;
+
+    const status: string = pair.score >= MATCH_THRESHOLD ? "matched" : "possible_match";
+
+    // Only "claim" the document slot for confirmed matches (not possible_match)
+    // so multiple txns can still be flagged as possible_match for the same doc
+    if (status === "matched") {
+      usedDocIds.add(pair.invoiceId);
+      matchedDocIds.push(pair.invoiceId);
     }
+    usedTxnIds.add(pair.txnId);
+
+    reconRows.push({
+      tenant_id: tenantId,
+      document_id: pair.invoiceId,
+      bank_transaction_id: pair.txnId,
+      match_score: pair.score,
+      match_reasons: pair.reasons,
+      status,
+      matched_at: new Date().toISOString(),
+    });
+    matchedTxnUpdates.push({ id: pair.txnId, status });
   }
 
   if (reconRows.length === 0) return NextResponse.json({ matched: 0, possible: 0 });
