@@ -79,12 +79,30 @@ function mergeNumericFragments(fields: string[], targetCount: number): string[] 
   return result;
 }
 
+/** Re-join a field array as CSV, quoting any field that contains a comma. */
+function reJoinCsv(fields: string[]): string {
+  return fields.map((f) => {
+    const bare = f.startsWith('"') && f.endsWith('"') ? f.slice(1, -1) : f;
+    return bare.includes(",") ? `"${bare.replace(/"/g, '""')}"` : f;
+  }).join(",");
+}
+
 /**
- * Pre-process raw CSV text so that unquoted comma-formatted numbers
- * (e.g. 11,947.00 or 1,00,000.00) are re-quoted before PapaParse runs.
+ * Pre-process raw CSV text so that unquoted commas inside amount fields AND
+ * inside narration fields are handled before PapaParse runs.
  *
- * Only affects rows that have MORE columns than the header.
- * Rows with the correct column count pass through unchanged.
+ * Two-pass strategy for rows with more columns than the header:
+ *
+ * Pass 1 — merge adjacent numeric fragments (e.g. "11" + "947.00" → "11,947.00").
+ *   Handles: Indian bank amounts like ₹11,947.00 or ₹1,00,000.00 written without quotes.
+ *
+ * Pass 2 — narration fallback. If the row STILL has too many columns after pass 1,
+ *   the remaining excess must be from unquoted commas in the narration field (index 1).
+ *   UPI narrations very commonly contain commas, e.g.:
+ *     "Paid via CRED,UPI-420318523888" (the comma between the two parts)
+ *   We join fields[1 .. 1+excess] back as a single narration field.
+ *   This is safe because: col[0] is always the date (no commas), and the
+ *   numeric tail columns (ref / debit / credit / balance) were already fixed in pass 1.
  */
 function fixUnquotedAmounts(csvText: string): string {
   const lines = csvText.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
@@ -99,13 +117,15 @@ function fixUnquotedAmounts(csvText: string): string {
     const fields = splitCsvLine(line);
     if (fields.length <= expectedCols) return line; // already correct
 
+    // Pass 1: merge numeric fragments (amount splits)
     const merged = mergeNumericFragments(fields, expectedCols);
+    if (merged.length <= expectedCols) return reJoinCsv(merged);
 
-    // Reconstruct: quote any field that now contains a comma (merged number)
-    return merged.map((f) => {
-      const bare = f.startsWith('"') && f.endsWith('"') ? f.slice(1, -1) : f;
-      return bare.includes(",") ? `"${bare.replace(/"/g, '""')}"` : f;
-    }).join(",");
+    // Pass 2: narration fallback — remaining excess columns are from the narration
+    const excess = merged.length - expectedCols;
+    const narration = merged.slice(1, 2 + excess).join(","); // join narration fragments
+    const tail = merged.slice(2 + excess);                    // structural fields (ref/debit/credit/balance)
+    return reJoinCsv([merged[0], narration, ...tail]);
   }).join("\n");
 }
 
