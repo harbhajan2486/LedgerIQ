@@ -48,88 +48,99 @@ function splitCsvLine(line: string): string[] {
 }
 
 /**
- * Merge adjacent fields that are numeric fragments of a comma-formatted number.
+ * Count how many consecutive columns from the RIGHT end of the header are numeric
+ * (balance, debit, credit, amount). These columns never contain narration text.
  *
- * Criteria for a merge:
- *   field A: 1–3 digits, optionally already has comma-groups (e.g. "1,00" from a prior pass)
- *   field B: exactly 2–3 digits, optionally followed by a decimal part (e.g. "947.00")
- *
- * Iterates until row reaches targetCount or no more merges are possible.
- * Handles both international (1,234) and Indian lakh (1,23,456) formats in multiple passes.
+ * This drives right-anchored extraction: instead of trying to count/fix columns,
+ * we lock down the rightmost N columns as amounts and treat everything in the
+ * middle as narration — regardless of how many commas the narration contains.
  */
-function mergeNumericFragments(fields: string[], targetCount: number): string[] {
-  // Allow optional leading +/- so that "+36" (from "+36,000.00") and "-11" merge correctly.
-  // The decimal-containing fragments (e.g. "967.39") must remain in isFragmentB only,
-  // so isFragmentA stays integer-only (no decimal) — this prevents merging across the wrong boundary.
-  const isFragmentA = (s: string) => /^[+\-]?\d{1,3}(,\d{2,3})*$/.test(s);
-  const isFragmentB = (s: string) => /^\d{2,3}(?:\.\d{1,2})?$/.test(s);
-
-  const result = [...fields];
-  let maxIter = result.length * 2; // safety cap
-
-  while (result.length > targetCount && maxIter-- > 0) {
-    let merged = false;
-    for (let i = 0; i < result.length - 1; i++) {
-      if (isFragmentA(result[i]) && isFragmentB(result[i + 1])) {
-        result.splice(i, 2, `${result[i]},${result[i + 1]}`);
-        merged = true;
-        break; // restart scan — earlier pair might now be eligible
-      }
-    }
-    if (!merged) break;
+function computeNumericTailCount(headers: string[]): number {
+  let count = 0;
+  for (let i = headers.length - 1; i >= 0; i--) {
+    const n = normalizeColumnName(headers[i]);
+    const isNumeric =
+      n.includes("balance") ||
+      n.includes("debit") || n === "dr" || n.includes("withdrawal") ||
+      n.includes("credit") || n === "cr" || n.includes("deposit") ||
+      n === "amount" || n.includes("transaction amount") ||
+      n.includes("dr/cr") || n.includes("dr./cr");
+    if (isNumeric) count++;
+    else break;
   }
-
-  return result;
-}
-
-/** Re-join a field array as CSV, quoting any field that contains a comma. */
-function reJoinCsv(fields: string[]): string {
-  return fields.map((f) => {
-    const bare = f.startsWith('"') && f.endsWith('"') ? f.slice(1, -1) : f;
-    return bare.includes(",") ? `"${bare.replace(/"/g, '""')}"` : f;
-  }).join(",");
+  return Math.max(count, 2); // always at least balance + one amount col
 }
 
 /**
- * Pre-process raw CSV text so that unquoted commas inside amount fields AND
- * inside narration fields are handled before PapaParse runs.
+ * Right-anchored CSV row reconstruction.
  *
- * Two-pass strategy for rows with more columns than the header:
+ * The fundamental insight for Indian bank CSVs: the date is ALWAYS first, the
+ * numeric columns (balance, debit, credit) are ALWAYS last. Everything in between
+ * is narration — which may contain any number of unquoted commas.
  *
- * Pass 1 — merge adjacent numeric fragments (e.g. "11" + "947.00" → "11,947.00").
- *   Handles: Indian bank amounts like ₹11,947.00 or ₹1,00,000.00 written without quotes.
+ * Approach:
+ *  1. Split the raw line with splitCsvLine (handles properly-quoted fields).
+ *  2. Lock the last `rightFixed` fields as the numeric tail.
+ *  3. Merge any comma-formatted amount fragments within the tail
+ *     (e.g. "11" + "967.39" → "11,967.39" for balance 11,967.39).
+ *  4. If the merge reduced the tail below rightFixed (a balance-split value
+ *     happened to fill an otherwise-empty credit slot), pad with "" on the left.
+ *  5. Join all middle fields (index 1 … length-rightFixed) as a single narration.
+ *  6. Return a canonical array: [date, narration, ...mergedTail].
  *
- * Pass 2 — narration fallback. If the row STILL has too many columns after pass 1,
- *   the remaining excess must be from unquoted commas in the narration field (index 1).
- *   UPI narrations very commonly contain commas, e.g.:
- *     "Paid via CRED,UPI-420318523888" (the comma between the two parts)
- *   We join fields[1 .. 1+excess] back as a single narration field.
- *   This is safe because: col[0] is always the date (no commas), and the
- *   numeric tail columns (ref / debit / credit / balance) were already fixed in pass 1.
+ * This handles every known failure case without column-counting heuristics:
+ *  - Narration with one comma  (e.g. "Paid via CRED,UPI-420318523888")
+ *  - Narration with many commas
+ *  - Balance like 11,967.39 split into "11" + "967.39"
+ *  - Signed amounts like +36,000.00 split into "+36" + "000.00"
+ *  - Signed single-amount column banks (negative = debit, positive = credit)
+ *  - Empty credit slot for debit transactions (no phantom "1" in credit column)
  */
-function fixUnquotedAmounts(csvText: string): string {
-  const lines = csvText.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-  if (lines.length < 2) return csvText;
+function reconstructRow(rawFields: string[], rightFixed: number): {
+  date: string;
+  narration: string;
+  tail: string[];   // exactly rightFixed elements
+} {
+  // Tail: last rightFixed raw fields
+  const tailSize = Math.min(rightFixed, rawFields.length - 1);
+  const rawTail = rawFields.slice(rawFields.length - tailSize);
 
-  const expectedCols = splitCsvLine(lines[0]).length;
+  // Merge numeric fragments unconditionally (not gated on count > target)
+  // so that balance splits like ["11","967.39"] always become ["11,967.39"].
+  const mergedTail = mergeNumericFragmentsUnbounded([...rawTail]);
 
-  return lines.map((line, idx) => {
-    if (idx === 0) return line; // header: never touch
-    if (!line.trim()) return line;
+  // If a merged balance filled an empty debit/credit slot, the merge reduces
+  // the count below tailSize. Restore by prepending empty strings.
+  while (mergedTail.length < tailSize) mergedTail.unshift("");
 
-    const fields = splitCsvLine(line);
-    if (fields.length <= expectedCols) return line; // already correct
+  // Narration: everything from index 1 to (length - tailSize), joined with comma.
+  const middle = rawFields.slice(1, rawFields.length - tailSize);
+  const narration = middle.join(",").trim();
 
-    // Pass 1: merge numeric fragments (amount splits)
-    const merged = mergeNumericFragments(fields, expectedCols);
-    if (merged.length <= expectedCols) return reJoinCsv(merged);
+  return { date: rawFields[0]?.trim() ?? "", narration, tail: mergedTail };
+}
 
-    // Pass 2: narration fallback — remaining excess columns are from the narration
-    const excess = merged.length - expectedCols;
-    const narration = merged.slice(1, 2 + excess).join(","); // join narration fragments
-    const tail = merged.slice(2 + excess);                    // structural fields (ref/debit/credit/balance)
-    return reJoinCsv([merged[0], narration, ...tail]);
-  }).join("\n");
+/**
+ * Merge adjacent numeric fragments without a target-count gate.
+ * Used for the amount tail where we always want fragments merged,
+ * regardless of whether the count already equals the expected size.
+ */
+function mergeNumericFragmentsUnbounded(fields: string[]): string[] {
+  const isFragmentA = (s: string) => /^[+\-]?\d{1,3}(,\d{2,3})*$/.test(s);
+  const isFragmentB = (s: string) => /^\d{2,3}(?:\.\d{1,2})?$/.test(s);
+  const result = [...fields];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let i = 0; i < result.length - 1; i++) {
+      if (isFragmentA(result[i]) && isFragmentB(result[i + 1])) {
+        result.splice(i, 2, `${result[i]},${result[i + 1]}`);
+        changed = true;
+        break;
+      }
+    }
+  }
+  return result;
 }
 
 // ---- Column name normalizers per bank ----
@@ -364,6 +375,9 @@ function rowsToTransactions(
     let debit = parseAmount(debitCol ? row[debitCol] : null);
     let credit = parseAmount(creditCol ? row[creditCol] : null);
 
+    // Some banks write negative values in the debit column (e.g. -3313.00).
+    if (debit !== null && debit < 0) { debit = Math.abs(debit); }
+
     // Signed single-amount column fallback (Kotak, AU Small Finance, some HDFC exports).
     // These banks use one "Amount" column with +/- instead of separate Debit/Credit columns.
     // Only attempt this when both debit and credit came back null from their dedicated columns.
@@ -407,15 +421,96 @@ function rowsToTransactions(
 // ---- Public API ----
 
 export function parseCSV(content: string): BankTransaction[] {
-  // Fix unquoted comma-formatted amounts (e.g. "11,947.00" → "11,947.00" properly quoted)
-  // before PapaParse sees the content, preventing column-shift errors.
-  const fixed = fixUnquotedAmounts(content);
-  const result = Papa.parse<Record<string, string>>(fixed, {
-    header: true,
-    skipEmptyLines: true,
-    transformHeader: (h) => h.trim(),
-  });
-  return rowsToTransactions(result.data, result.meta.fields ?? []);
+  // ── Right-anchored CSV parsing ───────────────────────────────────────────
+  //
+  // WHY NOT PapaParse with header:true?
+  // PapaParse maps columns by position after splitting on commas. When an Indian
+  // bank's narration contains unquoted commas (e.g. "Paid via CRED,UPI-ref") the
+  // field count exceeds the header count, shifting every subsequent column. This
+  // produces wrong debit/credit/balance values regardless of any pre-processing,
+  // because a narration comma that happens to fill an empty credit slot produces
+  // exactly the expected column count — so no fix triggers.
+  //
+  // SOLUTION: split lines manually, lock the RIGHT end (numeric tail), join
+  // everything in the middle as narration. Column count no longer matters.
+
+  const lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+
+  // Find the header row: first line whose first field looks like a date column name
+  const headerLineIdx = lines.findIndex((l) => /^"?date/i.test(l.trim()));
+  if (headerLineIdx === -1) return [];
+
+  const headers = splitCsvLine(lines[headerLineIdx]).map((h) => h.replace(/^"|"$/g, "").trim());
+  const bankMap = detectBankMap(headers);
+  const rightFixed = computeNumericTailCount(headers);
+
+  // Map the tail header names to their semantic roles
+  const tailHeaders = headers.slice(headers.length - rightFixed);
+  const debitTailCol  = findColumn(tailHeaders, bankMap.debit);
+  const creditTailCol = findColumn(tailHeaders, bankMap.credit);
+  const balanceTailCol = findColumn(tailHeaders, bankMap.balance);
+
+  const transactions: BankTransaction[] = [];
+
+  for (let i = headerLineIdx + 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
+    const rawFields = splitCsvLine(line);
+    if (rawFields.length < 2) continue;
+
+    const { date: dateStr, narration, tail } = reconstructRow(rawFields, rightFixed);
+
+    // Validate date field
+    if (!dateStr || !/\d/.test(dateStr)) continue;
+
+    // Build a lookup from tail header name → tail value
+    const tailMap: Record<string, string> = {};
+    tailHeaders.forEach((h, idx) => { tailMap[h] = tail[idx] ?? ""; });
+
+    // Debit / credit from named tail columns
+    let debit  = parseAmount(debitTailCol  ? tailMap[debitTailCol]  : null);
+    let credit = parseAmount(creditTailCol ? tailMap[creditTailCol] : null);
+
+    // Some banks write negative values in the debit column (e.g. -3313.00).
+    // Debit is always a positive magnitude; the sign just indicates direction.
+    if (debit !== null && debit < 0) { debit = Math.abs(debit); }
+
+    // Signed single-amount column fallback (banks with one Amount column ±)
+    if (debit === null && credit === null) {
+      const amountTailCol = findColumn(tailHeaders, [
+        "amount", "transaction amount", "dr./cr.", "dr/cr", "debit/credit",
+        "withdrawal/deposit", "withdrawals/deposits",
+      ]);
+      if (amountTailCol) {
+        const raw = (tailMap[amountTailCol] ?? "")
+          .replace(/[₹,\s]/g, "")
+          .replace(/^\((.+)\)$/, "-$1");
+        const num = parseFloat(raw);
+        if (!isNaN(num) && num !== 0) {
+          if (num < 0) debit = Math.abs(num);
+          else credit = num;
+        }
+      }
+    }
+
+    if (debit === null && credit === null) continue;
+    if (/opening balance|closing balance/i.test(narration)) continue;
+
+    const utrFromNarration = extractUTR(narration);
+
+    transactions.push({
+      date: parseDate(dateStr),
+      narration: narration,
+      ref_number: utrFromNarration,
+      debit,
+      credit,
+      balance: parseAmount(balanceTailCol ? tailMap[balanceTailCol] : null),
+      raw_row: tailMap,
+    });
+  }
+
+  return transactions;
 }
 
 export function parseXLSX(buffer: ArrayBuffer): BankTransaction[] {
