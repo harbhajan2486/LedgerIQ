@@ -111,7 +111,13 @@ Skip all transactions up to and including that one. Continue from the next trans
     totalTokensOut += response.usage.output_tokens;
 
     const text = response.content[0].type === "text" ? response.content[0].text : "";
+    // Log first 5 lines of Claude's raw output so parsing issues are diagnosable
+    // without needing access to the original PDF. Visible in Vercel function logs.
+    const rawPreview = text.split("\n").slice(0, 5).join(" ||| ");
+    console.log(`[pdf-parse] pass=${pass} raw_preview: ${rawPreview}`);
+
     const batch = parseTsvLines(text);
+    console.log(`[pdf-parse] pass=${pass} parsed ${batch.length} rows, first:`, JSON.stringify(batch[0]));
 
     if (batch.length === 0) break;
     allTransactions.push(...batch);
