@@ -23,6 +23,9 @@ function parseCsvLines(text: string): ParsedTransaction[] {
 
   for (const line of dataLines) {
     const parts = line.split(",");
+    // Strip trailing empty fields — Claude sometimes appends a trailing comma,
+    // which shifts every column left by one (amount ends up in ref_number, etc.)
+    while (parts.length > 1 && parts[parts.length - 1].trim() === "") parts.pop();
     if (parts.length < 4) continue;
     // Format: date, narration (may span multiple commas), ref, debit, credit, balance
     // Take last 4 as ref/debit/credit/balance, rest between index 1 and -4 as narration
@@ -34,9 +37,11 @@ function parseCsvLines(text: string): ParsedTransaction[] {
     const ref_number = parts[parts.length - 4]?.trim();
     const narration = parts.slice(1, parts.length - 4).join(",").trim().replace(/;/g, ",") || parts[1]?.trim() || "";
     if (!narration) continue;
-    const debitNum = debit ? parseFloat(debit) || null : null;
+    let debitNum = debit ? parseFloat(debit) || null : null;
     const creditNum = credit ? parseFloat(credit) || null : null;
     const balanceNum = balance ? parseFloat(balance) || null : null;
+    // Some banks show debit as negative (e.g. -3313.00) — debit is always a positive magnitude
+    if (debitNum !== null && debitNum < 0) debitNum = Math.abs(debitNum);
     transactions.push({
       date,
       narration,
