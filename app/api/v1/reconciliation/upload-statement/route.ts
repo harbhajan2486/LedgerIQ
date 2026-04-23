@@ -49,7 +49,13 @@ function parseCsvLines(text: string): ParsedTransaction[] {
   return transactions;
 }
 
-async function parsePDFStatement(fileBytes: ArrayBuffer): Promise<ParsedTransaction[]> {
+interface PDFParseResult {
+  transactions: ParsedTransaction[];
+  tokensIn: number;
+  tokensOut: number;
+}
+
+async function parsePDFStatement(fileBytes: ArrayBuffer): Promise<PDFParseResult> {
   if (!process.env.ANTHROPIC_API_KEY) {
     throw new Error("ANTHROPIC_API_KEY is not set in Vercel environment variables.");
   }
@@ -74,6 +80,8 @@ Exact header: date,narration,ref_number,debit,credit,balance
 
   const allTransactions: ParsedTransaction[] = [];
   let afterCursor: { date: string; narration: string } | null = null;
+  let totalTokensIn = 0;
+  let totalTokensOut = 0;
 
   for (let pass = 0; pass < 4; pass++) {
     const promptText = pass === 0
@@ -98,6 +106,9 @@ Skip all transactions up to and including that one. Continue from the next trans
       }],
     });
 
+    totalTokensIn += response.usage.input_tokens;
+    totalTokensOut += response.usage.output_tokens;
+
     const text = response.content[0].type === "text" ? response.content[0].text : "";
     const batch = parseCsvLines(text);
 
@@ -110,7 +121,7 @@ Skip all transactions up to and including that one. Continue from the next trans
     afterCursor = { date: last.date, narration: last.narration };
   }
 
-  return allTransactions;
+  return { transactions: allTransactions, tokensIn: totalTokensIn, tokensOut: totalTokensOut };
 }
 
 // Tell Vercel this route needs more than the default 10s timeout
@@ -155,7 +166,17 @@ export async function POST(request: NextRequest) {
       transactions = parseXLSX(buffer);
     } else if (fileName.endsWith(".pdf")) {
       const buffer = await file.arrayBuffer();
-      transactions = await parsePDFStatement(buffer);
+      const pdfResult = await parsePDFStatement(buffer);
+      transactions = pdfResult.transactions;
+      // Haiku pricing: $0.80/MTok input, $4.00/MTok output
+      const costUsd = (pdfResult.tokensIn / 1_000_000) * 0.80 + (pdfResult.tokensOut / 1_000_000) * 4.00;
+      supabase.from("ai_usage").insert({
+        tenant_id: tenantId,
+        model: "claude-haiku-4-5-20251001",
+        tokens_in: pdfResult.tokensIn,
+        tokens_out: pdfResult.tokensOut,
+        cost_usd: costUsd,
+      }).then();
     } else {
       return NextResponse.json(
         { error: "Unsupported format. Upload CSV, Excel, or PDF bank statement." },
