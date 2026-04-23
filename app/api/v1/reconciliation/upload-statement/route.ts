@@ -48,6 +48,7 @@ interface PDFParseResult {
   transactions: ParsedTransaction[];
   tokensIn: number;
   tokensOut: number;
+  rawSample: string;   // first 8 lines of Claude's raw output for debugging
 }
 
 async function parsePDFStatement(fileBytes: ArrayBuffer): Promise<PDFParseResult> {
@@ -83,6 +84,7 @@ Rules:
   let afterCursor: { date: string; narration: string } | null = null;
   let totalTokensIn = 0;
   let totalTokensOut = 0;
+  let rawSample = "";
 
   for (let pass = 0; pass < 4; pass++) {
     const promptText = pass === 0
@@ -111,13 +113,9 @@ Skip all transactions up to and including that one. Continue from the next trans
     totalTokensOut += response.usage.output_tokens;
 
     const text = response.content[0].type === "text" ? response.content[0].text : "";
-    // Log first 5 lines of Claude's raw output so parsing issues are diagnosable
-    // without needing access to the original PDF. Visible in Vercel function logs.
-    const rawPreview = text.split("\n").slice(0, 5).join(" ||| ");
-    console.log(`[pdf-parse] pass=${pass} raw_preview: ${rawPreview}`);
+    if (pass === 0) rawSample = text.split("\n").slice(0, 8).join("\n");
 
     const batch = parseTsvLines(text);
-    console.log(`[pdf-parse] pass=${pass} parsed ${batch.length} rows, first:`, JSON.stringify(batch[0]));
 
     if (batch.length === 0) break;
     allTransactions.push(...batch);
@@ -128,7 +126,7 @@ Skip all transactions up to and including that one. Continue from the next trans
     afterCursor = { date: last.date, narration: last.narration };
   }
 
-  return { transactions: allTransactions, tokensIn: totalTokensIn, tokensOut: totalTokensOut };
+  return { transactions: allTransactions, tokensIn: totalTokensIn, tokensOut: totalTokensOut, rawSample };
 }
 
 // Tell Vercel this route needs more than the default 10s timeout
@@ -164,6 +162,7 @@ export async function POST(request: NextRequest) {
   }
 
   let transactions: ParsedTransaction[];
+  let pdfDebug: { raw_sample: string; parsed_sample: ParsedTransaction[] } | null = null;
   try {
     if (fileName.endsWith(".csv")) {
       const text = await file.text();
@@ -175,6 +174,7 @@ export async function POST(request: NextRequest) {
       const buffer = await file.arrayBuffer();
       const pdfResult = await parsePDFStatement(buffer);
       transactions = pdfResult.transactions;
+      pdfDebug = { raw_sample: pdfResult.rawSample, parsed_sample: pdfResult.transactions.slice(0, 3) };
       // Haiku pricing: $0.80/MTok input, $4.00/MTok output
       const costUsd = (pdfResult.tokensIn / 1_000_000) * 0.80 + (pdfResult.tokensOut / 1_000_000) * 4.00;
       supabase.from("ai_usage").insert({
@@ -457,5 +457,6 @@ export async function POST(request: NextRequest) {
     already_present: alreadyPresent,
     total_in_file: total,
     message,
+    ...(pdfDebug ? { debug: pdfDebug } : {}),
   });
 }
