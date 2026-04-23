@@ -490,7 +490,7 @@ export default function ClientDetailPage() {
       });
       const d = await res.json();
       if (res.ok) {
-        setBankUploadMsg({ type: "success", text: `Done — ${d.inserted ?? 0} new transactions added.` });
+        setBankUploadMsg({ type: "success", text: `Done — ${d.count ?? d.inserted ?? 0} new transactions added.` });
         if (bankUploadRef.current) bankUploadRef.current.value = "";
         loadBankTxns();
       } else {
