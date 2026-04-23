@@ -279,8 +279,10 @@ export async function POST(request: NextRequest) {
     const ledger_name = clientRules.get(pattern) ?? industryRules.get(pattern) ?? suggestLedger(txn.narration ?? "") ?? null;
     const { category, voucher_type } = categoryFromLedger(ledger_name, txn.narration ?? "", isDebit);
 
-    // Hash = bank + date + narration (normalised) + debit + credit for dedup
-    const hashStr = `${bankName}|${isoDate}|${(txn.narration ?? "").toLowerCase().trim()}|${txn.debit ?? ""}|${txn.credit ?? ""}`;
+    // Hash = bank + date + narration (normalised) + debit + credit + balance for dedup
+    // Balance included so genuinely identical-looking transactions (same date/amount/narration)
+    // that differ only in running balance still get unique hashes.
+    const hashStr = `${bankName}|${isoDate}|${(txn.narration ?? "").toLowerCase().trim()}|${txn.debit ?? ""}|${txn.credit ?? ""}|${txn.balance ?? ""}`;
     const hashBuf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(hashStr));
     const txnHash = Array.from(new Uint8Array(hashBuf)).map((b) => b.toString(16).padStart(2, "0")).join("");
     allHashes.push(txnHash);
@@ -385,7 +387,7 @@ export async function POST(request: NextRequest) {
 
   const { data: inserted, error: insertError } = await supabase
     .from("bank_transactions")
-    .insert(rowsToInsert)
+    .upsert(rowsToInsert, { onConflict: "txn_hash", ignoreDuplicates: true })
     .select("id");
 
   if (insertError) {
