@@ -387,7 +387,7 @@ export async function POST(request: NextRequest) {
 
   const { data: inserted, error: insertError } = await supabase
     .from("bank_transactions")
-    .upsert(rowsToInsert, { onConflict: "txn_hash", ignoreDuplicates: true })
+    .upsert(rowsToInsert, { onConflict: "tenant_id,txn_hash", ignoreDuplicates: true })
     .select("id");
 
   if (insertError) {
