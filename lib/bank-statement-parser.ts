@@ -58,7 +58,10 @@ function splitCsvLine(line: string): string[] {
  * Handles both international (1,234) and Indian lakh (1,23,456) formats in multiple passes.
  */
 function mergeNumericFragments(fields: string[], targetCount: number): string[] {
-  const isFragmentA = (s: string) => /^\d{1,3}(,\d{2,3})*$/.test(s);
+  // Allow optional leading +/- so that "+36" (from "+36,000.00") and "-11" merge correctly.
+  // The decimal-containing fragments (e.g. "967.39") must remain in isFragmentB only,
+  // so isFragmentA stays integer-only (no decimal) — this prevents merging across the wrong boundary.
+  const isFragmentA = (s: string) => /^[+\-]?\d{1,3}(,\d{2,3})*$/.test(s);
   const isFragmentB = (s: string) => /^\d{2,3}(?:\.\d{1,2})?$/.test(s);
 
   const result = [...fields];
@@ -358,8 +361,29 @@ function rowsToTransactions(
     const rawRef = refCol ? row[refCol] : null;
     const utrFromNarration = extractUTR(narration);
 
-    const debit = parseAmount(debitCol ? row[debitCol] : null);
-    const credit = parseAmount(creditCol ? row[creditCol] : null);
+    let debit = parseAmount(debitCol ? row[debitCol] : null);
+    let credit = parseAmount(creditCol ? row[creditCol] : null);
+
+    // Signed single-amount column fallback (Kotak, AU Small Finance, some HDFC exports).
+    // These banks use one "Amount" column with +/- instead of separate Debit/Credit columns.
+    // Only attempt this when both debit and credit came back null from their dedicated columns.
+    if (debit === null && credit === null) {
+      const amountCol = findColumn(headers, [
+        "amount", "transaction amount", "dr./cr.", "dr/cr", "debit/credit",
+        "withdrawal/deposit", "withdrawals/deposits",
+      ]);
+      if (amountCol && amountCol !== debitCol && amountCol !== creditCol) {
+        // Strip currency symbols, spaces, and thousand-commas; handle parenthesised negatives "(799.75)"
+        const raw = (row[amountCol] ?? "")
+          .replace(/[₹,\s]/g, "")
+          .replace(/^\((.+)\)$/, "-$1");  // (799.75) → -799.75
+        const num = parseFloat(raw);
+        if (!isNaN(num) && num !== 0) {
+          if (num < 0) debit = Math.abs(num);
+          else credit = num;
+        }
+      }
+    }
 
     // Every real bank transaction must have a debit or credit amount.
     // Rows with neither are metadata, summary totals, or repeated header rows — skip them all.
