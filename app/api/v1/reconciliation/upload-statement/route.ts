@@ -15,33 +15,23 @@ interface ParsedTransaction {
   balance: number | null;
 }
 
-function parseCsvLines(text: string): ParsedTransaction[] {
+function parseTsvLines(text: string): ParsedTransaction[] {
   const lines = text.trim().split("\n").filter((l) => l.trim());
   const transactions: ParsedTransaction[] = [];
-  const headerIdx = lines.findIndex((l) => /^date[,\t]/i.test(l.trim()));
-  const dataLines = headerIdx >= 0 ? lines.slice(headerIdx + 1) : lines;
+  // Skip header row if present
+  const dataLines = lines[0]?.toLowerCase().startsWith("date") ? lines.slice(1) : lines;
 
   for (const line of dataLines) {
-    const parts = line.split(",");
-    // Strip trailing empty fields — Claude sometimes appends a trailing comma,
-    // which shifts every column left by one (amount ends up in ref_number, etc.)
-    while (parts.length > 1 && parts[parts.length - 1].trim() === "") parts.pop();
-    if (parts.length < 4) continue;
-    // Format: date, narration (may span multiple commas), ref, debit, credit, balance
-    // Take last 4 as ref/debit/credit/balance, rest between index 1 and -4 as narration
-    const date = parts[0]?.trim();
+    const parts = line.split("\t").map((p) => p.trim());
+    if (parts.length < 5) continue; // need at least date,narration,ref,debit/credit,balance
+    const [date, narration, ref_number, debitStr, creditStr, balanceStr] = parts;
     if (!date || !/\d/.test(date)) continue;
-    const balance = parts[parts.length - 1]?.trim();
-    const credit = parts[parts.length - 2]?.trim();
-    const debit = parts[parts.length - 3]?.trim();
-    const ref_number = parts[parts.length - 4]?.trim();
-    const narration = parts.slice(1, parts.length - 4).join(",").trim().replace(/;/g, ",") || parts[1]?.trim() || "";
     if (!narration) continue;
-    let debitNum = debit ? parseFloat(debit) || null : null;
-    const creditNum = credit ? parseFloat(credit) || null : null;
-    const balanceNum = balance ? parseFloat(balance) || null : null;
-    // Some banks show debit as negative (e.g. -3313.00) — debit is always a positive magnitude
-    if (debitNum !== null && debitNum < 0) debitNum = Math.abs(debitNum);
+    let debitNum = debitStr ? parseFloat(debitStr.replace(/[₹,\s]/g, "")) || null : null;
+    let creditNum = creditStr ? parseFloat(creditStr.replace(/[₹,\s]/g, "")) || null : null;
+    const balanceNum = balanceStr ? parseFloat(balanceStr.replace(/[₹,\s]/g, "")) || null : null;
+    if (debitNum !== null && debitNum < 0) { creditNum = Math.abs(debitNum); debitNum = null; }
+    if (creditNum !== null && creditNum < 0) { debitNum = Math.abs(creditNum); creditNum = null; }
     transactions.push({
       date,
       narration,
@@ -74,14 +64,20 @@ async function parsePDFStatement(fileBytes: ArrayBuffer): Promise<PDFParseResult
   }
   const base64 = btoa(binary);
 
-  const CSV_PROMPT = `Extract bank transactions from this statement. Return ONLY a CSV, no markdown, no explanation.
+  // TSV (tab-separated) avoids ALL comma ambiguity — narration and balance values
+  // can contain commas freely; tabs never appear in bank statement text.
+  const TSV_PROMPT = `Extract bank transactions from this statement. Return ONLY tab-separated values (TSV), no markdown, no explanation, no code block.
 
-Exact header: date,narration,ref_number,debit,credit,balance
+Exact header line: date\tnarration\tref_number\tdebit\tcredit\tbalance
+Rules:
 - date: DD/MM/YYYY
-- narration: replace any commas with semicolons
-- ref_number: UTR/cheque/ref or empty
-- debit/credit/balance: number or empty
-- Skip opening balance, closing balance rows`;
+- narration: full text exactly as printed, keep any commas as-is
+- ref_number: UTR/cheque/ref number or leave empty
+- debit: withdrawal amount as positive number or empty
+- credit: deposit amount as positive number or empty
+- balance: closing balance as number or empty
+- Skip opening balance and closing balance summary rows
+- Separate every field with a TAB character, not a comma`;
 
   const allTransactions: ParsedTransaction[] = [];
   let afterCursor: { date: string; narration: string } | null = null;
@@ -90,8 +86,8 @@ Exact header: date,narration,ref_number,debit,credit,balance
 
   for (let pass = 0; pass < 4; pass++) {
     const promptText = pass === 0
-      ? CSV_PROMPT
-      : `${CSV_PROMPT}
+      ? TSV_PROMPT
+      : `${TSV_PROMPT}
 
 IMPORTANT: Only extract transactions that appear AFTER this transaction in the statement:
 Date: ${afterCursor!.date}
@@ -115,7 +111,7 @@ Skip all transactions up to and including that one. Continue from the next trans
     totalTokensOut += response.usage.output_tokens;
 
     const text = response.content[0].type === "text" ? response.content[0].text : "";
-    const batch = parseCsvLines(text);
+    const batch = parseTsvLines(text);
 
     if (batch.length === 0) break;
     allTransactions.push(...batch);
