@@ -449,7 +449,11 @@ export function parseCSV(content: string): BankTransaction[] {
   const headerLineIdx = lines.findIndex((l) => isHeaderLine(l.trim()));
   if (headerLineIdx === -1) return [];
 
-  const headers = splitCsvLine(lines[headerLineIdx]).map((h) => h.replace(/^"|"$/g, "").trim());
+  const rawHeaderFields = splitCsvLine(lines[headerLineIdx]).map((h) => h.replace(/^"|"$/g, "").trim());
+  // Strip trailing empty columns — many Indian bank CSVs end every line with a
+  // trailing comma, producing a phantom empty column that breaks right-anchoring.
+  while (rawHeaderFields.length > 0 && rawHeaderFields[rawHeaderFields.length - 1] === "") rawHeaderFields.pop();
+  const headers = rawHeaderFields;
   const bankMap = detectBankMap(headers);
   const rightFixed = computeNumericTailCount(headers);
   // Debug: log what the parser detected (visible in Vercel function logs)
@@ -468,6 +472,8 @@ export function parseCSV(content: string): BankTransaction[] {
     if (!line) continue;
 
     const rawFields = splitCsvLine(line);
+    // Strip trailing empty fields (trailing comma on every data row)
+    while (rawFields.length > 1 && rawFields[rawFields.length - 1] === "") rawFields.pop();
     if (rawFields.length < 2) continue;
 
     const { date: dateStr, narration, tail } = reconstructRow(rawFields, rightFixed);
