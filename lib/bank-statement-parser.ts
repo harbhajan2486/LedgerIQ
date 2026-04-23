@@ -436,13 +436,24 @@ export function parseCSV(content: string): BankTransaction[] {
 
   const lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
 
-  // Find the header row: first line whose first field looks like a date column name
-  const headerLineIdx = lines.findIndex((l) => /^"?date/i.test(l.trim()));
+  // Find the header row: the line that contains BOTH a date-like column name AND
+  // at least one amount-like column name anywhere in the row.
+  // This handles banks that prefix with account info rows, and banks whose first
+  // column is "Txn Date", "Transaction Date", "Sr No", etc.
+  const isHeaderLine = (l: string) => {
+    const lower = l.toLowerCase();
+    const hasDate = /\bdate\b|\btxn\b|\bsl\.?\s*no\b/.test(lower);
+    const hasAmount = /balance|withdrawal|deposit|debit|credit|amount/.test(lower);
+    return hasDate && hasAmount;
+  };
+  const headerLineIdx = lines.findIndex((l) => isHeaderLine(l.trim()));
   if (headerLineIdx === -1) return [];
 
   const headers = splitCsvLine(lines[headerLineIdx]).map((h) => h.replace(/^"|"$/g, "").trim());
   const bankMap = detectBankMap(headers);
   const rightFixed = computeNumericTailCount(headers);
+  // Debug: log what the parser detected (visible in Vercel function logs)
+  console.log(`[CSV parser] headers=${JSON.stringify(headers)}, rightFixed=${rightFixed}`);
 
   // Map the tail header names to their semantic roles
   const tailHeaders = headers.slice(headers.length - rightFixed);
