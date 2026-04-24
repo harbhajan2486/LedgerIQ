@@ -200,7 +200,7 @@ export default function ClientDetailPage() {
   const [wipeDialogOpen, setWipeDialogOpen] = useState(false);
   const [deleteDocTarget, setDeleteDocTarget] = useState<{ id: string; fileName: string } | null>(null);
   const [showCategorised, setShowCategorised] = useState(false);
-  const [reconTab, setReconTab] = useState<"matched" | "possible" | "unmatched">("unmatched");
+  const [reconTab, setReconTab] = useState<"matched" | "possible" | "unmatched" | "invoices">("unmatched");
   const [reconFilter, setReconFilter] = useState("");
   const [bankFilter, setBankFilter] = useState("");
   const [linkingTxn, setLinkingTxn] = useState<BankTxn | null>(null);
@@ -966,9 +966,6 @@ export default function ClientDetailPage() {
               Review {pendingCount} pending
             </Link>
           )}
-          <Link href={`/upload?client=${clientId}`} className={buttonVariants()}>
-            <Upload size={14} className="mr-1.5" /> Upload document
-          </Link>
         </div>
       </div>
 
@@ -1346,8 +1343,8 @@ export default function ClientDetailPage() {
                     </div>
                   )}
                   {reconData.summary.unmatched_invoices > 0 && (
-                    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-50 border border-blue-200 text-xs font-medium text-blue-700">
-                      {reconData.summary.unmatched_invoices} invoice{reconData.summary.unmatched_invoices !== 1 ? "s" : ""} awaiting payment
+                    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-50 border border-blue-200 text-xs font-medium text-blue-700 cursor-pointer hover:bg-blue-100" onClick={() => setReconTab("invoices")}>
+                      <FileText size={12} /> {reconData.summary.unmatched_invoices} invoice{reconData.summary.unmatched_invoices !== 1 ? "s" : ""} awaiting payment
                     </div>
                   )}
                 </div>
@@ -1368,6 +1365,10 @@ export default function ClientDetailPage() {
             <button onClick={() => setReconTab("matched")}
               className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${reconTab === "matched" ? "border-blue-500 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
               Invoice matched {reconData && <span className="ml-1 bg-gray-100 text-gray-500 text-xs px-1.5 py-0.5 rounded-full">{reconData.summary.matched}</span>}
+            </button>
+            <button onClick={() => setReconTab("invoices")}
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${reconTab === "invoices" ? "border-blue-500 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
+              Unmatched invoices {reconData && reconData.summary.unmatched_invoices > 0 && <span className="ml-1 bg-blue-100 text-blue-700 text-xs px-1.5 py-0.5 rounded-full font-semibold">{reconData.summary.unmatched_invoices}</span>}
             </button>
           </div>
 
@@ -1684,42 +1685,50 @@ export default function ClientDetailPage() {
                       {showCategorised && <TxnTable txns={categorised} dimmed />}
                     </CardContent></Card>
                   )}
-                  <Card><CardContent className="p-0">
-                    <div className="px-4 py-3 border-b bg-gray-50 text-xs font-semibold text-gray-600">
-                      Invoices without payment ({reconData?.unmatched_invoices.length ?? 0})
-                    </div>
-                    {(reconData?.unmatched_invoices ?? []).length === 0 ? (
-                      <div className="py-8 text-center text-gray-400 text-sm">All invoices are reconciled.</div>
-                    ) : (
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-xs">
-                          <thead><tr className="border-b bg-gray-50 text-gray-500">
-                            <th className="text-left px-4 py-2 font-medium">File</th>
-                            <th className="text-left px-4 py-2 font-medium">Type</th>
-                            <th className="text-left px-4 py-2 font-medium">Status</th>
-                            <th className="text-right px-4 py-2 font-medium">Amount</th>
-                          </tr></thead>
-                          <tbody>
-                            {(reconData?.unmatched_invoices ?? []).map((doc) => (
-                              <tr key={doc.id} className="border-b hover:bg-gray-50">
-                                <td className="px-4 py-2 font-medium text-gray-900 max-w-[220px] truncate">{doc.original_filename}</td>
-                                <td className="px-4 py-2 text-gray-500 capitalize">{doc.document_type?.replace(/_/g, " ")}</td>
-                                <td className="px-4 py-2">
-                                  <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${doc.status === "reviewed" ? "bg-green-50 text-green-700" : "bg-amber-50 text-amber-700"}`}>
-                                    {doc.status === "reviewed" ? "Reviewed" : "Pending review"}
-                                  </span>
-                                </td>
-                                <td className="px-4 py-2 text-right font-semibold text-gray-700">{doc.total_amount ? `₹${Number(doc.total_amount).toLocaleString("en-IN")}` : "—"}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                  </CardContent></Card>
                 </div>
                 );
               })()}
+              {reconTab === "invoices" && (
+                <Card><CardContent className="p-0">
+                  {(reconData?.unmatched_invoices ?? []).length === 0 ? (
+                    <div className="py-12 text-center">
+                      <CheckCircle2 size={24} className="text-green-500 mx-auto mb-2" />
+                      <p className="text-sm text-gray-500">All invoices have been reconciled.</p>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="border-b bg-gray-50 text-gray-500 uppercase tracking-wide text-[11px]">
+                            <th className="text-left px-4 py-2.5 font-semibold">File</th>
+                            <th className="text-left px-4 py-2.5 font-semibold">Type</th>
+                            <th className="text-left px-4 py-2.5 font-semibold">Status</th>
+                            <th className="text-right px-4 py-2.5 font-semibold">Amount</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(reconData?.unmatched_invoices ?? []).map((doc) => (
+                            <tr key={doc.id} className="border-b hover:bg-gray-50">
+                              <td className="px-4 py-3 font-medium text-gray-900 max-w-[260px]">
+                                <p className="truncate">{doc.original_filename}</p>
+                              </td>
+                              <td className="px-4 py-3 text-gray-500 capitalize whitespace-nowrap">{doc.document_type?.replace(/_/g, " ")}</td>
+                              <td className="px-4 py-3">
+                                <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${doc.status === "reviewed" ? "bg-green-50 text-green-700" : "bg-amber-50 text-amber-700"}`}>
+                                  {doc.status === "reviewed" ? "Reviewed" : "Pending review"}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3 text-right font-semibold text-gray-700 whitespace-nowrap">
+                                {doc.total_amount ? `₹${Number(doc.total_amount).toLocaleString("en-IN")}` : "—"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </CardContent></Card>
+              )}
             </>
           )}
         </div>
