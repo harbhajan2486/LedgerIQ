@@ -2644,6 +2644,7 @@ export default function ClientDetailPage() {
                   No ledgers yet. Add one above or click "Load 25 common ledgers".
                 </div>
               ) : (
+                <>
                 {/* Bulk action bar */}
                 {selectedLedgerIds.size > 0 && (
                   <div className="flex items-center gap-3 px-4 py-2 bg-indigo-50 border-b border-indigo-100">
@@ -2720,6 +2721,7 @@ export default function ClientDetailPage() {
                     ))}
                   </tbody>
                 </table>
+                </>
               )}
             </CardContent>
           </Card>
