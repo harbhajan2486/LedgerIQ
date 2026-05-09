@@ -122,8 +122,8 @@ function parseTallyRawArrays(
     if (/^(particulars|ledger|name|debit|credit|dr|cr|closing|opening)$/i.test(name)) continue;
     if (name.length > 150) { skipped.push(name.slice(0, 30) + "…"); continue; }
 
-    const drAmt = parseAmt(row[1]);
-    const crAmt = parseAmt(row[2]);
+    const drAmt = parseAmt(row[1] as string | number | null);
+    const crAmt = parseAmt(row[2] as string | number | null);
 
     const hasDr = drAmt !== null && drAmt > 0;
     const hasCr = crAmt !== null && crAmt > 0;
