@@ -217,7 +217,7 @@ export default function ClientDetailPage() {
   const [claimSaving, setClaimSaving] = useState(false);
 
   // Ledger master state
-  const [ledgers, setLedgers] = useState<{ id: string; ledger_name: string; ledger_type: string }[]>([]);
+  const [ledgers, setLedgers] = useState<{ id: string; ledger_name: string; ledger_type: string; closing_balance?: number | null; balance_type?: string | null; financial_year?: string | null }[]>([]);
   const [ledgersLoading, setLedgersLoading] = useState(false);
   const [newLedgerName, setNewLedgerName] = useState("");
   const [newLedgerType, setNewLedgerType] = useState("expense");
@@ -225,6 +225,12 @@ export default function ClientDetailPage() {
   const [seedingLedgers, setSeedingLedgers] = useState(false);
   const [reapplying, setReapplying] = useState(false);
   const [importingLedgers, setImportingLedgers] = useState(false);
+  const [trialBalanceFY, setTrialBalanceFY] = useState(() => {
+    // Default to current Indian financial year e.g. "2024-25"
+    const now = new Date();
+    const yr = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+    return `${yr}-${String(yr + 1).slice(-2)}`;
+  });
   const ledgerImportRef = useRef<HTMLInputElement>(null);
 
   // Ledger mapping rules state
@@ -788,10 +794,12 @@ export default function ClientDetailPage() {
     setImportingLedgers(true);
     const fd = new FormData();
     fd.append("file", file);
+    fd.append("financial_year", trialBalanceFY);
     const res = await fetch(`/api/v1/clients/${clientId}/ledgers/import`, { method: "POST", body: fd });
     const d = await res.json();
     if (res.ok) {
-      toast.success(`Imported ${d.imported} ledgers${d.skipped > 0 ? ` (${d.skipped} skipped)` : ""}`);
+      const balanceNote = d.has_balance_data ? " with balances" : "";
+      toast.success(`Imported ${d.imported} ledgers${balanceNote}${d.skipped > 0 ? ` (${d.skipped} skipped)` : ""}`);
       loadLedgers();
     } else {
       toast.error(d.error ?? "Could not import ledgers");
@@ -2530,10 +2538,20 @@ export default function ClientDetailPage() {
             </div>
             <div className="flex items-center gap-2">
               <input ref={ledgerImportRef} type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={importLedgers} />
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs text-gray-500">FY</span>
+                <input
+                  type="text"
+                  value={trialBalanceFY}
+                  onChange={e => setTrialBalanceFY(e.target.value)}
+                  placeholder="2024-25"
+                  className="w-20 text-xs border border-gray-300 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                />
+              </div>
               <button onClick={() => ledgerImportRef.current?.click()} disabled={importingLedgers}
                 className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
                 {importingLedgers ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />}
-                Import from Tally
+                Import Trial Balance
               </button>
               <button onClick={seedLedgers} disabled={seedingLedgers}
                 className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
@@ -2588,13 +2606,17 @@ export default function ClientDetailPage() {
                     <tr className="border-b bg-gray-50">
                       <th className="text-left px-5 py-3 text-xs font-medium text-gray-500">Ledger Name</th>
                       <th className="text-left px-4 py-3 text-xs font-medium text-gray-500">Type</th>
+                      <th className="text-right px-4 py-3 text-xs font-medium text-gray-500">Closing Balance</th>
                       <th className="px-4 py-3" />
                     </tr>
                   </thead>
                   <tbody>
                     {ledgers.map((l) => (
                       <tr key={l.id} className="border-b last:border-0 hover:bg-gray-50/50">
-                        <td className="px-5 py-2.5 font-medium text-gray-800">{l.ledger_name}</td>
+                        <td className="px-5 py-2.5 font-medium text-gray-800">
+                          {l.ledger_name}
+                          {l.financial_year && <span className="ml-2 text-[10px] text-gray-400">FY {l.financial_year}</span>}
+                        </td>
                         <td className="px-4 py-2.5">
                           <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
                             l.ledger_type === "expense"   ? "bg-red-50 text-red-700" :
@@ -2604,6 +2626,14 @@ export default function ClientDetailPage() {
                             l.ledger_type === "bank"      ? "bg-blue-50 text-blue-700" :
                             "bg-gray-100 text-gray-600"
                           }`}>{l.ledger_type}</span>
+                        </td>
+                        <td className="px-4 py-2.5 text-right text-sm">
+                          {l.closing_balance != null ? (
+                            <span className={l.balance_type === "Cr" ? "text-green-700 font-medium" : "text-red-700 font-medium"}>
+                              ₹{Number(l.closing_balance).toLocaleString("en-IN")}
+                              <span className="ml-1 text-[10px] font-normal opacity-70">{l.balance_type}</span>
+                            </span>
+                          ) : <span className="text-gray-300">—</span>}
                         </td>
                         <td className="px-4 py-2.5 text-right">
                           <button onClick={() => deleteLedger(l.id)} className="text-gray-300 hover:text-red-500 transition-colors">

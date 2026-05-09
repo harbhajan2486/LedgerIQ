@@ -54,7 +54,16 @@ const VALID_TYPES = new Set(["expense","income","asset","liability","capital","b
 
 function mapTallyGroup(group: string): string {
   const key = (group ?? "").toLowerCase().trim();
-  return TALLY_GROUP_MAP[key] ?? "expense"; // default to expense if unknown group
+  return TALLY_GROUP_MAP[key] ?? "expense";
+}
+
+/** Parse a numeric amount string — strips ₹, commas, whitespace, handles (negative) */
+function parseAmt(val: string | undefined | null): number | null {
+  if (!val) return null;
+  const s = String(val).replace(/[₹,\s]/g, "").replace(/^\((.+)\)$/, "-$1").trim();
+  if (!s || s === "-") return null;
+  const n = parseFloat(s);
+  return isNaN(n) ? null : Math.abs(n); // always store magnitude; balance_type carries Dr/Cr
 }
 
 export async function POST(
@@ -72,6 +81,8 @@ export async function POST(
 
   const formData = await request.formData();
   const file = formData.get("file") as File | null;
+  const financialYear = (formData.get("financial_year") as string | null)?.trim() || null;
+
   if (!file) return NextResponse.json({ error: "No file provided" }, { status: 400 });
 
   const fileName = file.name.toLowerCase();
@@ -98,44 +109,110 @@ export async function POST(
 
   if (rows.length === 0) return NextResponse.json({ error: "No rows found in file" }, { status: 400 });
 
-  // Detect columns — Tally export uses various column names
   const firstRow = rows[0];
   const cols = Object.keys(firstRow).map((k) => k.toLowerCase().trim());
 
-  const nameCol  = Object.keys(firstRow).find((k) => /^name$|^ledger\s*name$|^ledger$/i.test(k.trim()));
-  const groupCol = Object.keys(firstRow).find((k) => /^under$|^group$|^parent\s*group$|^under\s*group$/i.test(k.trim()));
-  const typeCol  = Object.keys(firstRow).find((k) => /^type$|^ledger\s*type$/i.test(k.trim()));
+  // ── Column detection ───────────────────────────────────────────────────────
+  const nameCol  = Object.keys(firstRow).find((k) => /^(name|ledger\s*name|ledger|particulars)$/i.test(k.trim()));
+  const groupCol = Object.keys(firstRow).find((k) => /^(under|group|parent\s*group|under\s*group)$/i.test(k.trim()));
+  const typeCol  = Object.keys(firstRow).find((k) => /^(type|ledger\s*type)$/i.test(k.trim()));
 
   if (!nameCol) {
     return NextResponse.json({
-      error: `Could not find ledger name column. Found columns: ${cols.join(", ")}. Expected "Name" or "Ledger Name".`,
+      error: `Could not find ledger name column. Found: ${cols.join(", ")}. Expected "Name", "Ledger Name", or "Particulars".`,
     }, { status: 400 });
   }
 
-  const ledgerRows: { tenant_id: string; client_id: string; ledger_name: string; ledger_type: string }[] = [];
+  // Balance column detection — Tally exports vary significantly:
+  // Format A: single "Closing Balance" col + "Dr/Cr" col
+  // Format B: "Closing Balance (Dr)" + "Closing Balance (Cr)" (two cols)
+  // Format C: "Debit" + "Credit" (net trial balance style)
+  const closingCol    = Object.keys(firstRow).find((k) => /closing\s*bal/i.test(k));
+  const drCrCol       = Object.keys(firstRow).find((k) => /^(dr\/?cr|type|dr\.?\/cr\.?)$/i.test(k.trim()) && !/ledger/i.test(k));
+  const closingDrCol  = Object.keys(firstRow).find((k) => /closing.*dr|debit.*closing/i.test(k));
+  const closingCrCol  = Object.keys(firstRow).find((k) => /closing.*cr|credit.*closing/i.test(k));
+  const openingCol    = Object.keys(firstRow).find((k) => /opening\s*bal/i.test(k));
+  const openingDrCol  = Object.keys(firstRow).find((k) => /opening.*dr|debit.*opening/i.test(k));
+  const openingCrCol  = Object.keys(firstRow).find((k) => /opening.*cr|credit.*opening/i.test(k));
+  // Simple debit/credit columns (net trial balance)
+  const debitCol  = !closingDrCol ? Object.keys(firstRow).find((k) => /^debit$|^dr$/i.test(k.trim())) : undefined;
+  const creditCol = !closingCrCol ? Object.keys(firstRow).find((k) => /^credit$|^cr$/i.test(k.trim())) : undefined;
+
+  const hasBalanceData = !!(closingCol || closingDrCol || closingCrCol || debitCol || creditCol);
+
+  // ── Build rows ─────────────────────────────────────────────────────────────
+  type LedgerRow = {
+    tenant_id: string;
+    client_id: string;
+    ledger_name: string;
+    ledger_type: string;
+    tally_group: string | null;
+    financial_year: string | null;
+    closing_balance: number | null;
+    balance_type: "Dr" | "Cr" | null;
+    opening_balance: number | null;
+  };
+
+  const ledgerRows: LedgerRow[] = [];
   const skipped: string[] = [];
 
   for (const row of rows) {
     const name = String(row[nameCol] ?? "").trim();
-    if (!name || name.toLowerCase() === "name" || name.toLowerCase() === "ledger name") continue; // skip header rows
+    if (!name || /^(name|ledger\s*name|particulars)$/i.test(name)) continue;
+    if (name.length > 150) { skipped.push(name.slice(0, 30) + "…"); continue; }
 
+    // Ledger type
     let ledgerType = "expense";
-
+    const rawGroup = groupCol ? String(row[groupCol] ?? "").trim() : null;
     if (typeCol && VALID_TYPES.has(String(row[typeCol]).toLowerCase().trim())) {
-      // Already in our format
       ledgerType = String(row[typeCol]).toLowerCase().trim();
-    } else if (groupCol) {
-      // Map from Tally Group name
-      ledgerType = mapTallyGroup(String(row[groupCol] ?? ""));
+    } else if (rawGroup) {
+      ledgerType = mapTallyGroup(rawGroup);
     }
 
-    if (name.length > 100) { skipped.push(name.slice(0, 30) + "…"); continue; }
+    // Balance resolution — try each format in order of specificity
+    let closingBalance: number | null = null;
+    let balanceType: "Dr" | "Cr" | null = null;
+    let openingBalance: number | null = null;
+
+    if (closingDrCol || closingCrCol) {
+      // Format B: separate Dr / Cr closing balance columns
+      const drAmt = parseAmt(closingDrCol ? row[closingDrCol] : null);
+      const crAmt = parseAmt(closingCrCol ? row[closingCrCol] : null);
+      if (drAmt && drAmt > 0) { closingBalance = drAmt; balanceType = "Dr"; }
+      else if (crAmt && crAmt > 0) { closingBalance = crAmt; balanceType = "Cr"; }
+
+      if (openingDrCol || openingCrCol) {
+        const oDr = parseAmt(openingDrCol ? row[openingDrCol] : null);
+        const oCr = parseAmt(openingCrCol ? row[openingCrCol] : null);
+        openingBalance = (oDr && oDr > 0) ? oDr : (oCr && oCr > 0 ? oCr : null);
+      }
+    } else if (closingCol) {
+      // Format A: single closing balance + Dr/Cr indicator column
+      closingBalance = parseAmt(row[closingCol]);
+      if (drCrCol) {
+        const indicator = String(row[drCrCol] ?? "").trim().toUpperCase();
+        balanceType = indicator === "CR" || indicator === "C" ? "Cr" : "Dr";
+      }
+      if (openingCol) openingBalance = parseAmt(row[openingCol]);
+    } else if (debitCol || creditCol) {
+      // Format C: simple Debit / Credit columns
+      const drAmt = parseAmt(debitCol ? row[debitCol] : null);
+      const crAmt = parseAmt(creditCol ? row[creditCol] : null);
+      if (drAmt && drAmt > 0) { closingBalance = drAmt; balanceType = "Dr"; }
+      else if (crAmt && crAmt > 0) { closingBalance = crAmt; balanceType = "Cr"; }
+    }
 
     ledgerRows.push({
       tenant_id: profile.tenant_id,
       client_id: clientId,
       ledger_name: name,
       ledger_type: ledgerType,
+      tally_group: rawGroup || null,
+      financial_year: financialYear,
+      closing_balance: closingBalance,
+      balance_type: balanceType,
+      opening_balance: openingBalance,
     });
   }
 
@@ -145,7 +222,7 @@ export async function POST(
 
   const { error } = await supabase
     .from("ledger_masters")
-    .upsert(ledgerRows, { onConflict: "tenant_id,client_id,ledger_name", ignoreDuplicates: true });
+    .upsert(ledgerRows, { onConflict: "tenant_id,client_id,ledger_name", ignoreDuplicates: false });
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
@@ -153,5 +230,7 @@ export async function POST(
     imported: ledgerRows.length,
     skipped: skipped.length,
     skipped_names: skipped.slice(0, 5),
+    has_balance_data: hasBalanceData,
+    financial_year: financialYear,
   });
 }
