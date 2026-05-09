@@ -58,13 +58,133 @@ function mapTallyGroup(group: string): string {
 }
 
 /** Parse a numeric amount string — strips ₹, commas, whitespace, handles (negative) */
-function parseAmt(val: string | undefined | null): number | null {
-  if (!val) return null;
+function parseAmt(val: string | number | undefined | null): number | null {
+  if (val === null || val === undefined || val === "") return null;
+  if (typeof val === "number") return isNaN(val) ? null : Math.abs(val);
   const s = String(val).replace(/[₹,\s]/g, "").replace(/^\((.+)\)$/, "-$1").trim();
   if (!s || s === "-") return null;
   const n = parseFloat(s);
-  return isNaN(n) ? null : Math.abs(n); // always store magnitude; balance_type carries Dr/Cr
+  return isNaN(n) ? null : Math.abs(n);
 }
+
+/**
+ * Parse a Tally trial balance Excel in "raw array" mode.
+ *
+ * Tally exports look like:
+ *   Row 0: ["Company Name","",""]          ← metadata
+ *   Row 1: ["Trial Balance","",""]         ← metadata
+ *   Row 2: ["1-Apr-23 to 31-Mar-24","",""] ← metadata
+ *   Row 3: ["","Company Name",""]          ← metadata
+ *   Row 4: ["Particulars","Period",""]     ← metadata
+ *   Row 5: ["","Closing Balance",""]       ← metadata
+ *   Row 6: ["","Debit","Credit"]           ← column headers (not always here)
+ *   Row 7: ["Capital Account","",195313.99] ← GROUP row (only one side has value)
+ *   Row 8: ["  Ledger Name",50000,""]      ← individual ledger (indented name)
+ *   ...
+ *
+ * Group rows: col[0] has a name, AND col[1] + col[2] are BOTH non-zero
+ *             OR the name matches a known Tally group
+ * Ledger rows: col[0] has a name, and ONLY col[1] OR col[2] is non-zero
+ */
+function parseTallyRawArrays(
+  rawRows: unknown[][],
+  financialYear: string | null
+): { ledgers: LedgerRow[]; skipped: string[]; tenantId?: string; clientId?: string } {
+  const ledgers: LedgerRow[] = [];
+  const skipped: string[] = [];
+
+  // Find data start: first row where col[0] is non-empty string AND (col[1] or col[2] is a number)
+  let dataStart = -1;
+  for (let i = 0; i < rawRows.length; i++) {
+    const row = rawRows[i];
+    const name = String(row[0] ?? "").trim();
+    if (!name) continue;
+    const c1 = row[1];
+    const c2 = row[2];
+    const c1IsNum = typeof c1 === "number" || (typeof c1 === "string" && c1.trim() !== "" && !isNaN(parseFloat(c1.replace(/[₹,\s]/g, ""))));
+    const c2IsNum = typeof c2 === "number" || (typeof c2 === "string" && c2.trim() !== "" && !isNaN(parseFloat(c2.replace(/[₹,\s]/g, ""))));
+    if (c1IsNum || c2IsNum) {
+      dataStart = i;
+      break;
+    }
+  }
+
+  if (dataStart === -1) return { ledgers, skipped };
+
+  let currentGroup = "";
+
+  for (let i = dataStart; i < rawRows.length; i++) {
+    const row = rawRows[i];
+    const name = String(row[0] ?? "").trim();
+    if (!name) continue;
+
+    // Skip header-like rows
+    if (/^(particulars|ledger|name|debit|credit|dr|cr|closing|opening)$/i.test(name)) continue;
+    if (name.length > 150) { skipped.push(name.slice(0, 30) + "…"); continue; }
+
+    const drAmt = parseAmt(row[1]);
+    const crAmt = parseAmt(row[2]);
+
+    const hasDr = drAmt !== null && drAmt > 0;
+    const hasCr = crAmt !== null && crAmt > 0;
+
+    // Group row: BOTH sides have values → this is a subtotal/group row
+    // Track it as the current group context, don't import as a ledger
+    if (hasDr && hasCr) {
+      currentGroup = name;
+      continue;
+    }
+
+    // Also detect group by name matching TALLY_GROUP_MAP
+    const nameKey = name.toLowerCase().trim();
+    if (TALLY_GROUP_MAP[nameKey] !== undefined && !hasDr && !hasCr) {
+      // Group name with no balances — just update context
+      currentGroup = name;
+      continue;
+    }
+
+    // Individual ledger row
+    let closingBalance: number | null = null;
+    let balanceType: "Dr" | "Cr" | null = null;
+
+    if (hasDr) {
+      closingBalance = drAmt!;
+      balanceType = "Dr";
+    } else if (hasCr) {
+      closingBalance = crAmt!;
+      balanceType = "Cr";
+    }
+    // If neither side has a value, still import with null balance (ledger exists but zero balance)
+
+    const ledgerType = currentGroup ? mapTallyGroup(currentGroup) : "expense";
+
+    ledgers.push({
+      tenant_id: "", // filled by caller
+      client_id: "",  // filled by caller
+      ledger_name: name,
+      ledger_type: ledgerType,
+      tally_group: currentGroup || null,
+      financial_year: financialYear,
+      closing_balance: closingBalance,
+      balance_type: balanceType,
+      opening_balance: null,
+    });
+  }
+
+  return { ledgers, skipped };
+}
+
+type LedgerRow = {
+  tenant_id: string;
+  client_id: string;
+  ledger_name: string;
+  ledger_type: string;
+  tally_group: string | null;
+  financial_year: string | null;
+  closing_balance: number | null;
+  balance_type: "Dr" | "Cr" | null;
+  opening_balance: number | null;
+};
 
 export async function POST(
   request: NextRequest,
@@ -88,18 +208,13 @@ export async function POST(
   const fileName = file.name.toLowerCase();
   const buffer = await file.arrayBuffer();
 
-  let rows: Record<string, string>[] = [];
-
+  let wb: XLSX.WorkBook;
   try {
     if (fileName.endsWith(".csv")) {
       const text = new TextDecoder().decode(buffer);
-      const wb = XLSX.read(text, { type: "string" });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      rows = XLSX.utils.sheet_to_json<Record<string, string>>(ws, { defval: "" });
+      wb = XLSX.read(text, { type: "string" });
     } else if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
-      const wb = XLSX.read(buffer, { type: "array" });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      rows = XLSX.utils.sheet_to_json<Record<string, string>>(ws, { defval: "" });
+      wb = XLSX.read(buffer, { type: "array" });
     } else {
       return NextResponse.json({ error: "Upload CSV or Excel file" }, { status: 400 });
     }
@@ -107,12 +222,59 @@ export async function POST(
     return NextResponse.json({ error: "Could not read file" }, { status: 400 });
   }
 
+  const ws = wb.Sheets[wb.SheetNames[0]];
+
+  // ── Try raw array mode first (Tally trial balance format) ─────────────────
+  const rawRows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: "" });
+
+  if (rawRows.length === 0) {
+    return NextResponse.json({ error: "No rows found in file" }, { status: 400 });
+  }
+
+  // Detect if this looks like a Tally trial balance (raw array with numeric columns 1 and 2)
+  // vs a structured CSV with named columns like "Name", "Type", "Closing Balance"
+  // Heuristic: check if first row has 3 or fewer columns and column 0 is a company name (not a header)
+  const firstRowHasHeaders = rawRows.some(r =>
+    /^(name|ledger\s*name|particulars|ledger|type|under|group|closing\s*bal|debit|credit)$/i.test(String(r[0] ?? "").trim())
+  );
+
+  if (!firstRowHasHeaders) {
+    // Tally trial balance raw array format
+    const { ledgers, skipped } = parseTallyRawArrays(rawRows, financialYear);
+
+    if (ledgers.length === 0) {
+      return NextResponse.json({ error: "No valid ledger rows found. Please check the file format." }, { status: 400 });
+    }
+
+    const ledgerRows = ledgers.map(l => ({
+      ...l,
+      tenant_id: profile.tenant_id,
+      client_id: clientId,
+    }));
+
+    const { error } = await supabase
+      .from("ledger_masters")
+      .upsert(ledgerRows, { onConflict: "tenant_id,client_id,ledger_name", ignoreDuplicates: false });
+
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+    return NextResponse.json({
+      imported: ledgerRows.length,
+      skipped: skipped.length,
+      skipped_names: skipped.slice(0, 5),
+      has_balance_data: ledgerRows.some(l => l.closing_balance !== null),
+      financial_year: financialYear,
+    });
+  }
+
+  // ── Fallback: structured CSV/Excel with named columns ────────────────────
+  const rows = XLSX.utils.sheet_to_json<Record<string, string>>(ws, { defval: "" });
+
   if (rows.length === 0) return NextResponse.json({ error: "No rows found in file" }, { status: 400 });
 
   const firstRow = rows[0];
   const cols = Object.keys(firstRow).map((k) => k.toLowerCase().trim());
 
-  // ── Column detection ───────────────────────────────────────────────────────
   const nameCol  = Object.keys(firstRow).find((k) => /^(name|ledger\s*name|ledger|particulars)$/i.test(k.trim()));
   const groupCol = Object.keys(firstRow).find((k) => /^(under|group|parent\s*group|under\s*group)$/i.test(k.trim()));
   const typeCol  = Object.keys(firstRow).find((k) => /^(type|ledger\s*type)$/i.test(k.trim()));
@@ -123,10 +285,6 @@ export async function POST(
     }, { status: 400 });
   }
 
-  // Balance column detection — Tally exports vary significantly:
-  // Format A: single "Closing Balance" col + "Dr/Cr" col
-  // Format B: "Closing Balance (Dr)" + "Closing Balance (Cr)" (two cols)
-  // Format C: "Debit" + "Credit" (net trial balance style)
   const closingCol    = Object.keys(firstRow).find((k) => /closing\s*bal/i.test(k));
   const drCrCol       = Object.keys(firstRow).find((k) => /^(dr\/?cr|type|dr\.?\/cr\.?)$/i.test(k.trim()) && !/ledger/i.test(k));
   const closingDrCol  = Object.keys(firstRow).find((k) => /closing.*dr|debit.*closing/i.test(k));
@@ -134,24 +292,10 @@ export async function POST(
   const openingCol    = Object.keys(firstRow).find((k) => /opening\s*bal/i.test(k));
   const openingDrCol  = Object.keys(firstRow).find((k) => /opening.*dr|debit.*opening/i.test(k));
   const openingCrCol  = Object.keys(firstRow).find((k) => /opening.*cr|credit.*opening/i.test(k));
-  // Simple debit/credit columns (net trial balance)
   const debitCol  = !closingDrCol ? Object.keys(firstRow).find((k) => /^debit$|^dr$/i.test(k.trim())) : undefined;
   const creditCol = !closingCrCol ? Object.keys(firstRow).find((k) => /^credit$|^cr$/i.test(k.trim())) : undefined;
 
   const hasBalanceData = !!(closingCol || closingDrCol || closingCrCol || debitCol || creditCol);
-
-  // ── Build rows ─────────────────────────────────────────────────────────────
-  type LedgerRow = {
-    tenant_id: string;
-    client_id: string;
-    ledger_name: string;
-    ledger_type: string;
-    tally_group: string | null;
-    financial_year: string | null;
-    closing_balance: number | null;
-    balance_type: "Dr" | "Cr" | null;
-    opening_balance: number | null;
-  };
 
   const ledgerRows: LedgerRow[] = [];
   const skipped: string[] = [];
@@ -161,7 +305,6 @@ export async function POST(
     if (!name || /^(name|ledger\s*name|particulars)$/i.test(name)) continue;
     if (name.length > 150) { skipped.push(name.slice(0, 30) + "…"); continue; }
 
-    // Ledger type
     let ledgerType = "expense";
     const rawGroup = groupCol ? String(row[groupCol] ?? "").trim() : null;
     if (typeCol && VALID_TYPES.has(String(row[typeCol]).toLowerCase().trim())) {
@@ -170,13 +313,11 @@ export async function POST(
       ledgerType = mapTallyGroup(rawGroup);
     }
 
-    // Balance resolution — try each format in order of specificity
     let closingBalance: number | null = null;
     let balanceType: "Dr" | "Cr" | null = null;
     let openingBalance: number | null = null;
 
     if (closingDrCol || closingCrCol) {
-      // Format B: separate Dr / Cr closing balance columns
       const drAmt = parseAmt(closingDrCol ? row[closingDrCol] : null);
       const crAmt = parseAmt(closingCrCol ? row[closingCrCol] : null);
       if (drAmt && drAmt > 0) { closingBalance = drAmt; balanceType = "Dr"; }
@@ -188,7 +329,6 @@ export async function POST(
         openingBalance = (oDr && oDr > 0) ? oDr : (oCr && oCr > 0 ? oCr : null);
       }
     } else if (closingCol) {
-      // Format A: single closing balance + Dr/Cr indicator column
       closingBalance = parseAmt(row[closingCol]);
       if (drCrCol) {
         const indicator = String(row[drCrCol] ?? "").trim().toUpperCase();
@@ -196,7 +336,6 @@ export async function POST(
       }
       if (openingCol) openingBalance = parseAmt(row[openingCol]);
     } else if (debitCol || creditCol) {
-      // Format C: simple Debit / Credit columns
       const drAmt = parseAmt(debitCol ? row[debitCol] : null);
       const crAmt = parseAmt(creditCol ? row[creditCol] : null);
       if (drAmt && drAmt > 0) { closingBalance = drAmt; balanceType = "Dr"; }
