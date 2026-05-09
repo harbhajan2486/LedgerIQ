@@ -2669,7 +2669,10 @@ export default function ClientDetailPage() {
                       </th>
                       <th className="text-left px-5 py-3 text-xs font-medium text-gray-500">Ledger Name</th>
                       <th className="text-left px-4 py-3 text-xs font-medium text-gray-500">Type</th>
-                      <th className="text-right px-4 py-3 text-xs font-medium text-gray-500">Closing Balance</th>
+                      <th className="text-right px-4 py-3 text-xs font-medium text-gray-500">
+                        Closing Balance
+                        {(() => { const fy = ledgers.find(l => l.financial_year)?.financial_year; return fy ? <span className="ml-1 font-normal text-gray-400">· FY {fy}</span> : null; })()}
+                      </th>
                       <th className="px-4 py-3" />
                     </tr>
                   </thead>
