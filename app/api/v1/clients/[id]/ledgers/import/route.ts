@@ -171,7 +171,11 @@ function parseTallyRawArrays(
     });
   }
 
-  return { ledgers, skipped };
+  // Deduplicate by ledger_name — keep last occurrence (handles Tally duplicate group rows)
+  const seen = new Map<string, LedgerRow>();
+  for (const l of ledgers) seen.set(l.ledger_name, l);
+
+  return { ledgers: Array.from(seen.values()), skipped };
 }
 
 type LedgerRow = {
