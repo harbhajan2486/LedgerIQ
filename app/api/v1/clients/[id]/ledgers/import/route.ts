@@ -231,11 +231,11 @@ export async function POST(
     return NextResponse.json({ error: "No rows found in file" }, { status: 400 });
   }
 
-  // Detect if this looks like a Tally trial balance (raw array with numeric columns 1 and 2)
-  // vs a structured CSV with named columns like "Name", "Type", "Closing Balance"
-  // Heuristic: check if first row has 3 or fewer columns and column 0 is a company name (not a header)
-  const firstRowHasHeaders = rawRows.some(r =>
-    /^(name|ledger\s*name|particulars|ledger|type|under|group|closing\s*bal|debit|credit)$/i.test(String(r[0] ?? "").trim())
+  // Detect if this is a flat structured CSV (row 0 IS the header row with column names)
+  // vs a Tally trial balance (row 0 is a company name, headers are buried in rows 4-6)
+  // Only check row 0 — Tally files have "Particulars" in row 4, which must NOT trigger this
+  const firstRowHasHeaders = /^(name|ledger\s*name|particulars|ledger|type|under|group|closing\s*bal|debit|credit)$/i.test(
+    String(rawRows[0]?.[0] ?? "").trim()
   );
 
   if (!firstRowHasHeaders) {
