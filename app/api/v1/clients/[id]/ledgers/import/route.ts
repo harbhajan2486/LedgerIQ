@@ -168,6 +168,7 @@ function parseTallyRawArrays(
       closing_balance: closingBalance,
       balance_type: balanceType,
       opening_balance: null,
+      source: "trial_balance",
     });
   }
 
@@ -188,6 +189,7 @@ type LedgerRow = {
   closing_balance: number | null;
   balance_type: "Dr" | "Cr" | null;
   opening_balance: number | null;
+  source: string;
 };
 
 export async function POST(
@@ -356,6 +358,7 @@ export async function POST(
       closing_balance: closingBalance,
       balance_type: balanceType,
       opening_balance: openingBalance,
+      source: "trial_balance",
     });
   }
 

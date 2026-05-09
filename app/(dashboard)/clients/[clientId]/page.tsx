@@ -217,7 +217,7 @@ export default function ClientDetailPage() {
   const [claimSaving, setClaimSaving] = useState(false);
 
   // Ledger master state
-  const [ledgers, setLedgers] = useState<{ id: string; ledger_name: string; ledger_type: string; closing_balance?: number | null; balance_type?: string | null; financial_year?: string | null }[]>([]);
+  const [ledgers, setLedgers] = useState<{ id: string; ledger_name: string; ledger_type: string; closing_balance?: number | null; balance_type?: string | null; financial_year?: string | null; source?: string | null }[]>([]);
   const [ledgersLoading, setLedgersLoading] = useState(false);
   const [newLedgerName, setNewLedgerName] = useState("");
   const [newLedgerType, setNewLedgerType] = useState("expense");
@@ -2614,8 +2614,13 @@ export default function ClientDetailPage() {
                     {ledgers.map((l) => (
                       <tr key={l.id} className="border-b last:border-0 hover:bg-gray-50/50">
                         <td className="px-5 py-2.5 font-medium text-gray-800">
-                          {l.ledger_name}
-                          {l.financial_year && <span className="ml-2 text-[10px] text-gray-400">FY {l.financial_year}</span>}
+                          <span className="flex items-center gap-2">
+                            {l.ledger_name}
+                            {l.source === "trial_balance" && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 font-semibold tracking-wide">TB</span>
+                            )}
+                            {l.financial_year && <span className="text-[10px] text-gray-400">FY {l.financial_year}</span>}
+                          </span>
                         </td>
                         <td className="px-4 py-2.5">
                           <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
