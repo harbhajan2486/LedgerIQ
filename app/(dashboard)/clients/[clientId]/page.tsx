@@ -232,6 +232,8 @@ export default function ClientDetailPage() {
     return `${yr}-${String(yr + 1).slice(-2)}`;
   });
   const ledgerImportRef = useRef<HTMLInputElement>(null);
+  const [selectedLedgerIds, setSelectedLedgerIds] = useState<Set<string>>(new Set());
+  const [deletingLedgers, setDeletingLedgers] = useState(false);
 
   // Ledger mapping rules state
   interface MappingRule {
@@ -784,6 +786,40 @@ export default function ClientDetailPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ledgerId }),
     });
+    loadLedgers();
+  }
+
+  async function deleteSelectedLedgers() {
+    if (selectedLedgerIds.size === 0) return;
+    setDeletingLedgers(true);
+    await Promise.all(
+      Array.from(selectedLedgerIds).map((id) =>
+        fetch(`/api/v1/clients/${clientId}/ledgers`, {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ledgerId: id }),
+        })
+      )
+    );
+    setSelectedLedgerIds(new Set());
+    setDeletingLedgers(false);
+    loadLedgers();
+  }
+
+  async function clearAllLedgers() {
+    if (!confirm(`Delete ALL ${ledgers.length} ledgers for this client? This cannot be undone.`)) return;
+    setDeletingLedgers(true);
+    await Promise.all(
+      ledgers.map((l) =>
+        fetch(`/api/v1/clients/${clientId}/ledgers`, {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ledgerId: l.id }),
+        })
+      )
+    );
+    setSelectedLedgerIds(new Set());
+    setDeletingLedgers(false);
     loadLedgers();
   }
 
@@ -2558,6 +2594,13 @@ export default function ClientDetailPage() {
                 {seedingLedgers ? <Loader2 size={13} className="animate-spin" /> : <BookOpen size={13} />}
                 Load 25 common ledgers
               </button>
+              {ledgers.length > 0 && (
+                <button onClick={clearAllLedgers} disabled={deletingLedgers}
+                  className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50">
+                  {deletingLedgers ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                  Clear all
+                </button>
+              )}
             </div>
           </div>
 
@@ -2601,9 +2644,28 @@ export default function ClientDetailPage() {
                   No ledgers yet. Add one above or click "Load 25 common ledgers".
                 </div>
               ) : (
+                {/* Bulk action bar */}
+                {selectedLedgerIds.size > 0 && (
+                  <div className="flex items-center gap-3 px-4 py-2 bg-indigo-50 border-b border-indigo-100">
+                    <span className="text-xs text-indigo-700 font-medium">{selectedLedgerIds.size} selected</span>
+                    <button onClick={deleteSelectedLedgers} disabled={deletingLedgers}
+                      className="text-xs px-3 py-1 rounded bg-red-600 text-white font-medium hover:bg-red-700 disabled:opacity-50 inline-flex items-center gap-1">
+                      {deletingLedgers ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
+                      Delete selected
+                    </button>
+                    <button onClick={() => setSelectedLedgerIds(new Set())}
+                      className="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
+                  </div>
+                )}
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b bg-gray-50">
+                      <th className="px-3 py-3 w-8">
+                        <input type="checkbox"
+                          checked={selectedLedgerIds.size === ledgers.length && ledgers.length > 0}
+                          onChange={(e) => setSelectedLedgerIds(e.target.checked ? new Set(ledgers.map(l => l.id)) : new Set())}
+                          className="rounded border-gray-300" />
+                      </th>
                       <th className="text-left px-5 py-3 text-xs font-medium text-gray-500">Ledger Name</th>
                       <th className="text-left px-4 py-3 text-xs font-medium text-gray-500">Type</th>
                       <th className="text-right px-4 py-3 text-xs font-medium text-gray-500">Closing Balance</th>
@@ -2612,7 +2674,16 @@ export default function ClientDetailPage() {
                   </thead>
                   <tbody>
                     {ledgers.map((l) => (
-                      <tr key={l.id} className="border-b last:border-0 hover:bg-gray-50/50">
+                      <tr key={l.id} className={`border-b last:border-0 hover:bg-gray-50/50 ${selectedLedgerIds.has(l.id) ? "bg-indigo-50/40" : ""}`}>
+                        <td className="px-3 py-2.5">
+                          <input type="checkbox" checked={selectedLedgerIds.has(l.id)}
+                            onChange={(e) => {
+                              const next = new Set(selectedLedgerIds);
+                              e.target.checked ? next.add(l.id) : next.delete(l.id);
+                              setSelectedLedgerIds(next);
+                            }}
+                            className="rounded border-gray-300" />
+                        </td>
                         <td className="px-5 py-2.5 font-medium text-gray-800">
                           <span className="flex items-center gap-2">
                             {l.ledger_name}
