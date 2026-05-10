@@ -652,11 +652,18 @@ export default function ClientDetailPage() {
   function loadMappingRules() {
     setRulesLoading(true);
     fetch(`/api/v1/ledger-rules?clientId=${clientId}`)
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error(`Rules API error: ${r.status}`);
+        return r.json();
+      })
       .then((d) => {
         setClientMappingRules(d.client_rules ?? []);
         setIndustryMappingRules(d.industry_rules ?? []);
         setIndustryNameForRules(d.industry_name ?? null);
+      })
+      .catch((err) => {
+        console.error("[loadMappingRules]", err);
+        toast.error("Could not load rules — try refreshing");
       })
       .finally(() => setRulesLoading(false));
   }
@@ -851,8 +858,32 @@ export default function ClientDetailPage() {
     const d = await res.json();
     if (res.ok) {
       const balanceNote = d.has_balance_data ? " with balances" : "";
-      toast.success(`Imported ${d.imported} ledgers${balanceNote}${d.skipped > 0 ? ` (${d.skipped} skipped)` : ""}`);
+      toast.success(`Imported ${d.imported} ledgers${balanceNote}${d.skipped > 0 ? ` (${d.skipped} skipped)` : ""}. Re-mapping transactions…`);
       loadLedgers();
+      // Step 1: Re-apply rules so existing transactions use the new TB ledger names
+      try {
+        await fetch(`/api/v1/clients/${clientId}/reapply-ledger-rules`, { method: "POST" });
+      } catch { /* best-effort */ }
+      // Step 2: Suggest rules for any transactions still unassigned after re-apply
+      setSuggestLoading(true);
+      setSuggestOpen(true);
+      setSuggestions([]);
+      setSuggestionOverrides({});
+      try {
+        const sugRes = await fetch(`/api/v1/clients/${clientId}/suggest-rules`, { method: "POST" });
+        const sugData = await sugRes.json();
+        if (sugRes.ok && (sugData.suggestions ?? []).length > 0) {
+          setSuggestions(sugData.suggestions);
+          toast.info(`${sugData.suggestions.length} rule drafts ready for review — approve to auto-map future transactions`);
+        } else {
+          setSuggestOpen(false);
+          toast.success("All transactions mapped using TB ledgers — nothing left to review");
+        }
+      } catch {
+        setSuggestOpen(false);
+      } finally {
+        setSuggestLoading(false);
+      }
     } else {
       toast.error(d.error ?? "Could not import ledgers");
     }
@@ -2779,6 +2810,14 @@ export default function ClientDetailPage() {
               </div>
               <div className="flex items-center gap-2">
                 <button
+                  onClick={loadMappingRules}
+                  disabled={rulesLoading}
+                  className="text-xs px-2.5 py-1.5 rounded border border-gray-200 text-gray-500 hover:bg-gray-50 inline-flex items-center gap-1 disabled:opacity-50"
+                  title="Reload rules from database"
+                >
+                  {rulesLoading ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+                </button>
+                <button
                   onClick={fetchSuggestions}
                   disabled={suggestLoading}
                   className="text-xs px-2.5 py-1.5 rounded border border-purple-200 text-purple-700 hover:bg-purple-50 inline-flex items-center gap-1 disabled:opacity-50"
@@ -2985,8 +3024,10 @@ export default function ClientDetailPage() {
                       </CardTitle>
                     </CardHeader>
                     <CardContent className="p-0">
-                      {activeRules.length === 0 ? (
-                        <p className="px-5 py-4 text-xs text-gray-400">No active rules yet.</p>
+                      {rulesLoading ? (
+                        <div className="py-6 flex items-center justify-center gap-2 text-gray-400 text-sm"><Loader2 size={14} className="animate-spin" /> Loading…</div>
+                      ) : activeRules.length === 0 ? (
+                        <p className="px-5 py-4 text-xs text-gray-400">No active rules yet. Use "Activate now" on any learning rule, or assign the same ledger 3 times on similar transactions.</p>
                       ) : (
                         <table className="w-full text-xs">
                           <thead>

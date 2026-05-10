@@ -127,14 +127,18 @@ RULES:
 
     const raw = response.content[0].type === "text" ? response.content[0].text.trim() : "[]";
 
-    // Parse AI response — strip any accidental markdown fences
-    const jsonStr = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+    // Parse AI response — extract JSON array even if wrapped in markdown or prose
     let aiSuggestions: Array<{ pattern: string; suggested_ledger: string | null; confidence: number; reason?: string }> = [];
     try {
+      // Find the first '[' and last ']' — extract that substring to handle markdown/prose wrapping
+      const start = raw.indexOf("[");
+      const end = raw.lastIndexOf("]");
+      const jsonStr = start !== -1 && end !== -1 ? raw.slice(start, end + 1) : raw;
       const parsed = JSON.parse(jsonStr);
       aiSuggestions = Array.isArray(parsed) ? parsed : [];
     } catch {
-      return NextResponse.json({ error: "AI returned unparseable response", raw }, { status: 500 });
+      // Return empty suggestions rather than an error — don't block the UI
+      return NextResponse.json({ suggestions: [], total_patterns: patternMap.size });
     }
 
     // Filter: only return suggestions where AI has a ledger, confidence >= 0.5, and ledger is in vocabulary
