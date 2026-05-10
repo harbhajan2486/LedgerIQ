@@ -8,7 +8,7 @@ import {
   CheckCircle2, AlertTriangle, Clock, RefreshCw, Landmark,
   Link2, Link2Off, X, Pencil, BookOpen, Download, Plus, Trash2,
   ShoppingCart, Receipt, Wallet, CreditCard, FolderOpen, ScrollText,
-  BarChart3, ChevronDown, ChevronRight, ExternalLink
+  BarChart3, ChevronDown, ChevronRight, ExternalLink, Search
 } from "lucide-react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
@@ -234,6 +234,7 @@ export default function ClientDetailPage() {
   const ledgerImportRef = useRef<HTMLInputElement>(null);
   const [selectedLedgerIds, setSelectedLedgerIds] = useState<Set<string>>(new Set());
   const [deletingLedgers, setDeletingLedgers] = useState(false);
+  const [ledgerSearch, setLedgerSearch] = useState("");
 
   // Ledger mapping rules state
   interface MappingRule {
@@ -2650,6 +2651,22 @@ export default function ClientDetailPage() {
             </CardContent>
           </Card>
 
+          {/* Ledger search */}
+          <div className="relative">
+            <input
+              value={ledgerSearch}
+              onChange={e => setLedgerSearch(e.target.value)}
+              placeholder="Search ledgers…"
+              className="w-full h-9 pl-8 pr-3 rounded-md border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+            {ledgerSearch && (
+              <button onClick={() => setLedgerSearch("")} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                <X size={12} />
+              </button>
+            )}
+          </div>
+
           {/* Ledger list */}
           <Card>
             <CardContent className="p-0">
@@ -2696,7 +2713,7 @@ export default function ClientDetailPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {ledgers.map((l) => (
+                    {ledgers.filter(l => !ledgerSearch || l.ledger_name.toLowerCase().includes(ledgerSearch.toLowerCase()) || l.ledger_type.includes(ledgerSearch.toLowerCase())).map((l) => (
                       <tr key={l.id} className={`border-b last:border-0 hover:bg-gray-50/50 ${selectedLedgerIds.has(l.id) ? "bg-indigo-50/40" : ""}`}>
                         <td className="px-3 py-2.5">
                           <input type="checkbox" checked={selectedLedgerIds.has(l.id)}
