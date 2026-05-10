@@ -73,19 +73,34 @@ export async function POST(
       .eq("confirmed", true)
       .limit(50);
 
+    // Fetch trial balance ledgers for this client (prefer these over generic names)
+    const { data: clientLedgers } = await supabase
+      .from("ledger_masters")
+      .select("ledger_name, ledger_type")
+      .eq("tenant_id", profile.tenant_id)
+      .eq("client_id", clientId)
+      .in("ledger_type", ["expense", "liability", "asset", "bank", "income"]);
+
+    const clientLedgerNames = (clientLedgers ?? []).map(l => l.ledger_name);
+
+    // Vocabulary: client trial balance ledgers first (most specific), then generic fallback
+    const ledgerVocabulary = clientLedgerNames.length > 0
+      ? [...clientLedgerNames, ...COMMON_LEDGERS.map(l => l.ledger_name).filter(n => !clientLedgerNames.includes(n))]
+      : COMMON_LEDGERS.map(l => l.ledger_name);
+
     // Limit patterns to maxPatterns
     const patternsToSend = [...patternMap.entries()].slice(0, maxPatterns);
-    const ledgerVocabulary = COMMON_LEDGERS.map(l => l.ledger_name);
 
     const prompt = `You are an expert Indian business accountant. For each bank narration pattern below, suggest the most appropriate accounting ledger name.
 
 CONTEXT:
 - Client: ${clientRow.client_name}${clientRow.industry_name ? ` (${clientRow.industry_name})` : ""}
 - These are debit transactions from an Indian business bank account
+- PREFER ledger names from the client's own chart of accounts (listed first below) over generic names
 - Patterns are extracted narration keywords (payment prefixes and reference numbers already removed)
 
 ALLOWED LEDGER NAMES (use these exact names, or null if truly unsure):
-${ledgerVocabulary.map(l => `  - ${l}`).join("\n")}
+${clientLedgerNames.length > 0 ? `[Client's own Tally ledgers — prefer these]\n${clientLedgerNames.map(l => `  - ${l}`).join("\n")}\n\n[Generic fallback ledgers — use only if no client ledger fits]\n${COMMON_LEDGERS.map(l => l.ledger_name).filter(n => !clientLedgerNames.includes(n)).map(l => `  - ${l}`).join("\n")}` : ledgerVocabulary.map(l => `  - ${l}`).join("\n")}
 
 EXISTING RULES FOR THIS CLIENT (do NOT re-suggest these):
 ${(existingRules ?? []).map(r => `  ${r.pattern} → ${r.ledger_name}`).join("\n") || "  (none yet)"}

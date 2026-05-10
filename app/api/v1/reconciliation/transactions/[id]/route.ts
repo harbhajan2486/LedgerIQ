@@ -42,6 +42,10 @@ export async function PATCH(
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
+    let ruleJustConfirmed = false;
+    let rulePattern = "";
+    let ruleLedger = "";
+
     // If ledger_name was set, learn the pattern for this client
     if (parsed.data.ledger_name) {
       const { data: txn } = await supabase
@@ -79,6 +83,9 @@ export async function PATCH(
               confirmed: false,
             });
           }
+          ruleJustConfirmed = newCount === 3;
+          rulePattern = pattern;
+          ruleLedger = parsed.data.ledger_name;
 
           // ── Industry promotion: check if 3+ confirmed clients in same industry share this pattern → ledger ──
           try {
@@ -134,7 +141,10 @@ export async function PATCH(
       }
     }
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({
+      success: true,
+      ...(ruleJustConfirmed ? { rule_confirmed: true, pattern: rulePattern, ledger: ruleLedger } : {}),
+    });
   } catch (err) {
     console.error("[transactions/patch]", err);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });

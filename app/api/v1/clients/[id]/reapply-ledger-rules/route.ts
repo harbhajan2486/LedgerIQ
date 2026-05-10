@@ -84,7 +84,8 @@ export async function POST(
   ]);
 
   const transactions = txnsResult.data ?? [];
-  const validLedgerNames = new Set((ledgersResult.data ?? []).map((l) => l.ledger_name));
+  const masterLedgers = (ledgersResult.data ?? []).map((l) => l.ledger_name);
+  const validLedgerNames = new Set(masterLedgers);
 
   // Build pattern → ledger maps
   // Layer 3: confirmed client rules (highest priority)
@@ -98,6 +99,21 @@ export async function POST(
     industryRuleMap[rule.pattern] = rule.ledger_name;
   }
 
+  /**
+   * Hybrid match: if a global/industry rule suggests a generic ledger name (e.g. "Rent")
+   * but the client's trial balance has a specific ledger (e.g. "RENT (MR KATEKAR)"),
+   * prefer the specific one. Uses case-insensitive substring matching.
+   */
+  function resolveToMasterLedger(suggested: string): string {
+    if (validLedgerNames.has(suggested)) return suggested; // exact match
+    const sugLower = suggested.toLowerCase();
+    // Find trial balance ledger whose name contains the generic name or vice versa
+    const match = masterLedgers.find(
+      (m) => m.toLowerCase().includes(sugLower) || sugLower.includes(m.toLowerCase().slice(0, 6))
+    );
+    return match ?? suggested; // if no match, keep generic (will fail validLedgerNames check)
+  }
+
   const byLedger: Record<string, string[]> = {};
   const clearIds: string[] = [];
   // Rows where ledger is already correct but category is stale — just resync meta
@@ -106,8 +122,8 @@ export async function POST(
   for (const txn of transactions) {
     const pattern = extractPattern(txn.narration ?? "");
     const confirmedLedger  = clientRuleMap[pattern] ?? null;
-    const industryLedger   = industryRuleMap[pattern] ?? null;
-    const globalLedger     = suggestLedger(txn.narration ?? "");
+    const industryLedger   = industryRuleMap[pattern] ? resolveToMasterLedger(industryRuleMap[pattern]) : null;
+    const globalLedger     = suggestLedger(txn.narration ?? "") ? resolveToMasterLedger(suggestLedger(txn.narration ?? "")!) : null;
     const bestSuggestion = confirmedLedger
       ?? (industryLedger && validLedgerNames.has(industryLedger) ? industryLedger : null)
       ?? (globalLedger && validLedgerNames.has(globalLedger) ? globalLedger : null);

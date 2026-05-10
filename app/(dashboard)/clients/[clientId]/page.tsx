@@ -742,6 +742,21 @@ export default function ClientDetailPage() {
     loadMappingRules();
   }
 
+  async function promoteToIndustry(ruleId: string) {
+    const res = await fetch(`/api/v1/ledger-rules/${ruleId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ promote_to_industry: true }),
+    });
+    const d = await res.json();
+    if (res.ok) {
+      toast.success(`Rule promoted to ${d.promoted_to} industry`);
+      loadMappingRules();
+    } else {
+      toast.error(d.error ?? "Could not promote rule");
+    }
+  }
+
   async function addLedger(e: React.FormEvent) {
     e.preventDefault();
     if (!newLedgerName.trim()) return;
@@ -1974,11 +1989,15 @@ export default function ClientDetailPage() {
                               txnId={txn.id} value={txn.ledger_name}
                               ledgers={ledgers}
                               onSave={async (txnId, val) => {
-                                await fetch(`/api/v1/reconciliation/transactions/${txnId}`, {
+                                const res = await fetch(`/api/v1/reconciliation/transactions/${txnId}`, {
                                   method: "PATCH",
                                   headers: { "Content-Type": "application/json" },
                                   body: JSON.stringify({ ledger_name: val }),
                                 });
+                                const d = await res.json();
+                                if (d.rule_confirmed) {
+                                  toast.success(`"${d.pattern}" → ${d.ledger} will now auto-map on all future uploads`);
+                                }
                                 loadBankTxns();
                               }}
                             />
@@ -2873,59 +2892,124 @@ export default function ClientDetailPage() {
               </Card>
             )}
 
-            {/* Client-level rules */}
-            <Card className="mb-3">
-              <CardHeader className="pb-2 pt-4">
-                <CardTitle className="text-sm font-medium text-gray-700 flex items-center gap-2">
-                  Client Rules
-                  <span className="text-xs font-normal text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded-full">{clientMappingRules.length}</span>
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="p-0">
-                {rulesLoading ? (
-                  <div className="py-6 flex items-center justify-center gap-2 text-gray-400 text-sm">
-                    <Loader2 size={14} className="animate-spin" /> Loading…
-                  </div>
-                ) : clientMappingRules.length === 0 ? (
-                  <p className="px-5 py-4 text-xs text-gray-400">No rules yet. Assign ledgers to transactions — rules are learned automatically.</p>
-                ) : (
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="border-b bg-gray-50 text-gray-500">
-                        <th className="text-left px-5 py-2.5 font-medium">Pattern</th>
-                        <th className="text-left px-4 py-2.5 font-medium">→ Ledger</th>
-                        <th className="text-center px-4 py-2.5 font-medium">Hits</th>
-                        <th className="text-center px-4 py-2.5 font-medium">Status</th>
-                        <th className="px-4 py-2.5" />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {clientMappingRules.map((r) => (
-                        <tr key={r.id} className="border-b last:border-0 hover:bg-gray-50/50">
-                          <td className="px-5 py-2 font-mono text-gray-700">{r.pattern}</td>
-                          <td className="px-4 py-2 text-gray-800 font-medium">{r.ledger_name}</td>
-                          <td className="px-4 py-2 text-center text-gray-500">{r.match_count}</td>
-                          <td className="px-4 py-2 text-center">
-                            <button onClick={() => toggleRuleConfirmed(r.id, r.confirmed)}
-                              title={r.confirmed ? "Click to disable rule" : "Click to confirm rule"}
-                              className={`px-2 py-0.5 rounded-full text-xs font-medium transition-colors ${
-                                r.confirmed ? "bg-green-100 text-green-700 hover:bg-green-200" : "bg-gray-100 text-gray-500 hover:bg-yellow-50 hover:text-yellow-700"
-                              }`}>
-                              {r.confirmed ? "Active" : "Learning"}
-                            </button>
-                          </td>
-                          <td className="px-4 py-2 text-right">
-                            <button onClick={() => deleteMappingRule(r.id)} className="text-gray-300 hover:text-red-500 transition-colors">
-                              <Trash2 size={13} />
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </CardContent>
-            </Card>
+            {/* Client-level rules — split into Learning and Active */}
+            {(() => {
+              const learningRules = clientMappingRules.filter(r => !r.confirmed);
+              const activeRules   = clientMappingRules.filter(r => r.confirmed);
+              return (
+                <>
+                  {/* Learning rules */}
+                  <Card className="mb-3">
+                    <CardHeader className="pb-2 pt-4">
+                      <CardTitle className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                        Learning Rules
+                        <span className="text-xs font-normal text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded-full">{learningRules.length}</span>
+                        <span className="text-xs font-normal text-gray-400 ml-auto">Auto-activate after 3 confirmations</span>
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="p-0">
+                      {rulesLoading ? (
+                        <div className="py-6 flex items-center justify-center gap-2 text-gray-400 text-sm"><Loader2 size={14} className="animate-spin" /> Loading…</div>
+                      ) : learningRules.length === 0 ? (
+                        <p className="px-5 py-4 text-xs text-gray-400">No learning rules. Assign ledgers to transactions to start building rules automatically.</p>
+                      ) : (
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="border-b bg-gray-50 text-gray-500">
+                              <th className="text-left px-5 py-2.5 font-medium">Pattern</th>
+                              <th className="text-left px-4 py-2.5 font-medium">→ Ledger</th>
+                              <th className="text-center px-4 py-2.5 font-medium">Progress</th>
+                              <th className="px-4 py-2.5" />
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {learningRules.map((r) => {
+                              const remaining = Math.max(0, 3 - (r.match_count ?? 0));
+                              return (
+                                <tr key={r.id} className="border-b last:border-0 hover:bg-gray-50/50">
+                                  <td className="px-5 py-2 font-mono text-gray-700">{r.pattern}</td>
+                                  <td className="px-4 py-2 text-gray-800 font-medium">{r.ledger_name}</td>
+                                  <td className="px-4 py-2 text-center">
+                                    <div className="flex flex-col items-center gap-1">
+                                      <div className="flex gap-0.5">
+                                        {[1,2,3].map(i => (
+                                          <div key={i} className={`w-3 h-3 rounded-sm ${i <= (r.match_count ?? 0) ? "bg-amber-400" : "bg-gray-200"}`} />
+                                        ))}
+                                      </div>
+                                      <span className="text-[10px] text-gray-400">{remaining > 0 ? `${remaining} more to activate` : "ready"}</span>
+                                    </div>
+                                  </td>
+                                  <td className="px-4 py-2 text-right">
+                                    <div className="flex items-center justify-end gap-2">
+                                      <button onClick={() => toggleRuleConfirmed(r.id, false)}
+                                        className="text-xs px-2 py-0.5 rounded border border-green-200 text-green-700 hover:bg-green-50">
+                                        Activate now
+                                      </button>
+                                      <button onClick={() => deleteMappingRule(r.id)} className="text-gray-300 hover:text-red-500 transition-colors">
+                                        <Trash2 size={13} />
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      )}
+                    </CardContent>
+                  </Card>
+
+                  {/* Active client rules */}
+                  <Card className="mb-3">
+                    <CardHeader className="pb-2 pt-4">
+                      <CardTitle className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                        Active Client Rules
+                        <span className="text-xs font-normal text-green-700 bg-green-50 px-1.5 py-0.5 rounded-full">{activeRules.length}</span>
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="p-0">
+                      {activeRules.length === 0 ? (
+                        <p className="px-5 py-4 text-xs text-gray-400">No active rules yet.</p>
+                      ) : (
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="border-b bg-gray-50 text-gray-500">
+                              <th className="text-left px-5 py-2.5 font-medium">Pattern</th>
+                              <th className="text-left px-4 py-2.5 font-medium">→ Ledger</th>
+                              <th className="text-center px-4 py-2.5 font-medium">Hits</th>
+                              <th className="px-4 py-2.5" />
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {activeRules.map((r) => (
+                              <tr key={r.id} className="border-b last:border-0 hover:bg-gray-50/50">
+                                <td className="px-5 py-2 font-mono text-gray-700">{r.pattern}</td>
+                                <td className="px-4 py-2 text-gray-800 font-medium">{r.ledger_name}</td>
+                                <td className="px-4 py-2 text-center text-gray-500">{r.match_count}</td>
+                                <td className="px-4 py-2 text-right">
+                                  <div className="flex items-center justify-end gap-2">
+                                    {industryNameForRules && (
+                                      <button onClick={() => promoteToIndustry(r.id)}
+                                        title={`Apply to all ${industryNameForRules} clients`}
+                                        className="text-xs px-2 py-0.5 rounded border border-blue-200 text-blue-600 hover:bg-blue-50">
+                                        → Industry
+                                      </button>
+                                    )}
+                                    <button onClick={() => deleteMappingRule(r.id)} className="text-gray-300 hover:text-red-500 transition-colors">
+                                      <Trash2 size={13} />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                    </CardContent>
+                  </Card>
+                </>
+              );
+            })()}
 
             {/* Industry-level rules */}
             {industryNameForRules && (
@@ -2935,12 +3019,14 @@ export default function ClientDetailPage() {
                     Industry Rules
                     <span className="text-xs font-normal text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded-full">{industryNameForRules}</span>
                     <span className="text-xs font-normal text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded-full">{industryMappingRules.length}</span>
-                    <span className="text-xs font-normal text-gray-400 ml-auto">Auto-promoted when 3+ clients in this industry confirm the same rule</span>
+                    <span className="text-xs font-normal text-gray-400 ml-auto">Applies to all {industryNameForRules} clients</span>
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="p-0">
                   {industryMappingRules.length === 0 ? (
-                    <p className="px-5 py-4 text-xs text-gray-400">No industry rules yet. Rules are promoted here automatically once 3 clients in <strong>{industryNameForRules}</strong> confirm the same pattern.</p>
+                    <p className="px-5 py-4 text-xs text-gray-400">
+                      No industry rules yet. Use "→ Industry" on any active client rule to promote it, or it auto-promotes when 3+ clients confirm the same pattern.
+                    </p>
                   ) : (
                     <table className="w-full text-xs">
                       <thead>
@@ -2960,7 +3046,7 @@ export default function ClientDetailPage() {
                             <td className="px-4 py-2 text-center text-gray-500">{r.match_count}</td>
                             <td className="px-4 py-2 text-center">
                               <button onClick={() => toggleRuleConfirmed(r.id, r.confirmed)}
-                                title={r.confirmed ? "Click to disable rule" : "Click to confirm rule"}
+                                title={r.confirmed ? "Click to pause this industry rule" : "Click to activate"}
                                 className={`px-2 py-0.5 rounded-full text-xs font-medium transition-colors ${
                                   r.confirmed ? "bg-blue-100 text-blue-700 hover:bg-blue-200" : "bg-gray-100 text-gray-500 hover:bg-yellow-50 hover:text-yellow-700"
                                 }`}>
@@ -2968,7 +3054,9 @@ export default function ClientDetailPage() {
                               </button>
                             </td>
                             <td className="px-4 py-2 text-right">
-                              <button onClick={() => deleteMappingRule(r.id)} className="text-gray-300 hover:text-red-500 transition-colors">
+                              <button onClick={() => deleteMappingRule(r.id)}
+                                title="Remove from industry rules"
+                                className="text-gray-300 hover:text-red-500 transition-colors">
                                 <Trash2 size={13} />
                               </button>
                             </td>
