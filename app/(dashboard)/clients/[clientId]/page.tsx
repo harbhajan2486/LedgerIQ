@@ -14,6 +14,7 @@ import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { GLOBAL_RULES_DISPLAY } from "@/lib/ledger-rules";
 
 interface Client {
   id: string;
@@ -251,7 +252,8 @@ export default function ClientDetailPage() {
   const [addingRule, setAddingRule] = useState(false);
   const [ruleSearch, setRuleSearch] = useState("");
   const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
-  const [editingRuleLedger, setEditingRuleLedger] = useState("");
+  const [editingRuleField, setEditingRuleField] = useState<"pattern" | "ledger_name" | null>(null);
+  const [editingRuleValue, setEditingRuleValue] = useState("");
 
   // AI bulk rule suggestion state
   interface RuleSuggestion { pattern: string; example_narration: string; suggested_ledger: string; confidence: number; reason: string }
@@ -702,20 +704,29 @@ export default function ClientDetailPage() {
   }
 
   async function saveRuleEdit(ruleId: string) {
-    const newLedger = editingRuleLedger.trim();
-    if (!newLedger) { setEditingRuleId(null); return; }
+    const field = editingRuleField;
+    const value = editingRuleValue.trim();
+    setEditingRuleId(null);
+    setEditingRuleField(null);
+    if (!field || !value) return;
     const res = await fetch(`/api/v1/ledger-rules/${ruleId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ledger_name: newLedger }),
+      body: JSON.stringify({ [field]: value }),
     });
     if (res.ok) {
-      setClientMappingRules(prev => prev.map(r => r.id === ruleId ? { ...r, ledger_name: newLedger } : r));
-      setIndustryMappingRules(prev => prev.map(r => r.id === ruleId ? { ...r, ledger_name: newLedger } : r));
+      const updater = (r: MappingRule) => r.id === ruleId ? { ...r, [field]: value } : r;
+      setClientMappingRules(prev => prev.map(updater));
+      setIndustryMappingRules(prev => prev.map(updater));
     } else {
-      toast.error("Could not update ledger name");
+      toast.error(`Could not update ${field === "pattern" ? "pattern" : "ledger name"}`);
     }
-    setEditingRuleId(null);
+  }
+
+  function startEdit(ruleId: string, field: "pattern" | "ledger_name", currentValue: string) {
+    setEditingRuleId(ruleId);
+    setEditingRuleField(field);
+    setEditingRuleValue(currentValue);
   }
 
   async function fetchSuggestions() {
@@ -2982,41 +2993,70 @@ export default function ClientDetailPage() {
               </Card>
             )}
 
-            {/* Shared search + count bar */}
+            {/* Rules columns */}
             {(() => {
-              const draftRules    = clientMappingRules.filter(r => !r.confirmed);
-              const activeRules   = clientMappingRules.filter(r => r.confirmed);
+              const draftRules  = clientMappingRules.filter(r => !r.confirmed);
+              const activeRules = clientMappingRules.filter(r => r.confirmed);
               const q = ruleSearch.toLowerCase();
-              const filterRule = (r: MappingRule) => !q || r.pattern.includes(q) || r.ledger_name.toLowerCase().includes(q);
+              const filterRule = (r: MappingRule) =>
+                !q || r.pattern.includes(q) || r.ledger_name.toLowerCase().includes(q);
               const filteredDraft    = draftRules.filter(filterRule).sort((a,b) => a.pattern.localeCompare(b.pattern));
               const filteredActive   = activeRules.filter(filterRule).sort((a,b) => a.pattern.localeCompare(b.pattern));
               const filteredIndustry = industryMappingRules.filter(filterRule).sort((a,b) => a.pattern.localeCompare(b.pattern));
+              const filteredGlobal   = GLOBAL_RULES_DISPLAY.filter(g =>
+                !q || g.label.toLowerCase().includes(q) || g.ledger.toLowerCase().includes(q) || g.examples.toLowerCase().includes(q)
+              );
 
-              const RuleRow = ({ r, kind }: { r: MappingRule; kind: "draft" | "active" | "industry" }) => (
-                <div className="border-b last:border-0 px-3 py-2 hover:bg-gray-50/60 group">
-                  <div className="font-mono text-[11px] text-gray-500 truncate mb-0.5" title={r.pattern}>{r.pattern}</div>
-                  {editingRuleId === r.id ? (
+              const EditableText = ({
+                ruleId, field, value, className, placeholder,
+              }: { ruleId: string; field: "pattern" | "ledger_name"; value: string; className?: string; placeholder?: string }) => {
+                const isEditing = editingRuleId === ruleId && editingRuleField === field;
+                if (isEditing) {
+                  return (
                     <input
                       autoFocus
-                      value={editingRuleLedger}
-                      onChange={e => setEditingRuleLedger(e.target.value)}
-                      onBlur={() => saveRuleEdit(r.id)}
-                      onKeyDown={e => { if (e.key === "Enter") saveRuleEdit(r.id); if (e.key === "Escape") setEditingRuleId(null); }}
-                      className="w-full text-xs border border-blue-300 rounded px-1.5 py-0.5 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                      value={editingRuleValue}
+                      onChange={e => setEditingRuleValue(e.target.value)}
+                      onBlur={() => saveRuleEdit(ruleId)}
+                      onKeyDown={e => {
+                        if (e.key === "Enter") saveRuleEdit(ruleId);
+                        if (e.key === "Escape") { setEditingRuleId(null); setEditingRuleField(null); }
+                      }}
+                      placeholder={placeholder}
+                      className="w-full border border-blue-300 rounded px-1.5 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
                     />
-                  ) : (
-                    <div className="flex items-center gap-1">
-                      <span className="text-xs font-medium text-gray-800 truncate flex-1">{r.ledger_name}</span>
-                      <button
-                        onClick={() => { setEditingRuleId(r.id); setEditingRuleLedger(r.ledger_name); }}
-                        className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-blue-500 transition-all flex-shrink-0"
-                        title="Edit ledger name"
-                      >
-                        <Pencil size={10} />
-                      </button>
-                    </div>
-                  )}
-                  <div className="flex items-center justify-between mt-1.5">
+                  );
+                }
+                return (
+                  <span
+                    className={`${className} cursor-text hover:bg-blue-50 hover:text-blue-700 rounded px-0.5 transition-colors`}
+                    title={`Click to edit ${field === "pattern" ? "pattern" : "ledger"}`}
+                    onClick={() => startEdit(ruleId, field, value)}
+                  >
+                    {value}
+                  </span>
+                );
+              };
+
+              const RuleRow = ({ r, kind }: { r: MappingRule; kind: "draft" | "active" | "industry" }) => (
+                <div className="border-b last:border-0 px-3 py-2.5 hover:bg-gray-50/50 group space-y-1">
+                  {/* Pattern — primary, prominent, editable */}
+                  <EditableText
+                    ruleId={r.id} field="pattern" value={r.pattern}
+                    className="block font-mono text-xs font-semibold text-gray-700 leading-snug"
+                    placeholder="narration keyword"
+                  />
+                  {/* Ledger — secondary, editable */}
+                  <div className="flex items-center gap-1">
+                    <span className="text-gray-300 text-[10px]">→</span>
+                    <EditableText
+                      ruleId={r.id} field="ledger_name" value={r.ledger_name}
+                      className="text-[11px] text-gray-600 font-medium"
+                      placeholder="ledger name"
+                    />
+                  </div>
+                  {/* Actions row */}
+                  <div className="flex items-center justify-between pt-0.5">
                     {kind === "draft" ? (
                       <div className="flex items-center gap-1">
                         <div className="flex gap-0.5">
@@ -3027,18 +3067,18 @@ export default function ClientDetailPage() {
                         <span className="text-[9px] text-gray-400">{Math.max(0,3-(r.match_count??0))} more</span>
                       </div>
                     ) : (
-                      <span className="text-[10px] text-gray-400">{r.match_count} hit{r.match_count !== 1 ? "s" : ""}</span>
+                      <span className="text-[9px] text-gray-400">{r.match_count} hit{r.match_count !== 1 ? "s" : ""}</span>
                     )}
                     <div className="flex items-center gap-1">
                       {kind === "draft" && (
                         <button onClick={() => toggleRuleConfirmed(r.id, false)}
-                          className="text-[9px] px-1.5 py-0.5 rounded border border-green-200 text-green-700 hover:bg-green-50">
+                          className="text-[9px] px-1.5 py-0.5 rounded border border-green-200 text-green-700 hover:bg-green-50 whitespace-nowrap">
                           Activate
                         </button>
                       )}
                       {kind === "active" && industryNameForRules && (
                         <button onClick={() => promoteToIndustry(r.id)}
-                          className="text-[9px] px-1.5 py-0.5 rounded border border-blue-200 text-blue-600 hover:bg-blue-50">
+                          className="text-[9px] px-1.5 py-0.5 rounded border border-blue-200 text-blue-600 hover:bg-blue-50 whitespace-nowrap">
                           → Ind.
                         </button>
                       )}
@@ -3056,6 +3096,8 @@ export default function ClientDetailPage() {
                 </div>
               );
 
+              const colCount = industryNameForRules ? 4 : 3;
+
               return (
                 <>
                   {/* Search + summary bar */}
@@ -3065,7 +3107,7 @@ export default function ClientDetailPage() {
                       <input
                         value={ruleSearch}
                         onChange={e => setRuleSearch(e.target.value)}
-                        placeholder="Filter patterns or ledgers…"
+                        placeholder="Search patterns, ledgers, or keywords…"
                         className="w-full pl-7 pr-3 py-1.5 text-xs border border-gray-200 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-400"
                       />
                       {ruleSearch && (
@@ -3078,72 +3120,84 @@ export default function ClientDetailPage() {
                       <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-100 font-medium">{draftRules.length} Draft</span>
                       <span className="px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-100 font-medium">{activeRules.length} Active</span>
                       {industryNameForRules && <span className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-100 font-medium">{industryMappingRules.length} Industry</span>}
+                      <span className="px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 border border-gray-200 font-medium">{GLOBAL_RULES_DISPLAY.length} Global</span>
                     </div>
                   </div>
 
-                  {/* 3-column layout: Draft | Active | Industry */}
                   {rulesLoading ? (
                     <div className="py-8 flex items-center justify-center gap-2 text-gray-400 text-sm">
                       <Loader2 size={14} className="animate-spin" /> Loading rules…
                     </div>
                   ) : (
-                    <div className={`grid gap-3 ${industryNameForRules ? "grid-cols-3" : "grid-cols-2"}`}>
+                    <div className={`grid gap-2 grid-cols-${colCount}`} style={{ gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))` }}>
 
                       {/* ── Draft ── */}
-                      <div className="border border-amber-200 rounded-lg overflow-hidden">
-                        <div className="px-3 py-2 bg-amber-50 border-b border-amber-200 flex items-center gap-1.5">
-                          <div className="w-2 h-2 rounded-full bg-amber-400" />
-                          <span className="text-xs font-semibold text-amber-800">Draft</span>
-                          <span className="text-[10px] text-amber-600 ml-auto">Awaiting confirmation</span>
+                      <div className="border border-amber-200 rounded-lg overflow-hidden flex flex-col">
+                        <div className="px-3 py-2 bg-amber-50 border-b border-amber-200 flex items-center gap-1.5 shrink-0">
+                          <div className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                          <span className="text-[11px] font-bold text-amber-800 uppercase tracking-wide">Draft</span>
+                          <span className="text-[9px] text-amber-500 ml-auto">needs confirmation</span>
                         </div>
-                        {filteredDraft.length === 0 ? (
-                          <p className="px-3 py-4 text-[11px] text-gray-400 text-center">
-                            {q ? "No matches" : "No draft rules yet"}
-                          </p>
-                        ) : (
-                          <div className="max-h-80 overflow-y-auto">
-                            {filteredDraft.map(r => <RuleRow key={r.id} r={r} kind="draft" />)}
-                          </div>
-                        )}
+                        <div className="overflow-y-auto flex-1" style={{ maxHeight: 360 }}>
+                          {filteredDraft.length === 0 ? (
+                            <p className="px-3 py-5 text-[11px] text-gray-400 text-center">{q ? "No matches" : "None yet — assign ledgers to transactions to learn"}</p>
+                          ) : filteredDraft.map(r => <RuleRow key={r.id} r={r} kind="draft" />)}
+                        </div>
                       </div>
 
                       {/* ── Active ── */}
-                      <div className="border border-green-200 rounded-lg overflow-hidden">
-                        <div className="px-3 py-2 bg-green-50 border-b border-green-200 flex items-center gap-1.5">
-                          <div className="w-2 h-2 rounded-full bg-green-500" />
-                          <span className="text-xs font-semibold text-green-800">Active</span>
-                          <span className="text-[10px] text-green-600 ml-auto">Auto-applied</span>
+                      <div className="border border-green-200 rounded-lg overflow-hidden flex flex-col">
+                        <div className="px-3 py-2 bg-green-50 border-b border-green-200 flex items-center gap-1.5 shrink-0">
+                          <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                          <span className="text-[11px] font-bold text-green-800 uppercase tracking-wide">Active</span>
+                          <span className="text-[9px] text-green-500 ml-auto">auto-applied</span>
                         </div>
-                        {filteredActive.length === 0 ? (
-                          <p className="px-3 py-4 text-[11px] text-gray-400 text-center">
-                            {q ? "No matches" : "No active rules yet"}
-                          </p>
-                        ) : (
-                          <div className="max-h-80 overflow-y-auto">
-                            {filteredActive.map(r => <RuleRow key={r.id} r={r} kind="active" />)}
-                          </div>
-                        )}
+                        <div className="overflow-y-auto flex-1" style={{ maxHeight: 360 }}>
+                          {filteredActive.length === 0 ? (
+                            <p className="px-3 py-5 text-[11px] text-gray-400 text-center">{q ? "No matches" : "None yet — activate a draft rule or assign 3×"}</p>
+                          ) : filteredActive.map(r => <RuleRow key={r.id} r={r} kind="active" />)}
+                        </div>
                       </div>
 
-                      {/* ── Industry (only if client has an industry) ── */}
+                      {/* ── Industry ── */}
                       {industryNameForRules && (
-                        <div className="border border-blue-200 rounded-lg overflow-hidden">
-                          <div className="px-3 py-2 bg-blue-50 border-b border-blue-200 flex items-center gap-1.5">
-                            <div className="w-2 h-2 rounded-full bg-blue-500" />
-                            <span className="text-xs font-semibold text-blue-800">Industry</span>
-                            <span className="text-[10px] text-blue-600 ml-auto truncate">{industryNameForRules}</span>
+                        <div className="border border-blue-200 rounded-lg overflow-hidden flex flex-col">
+                          <div className="px-3 py-2 bg-blue-50 border-b border-blue-200 flex items-center gap-1.5 shrink-0">
+                            <div className="w-1.5 h-1.5 rounded-full bg-blue-500" />
+                            <span className="text-[11px] font-bold text-blue-800 uppercase tracking-wide">Industry</span>
+                            <span className="text-[9px] text-blue-500 ml-auto truncate">{industryNameForRules}</span>
                           </div>
-                          {filteredIndustry.length === 0 ? (
-                            <p className="px-3 py-4 text-[11px] text-gray-400 text-center">
-                              {q ? "No matches" : "No industry rules yet"}
-                            </p>
-                          ) : (
-                            <div className="max-h-80 overflow-y-auto">
-                              {filteredIndustry.map(r => <RuleRow key={r.id} r={r} kind="industry" />)}
-                            </div>
-                          )}
+                          <div className="overflow-y-auto flex-1" style={{ maxHeight: 360 }}>
+                            {filteredIndustry.length === 0 ? (
+                              <p className="px-3 py-5 text-[11px] text-gray-400 text-center">{q ? "No matches" : "None yet — promote an active rule"}</p>
+                            ) : filteredIndustry.map(r => <RuleRow key={r.id} r={r} kind="industry" />)}
+                          </div>
                         </div>
                       )}
+
+                      {/* ── Global (read-only reference) ── */}
+                      <div className="border border-gray-200 rounded-lg overflow-hidden flex flex-col">
+                        <div className="px-3 py-2 bg-gray-50 border-b border-gray-200 flex items-center gap-1.5 shrink-0">
+                          <div className="w-1.5 h-1.5 rounded-full bg-gray-400" />
+                          <span className="text-[11px] font-bold text-gray-600 uppercase tracking-wide">Global</span>
+                          <span className="text-[9px] text-gray-400 ml-auto">built-in · read-only</span>
+                        </div>
+                        <div className="overflow-y-auto flex-1" style={{ maxHeight: 360 }}>
+                          {filteredGlobal.length === 0 ? (
+                            <p className="px-3 py-5 text-[11px] text-gray-400 text-center">No matches</p>
+                          ) : filteredGlobal.map(g => (
+                            <div key={g.ledger} className="border-b last:border-0 px-3 py-2.5">
+                              <div className="text-xs font-semibold text-gray-600 leading-snug">{g.label}</div>
+                              <div className="flex items-center gap-1 mt-0.5">
+                                <span className="text-gray-300 text-[10px]">→</span>
+                                <span className="text-[11px] text-gray-500 font-medium">{g.ledger}</span>
+                              </div>
+                              <div className="text-[9px] text-gray-400 mt-1 leading-relaxed">{g.examples}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
                     </div>
                   )}
                 </>
