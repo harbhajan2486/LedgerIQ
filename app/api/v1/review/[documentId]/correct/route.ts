@@ -270,6 +270,33 @@ export async function POST(
       }
     }
 
+    // ── Cross-tenant structural promotion (best-effort, async, never blocks response) ──
+    // Checks if 5+ distinct tenants have corrected the same field on the same doc fingerprint.
+    // If yes, promotes ONLY the structural signal (fingerprint + field_name) to global_field_signals.
+    // No financial data, no client mapping, no values ever cross tenant boundaries.
+    if (doc?.doc_fingerprint && extraction.field_name) {
+      const fingerprint = doc.doc_fingerprint;
+      const fieldName = extraction.field_name;
+      // Fire and forget — promotion failure never affects the correction response
+      Promise.resolve().then(async () => {
+        try {
+          const { data: tenantCount } = await supabase.rpc("count_tenants_correcting_field", {
+            p_fingerprint: fingerprint,
+            p_field_name: fieldName,
+          });
+          if ((tenantCount ?? 0) >= 5) {
+            await supabase.rpc("promote_to_global_signal", {
+              p_fingerprint: fingerprint,
+              p_field_name: fieldName,
+              p_tenant_count: tenantCount,
+            });
+          }
+        } catch {
+          // best-effort — never surfaces to user
+        }
+      });
+    }
+
     return NextResponse.json({ success: true, action: "corrected" });
   }
 

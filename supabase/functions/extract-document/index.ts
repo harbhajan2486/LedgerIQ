@@ -288,6 +288,26 @@ Deno.serve(async (req) => {
           }
         }
       }
+
+      // ── Cross-tenant global signals (structural only, no financial data) ──────
+      // These signals come from 5+ distinct CA firms correcting the same field
+      // on documents with the same structural fingerprint. Only field names are
+      // stored — never actual values, never client-specific data.
+      try {
+        const { data: globalSignals } = await supabase
+          .from("global_field_signals")
+          .select("field_name, tenant_count")
+          .eq("doc_fingerprint", fingerprintText)
+          .order("tenant_count", { ascending: false })
+          .limit(5);
+
+        if (globalSignals && globalSignals.length > 0) {
+          const globalFields = globalSignals.map((s: { field_name: string; tenant_count: number }) => `"${s.field_name}" (flagged by ${s.tenant_count} firms)`);
+          fewShotExamples += `\n\nFields commonly mis-extracted on this document type across multiple accounting firms: ${globalFields.join(", ")}. Industry-wide correction signal — be especially careful with these.\n`;
+        }
+      } catch {
+        // best-effort — global signal failure never blocks extraction
+      }
     } catch {
       // Few-shot retrieval failed — continue without it, extraction still works
     }
