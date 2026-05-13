@@ -9,7 +9,7 @@ import {
   Link2, Link2Off, X, Pencil, BookOpen, Download, Plus, Trash2,
   ShoppingCart, Receipt, Wallet, CreditCard, FolderOpen, ScrollText,
   BarChart3, ChevronDown, ChevronRight, ExternalLink, Search,
-  Filter, ArrowUp, ArrowDown
+  Filter, ArrowUp, ArrowDown, Info
 } from "lucide-react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
@@ -2147,8 +2147,15 @@ export default function ClientDetailPage() {
                           <td className="px-4 py-2.5 max-w-xs">
                             <p className="text-gray-800">{txn.narration}</p>
                             {txn.ref_number && <p className="text-gray-400 text-xs">Ref: {txn.ref_number}</p>}
-                            <p className="text-gray-400 text-xs mt-0.5" title="Pattern key used for ledger rule matching — what gets stored in ledger mapping rules">
-                              → <span className="font-mono">{extractPattern(txn.narration ?? "")}</span>
+                            <p className="text-gray-400 text-xs mt-0.5 flex items-center gap-1">
+                              <span className="text-gray-300">→</span>
+                              <span className="font-mono">{extractPattern(txn.narration ?? "")}</span>
+                              <span
+                                className="cursor-help text-gray-300 hover:text-gray-500"
+                                title={`Pattern key — used to auto-apply ledger rules on future uploads.\n\nHow it's built:\n1. Strip payment prefix (UPI/, NEFT/, IMPS/, MB:SENT TO, etc.)\n2. Remove reference numbers (6+ digit sequences)\n3. Lowercase and take first 30 characters\n\nExample: "UPI/ZOMATO/417972996010/UPI [Ref: UPI-417990399998]"\n→ "zomato"`}
+                              >
+                                <Info size={10} />
+                              </span>
                             </p>
                           </td>
                           <td className="px-4 py-2.5">

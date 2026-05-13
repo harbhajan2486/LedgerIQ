@@ -51,7 +51,18 @@ export async function GET(
       const pattern = extractPattern(narration);
       if (clientRuleMap[pattern] === ledgerName) return "Layer 3 – client rule";
       if (industryRuleMap[pattern] === ledgerName) return "Layer 2 – industry rule";
-      if (suggestLedger(narration) === ledgerName) return "Layer 1 – global keyword";
+      const globalSuggestion = suggestLedger(narration);
+      if (globalSuggestion) {
+        const gLower = globalSuggestion.toLowerCase();
+        const lLower = ledgerName.toLowerCase();
+        // Also match T&B-resolved names: e.g. global "Salary Expenses" → T&B "Salary"
+        // or first word of global matches start of T&B (min 5 chars avoids "bank", "rent" noise)
+        const gFirst = gLower.split(/\s+/)[0];
+        if (gLower === lLower || gLower.startsWith(lLower) || lLower.startsWith(gLower)
+            || (gFirst.length >= 5 && lLower.startsWith(gFirst))) {
+          return "Layer 1 – global keyword";
+        }
+      }
       return "Manually assigned";
     }
 
