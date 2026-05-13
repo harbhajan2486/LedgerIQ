@@ -8,11 +8,13 @@ import {
   CheckCircle2, AlertTriangle, Clock, RefreshCw, Landmark,
   Link2, Link2Off, X, Pencil, BookOpen, Download, Plus, Trash2,
   ShoppingCart, Receipt, Wallet, CreditCard, FolderOpen, ScrollText,
-  BarChart3, ChevronDown, ChevronRight, ExternalLink, Search
+  BarChart3, ChevronDown, ChevronRight, ExternalLink, Search,
+  Filter, ArrowUp, ArrowDown
 } from "lucide-react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { toast } from "sonner";
+import { extractPattern } from "@/lib/ledger-rules";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { GLOBAL_RULES_DISPLAY } from "@/lib/ledger-rules";
 
@@ -204,6 +206,12 @@ export default function ClientDetailPage() {
   const [reconTab, setReconTab] = useState<"matched" | "possible" | "unmatched" | "invoices">("unmatched");
   const [reconFilter, setReconFilter] = useState("");
   const [bankFilter, setBankFilter] = useState("");
+  const [bsLedgerFilters, setBsLedgerFilters] = useState<Set<string>>(new Set());
+  const [bsStatusFilters, setBsStatusFilters] = useState<Set<string>>(new Set());
+  const [bsCategoryFilters, setBsCategoryFilters] = useState<Set<string>>(new Set());
+  const [bsDateSort, setBsDateSort] = useState<"asc" | "desc">("asc");
+  const [openFilterCol, setOpenFilterCol] = useState<string | null>(null);
+  const [bsColFilterSearch, setBsColFilterSearch] = useState("");
   const [linkingTxn, setLinkingTxn] = useState<BankTxn | null>(null);
   const [linkingId, setLinkingId] = useState<string | null>(null);
   const [editingTxn, setEditingTxn] = useState<string | null>(null);
@@ -922,10 +930,10 @@ export default function ClientDetailPage() {
   }
 
   useEffect(() => { loadData(); loadRecon(); }, [clientId]);
-  useEffect(() => { if (activeTab === "bank") { loadBankTxns(); loadLedgers(); } }, [activeTab, clientId]);
+  useEffect(() => { if (activeTab === "bank") { loadBankTxns(); if (ledgers.length === 0) loadLedgers(); } }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "reconciliation") loadRecon(); }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "ledger_view" && !ledgerData) loadLedger(ledgerFromDate || undefined, ledgerToDate || undefined); }, [activeTab, clientId]);
-  useEffect(() => { if (activeTab === "ledgers") { loadLedgers(); loadMappingRules(); } }, [activeTab, clientId]);
+  useEffect(() => { if (activeTab === "ledgers") { if (ledgers.length === 0) loadLedgers(); loadMappingRules(); } }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "gst") loadGstData(); }, [activeTab, clientId, gstPeriodFrom, gstPeriodTo]);
   useEffect(() => { if (activeTab === "expected") loadExpected(); }, [activeTab, clientId]);
 
@@ -1918,7 +1926,7 @@ export default function ClientDetailPage() {
             </Card>
           )}
 
-          {/* Bank filter bar */}
+          {/* Bank filter bar — text search */}
           <div className="flex items-center gap-2">
             <input
               type="text"
@@ -1931,6 +1939,89 @@ export default function ClientDetailPage() {
               <button onClick={() => setBankFilter("")} className="text-xs text-gray-400 hover:text-gray-600 px-2 py-1.5 rounded border border-gray-200">Clear</button>
             )}
           </div>
+
+          {/* Column filters — Excel-style dropdowns */}
+          {bankTxns.length > 0 && (() => {
+            const bsAllLedgers   = Array.from(new Set(bankTxns.map(t => t.ledger_name   ?? ""))).sort();
+            const bsAllStatuses  = Array.from(new Set(bankTxns.map(t => t.status        ?? "unmatched"))).sort();
+            const bsAllCategories = Array.from(new Set(bankTxns.map(t => t.category     ?? ""))).filter(Boolean).sort();
+            const hasFilters = bsLedgerFilters.size > 0 || bsStatusFilters.size > 0 || bsCategoryFilters.size > 0;
+
+            function FilterPill({ col, label, all, selected, setSelected }: {
+              col: string; label: string; all: string[];
+              selected: Set<string>; setSelected: (s: Set<string>) => void;
+            }) {
+              const isOpen = openFilterCol === col;
+              const active = selected.size > 0;
+              return (
+                <div className="relative">
+                  <button
+                    onClick={() => { setOpenFilterCol(isOpen ? null : col); setBsColFilterSearch(""); }}
+                    className={`inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border transition-colors select-none ${
+                      active ? "border-amber-400 bg-amber-50 text-amber-700 font-medium" : "border-gray-200 text-gray-500 hover:border-gray-300 hover:bg-gray-50"
+                    }`}
+                  >
+                    <Filter size={10} />
+                    {label}{active ? ` (${selected.size})` : ""}
+                    <ChevronDown size={10} />
+                  </button>
+                  {isOpen && (
+                    <>
+                      <div className="fixed inset-0 z-40" onClick={() => setOpenFilterCol(null)} />
+                      <div className="absolute top-8 left-0 z-50 bg-white border border-gray-200 rounded-lg shadow-xl w-56 py-2">
+                        {all.length > 5 && (
+                          <div className="px-2 pb-1.5 border-b border-gray-100">
+                            <input autoFocus type="text" value={bsColFilterSearch}
+                              onChange={e => setBsColFilterSearch(e.target.value)}
+                              placeholder={`Search ${label.toLowerCase()}…`}
+                              className="w-full text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                          </div>
+                        )}
+                        <div className="flex gap-3 px-2 py-1 border-b border-gray-100">
+                          <button onClick={() => setSelected(new Set(all))} className="text-xs text-blue-600 hover:underline">Select all</button>
+                          <button onClick={() => setSelected(new Set())} className="text-xs text-gray-400 hover:underline">Clear</button>
+                        </div>
+                        <div className="max-h-56 overflow-y-auto">
+                          {all
+                            .filter(v => !bsColFilterSearch || v.toLowerCase().includes(bsColFilterSearch.toLowerCase()))
+                            .map(v => (
+                            <label key={v || "__none__"} className="flex items-center gap-2 px-2 py-1.5 hover:bg-gray-50 cursor-pointer">
+                              <input type="checkbox" checked={selected.has(v)}
+                                onChange={e => { const n = new Set(selected); e.target.checked ? n.add(v) : n.delete(v); setSelected(n); }}
+                                className="h-3 w-3 rounded border-gray-300" />
+                              <span className="text-xs truncate">{v || "(no value)"}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              );
+            }
+
+            return (
+              <div className="flex items-center gap-2 flex-wrap">
+                <FilterPill col="ledger"   label="Ledger"   all={bsAllLedgers}    selected={bsLedgerFilters}   setSelected={setBsLedgerFilters} />
+                <FilterPill col="status"   label="Status"   all={bsAllStatuses}   selected={bsStatusFilters}   setSelected={setBsStatusFilters} />
+                <FilterPill col="category" label="Category" all={bsAllCategories} selected={bsCategoryFilters} setSelected={setBsCategoryFilters} />
+                <button
+                  onClick={() => setBsDateSort(s => s === "asc" ? "desc" : "asc")}
+                  className="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border border-gray-200 text-gray-500 hover:border-gray-300 hover:bg-gray-50"
+                >
+                  Date {bsDateSort === "asc" ? <ArrowUp size={10} /> : <ArrowDown size={10} />}
+                </button>
+                {hasFilters && (
+                  <button
+                    onClick={() => { setBsLedgerFilters(new Set()); setBsStatusFilters(new Set()); setBsCategoryFilters(new Set()); }}
+                    className="inline-flex items-center gap-1 text-xs text-red-400 hover:text-red-600 ml-1"
+                  >
+                    <X size={10} /> Clear filters
+                  </button>
+                )}
+              </div>
+            );
+          })()}
 
           <Card>
             <CardHeader className="py-4 px-5 border-b flex flex-row items-center justify-between">
@@ -2005,6 +2096,31 @@ export default function ClientDetailPage() {
                         };
                       }
                     }
+                    const filteredBankTxns = bankTxns
+                      .filter(txn => {
+                        if (!bankFilter) return true;
+                        const q = bankFilter.toLowerCase();
+                        const rInfo = reconByTxnId[txn.id];
+                        return (
+                          txn.narration?.toLowerCase().includes(q) ||
+                          txn.ref_number?.toLowerCase().includes(q) ||
+                          txn.category?.toLowerCase().includes(q) ||
+                          txn.ledger_name?.toLowerCase().includes(q) ||
+                          txn.bank_name?.toLowerCase().includes(q) ||
+                          rInfo?.invoiceNum?.toLowerCase().includes(q) ||
+                          rInfo?.filename?.toLowerCase().includes(q) ||
+                          String(txn.debit_amount ?? "").includes(q) ||
+                          String(txn.credit_amount ?? "").includes(q)
+                        );
+                      })
+                      .filter(txn => bsLedgerFilters.size   === 0 || bsLedgerFilters.has(txn.ledger_name ?? ""))
+                      .filter(txn => bsStatusFilters.size   === 0 || bsStatusFilters.has(txn.status ?? "unmatched"))
+                      .filter(txn => bsCategoryFilters.size === 0 || bsCategoryFilters.has(txn.category ?? ""))
+                      .sort((a, b) => {
+                        const d1 = new Date(a.transaction_date).getTime();
+                        const d2 = new Date(b.transaction_date).getTime();
+                        return bsDateSort === "asc" ? d1 - d2 : d2 - d1;
+                      });
                   return (
                   <table className="w-full text-sm">
                     <thead>
@@ -2020,22 +2136,7 @@ export default function ClientDetailPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {bankTxns.filter(txn => {
-                        if (!bankFilter) return true;
-                        const q = bankFilter.toLowerCase();
-                        const rInfo = reconByTxnId[txn.id];
-                        return (
-                          txn.narration?.toLowerCase().includes(q) ||
-                          txn.ref_number?.toLowerCase().includes(q) ||
-                          txn.category?.toLowerCase().includes(q) ||
-                          txn.ledger_name?.toLowerCase().includes(q) ||
-                          txn.bank_name?.toLowerCase().includes(q) ||
-                          rInfo?.invoiceNum?.toLowerCase().includes(q) ||
-                          rInfo?.filename?.toLowerCase().includes(q) ||
-                          String(txn.debit_amount ?? "").includes(q) ||
-                          String(txn.credit_amount ?? "").includes(q)
-                        );
-                      }).map((txn) => {
+                      {filteredBankTxns.map((txn) => {
                         const rInfo = reconByTxnId[txn.id];
                         return (
                         <tr key={txn.id} className={`border-b last:border-0 hover:bg-gray-50/50 text-xs ${
@@ -2046,6 +2147,9 @@ export default function ClientDetailPage() {
                           <td className="px-4 py-2.5 max-w-xs">
                             <p className="text-gray-800">{txn.narration}</p>
                             {txn.ref_number && <p className="text-gray-400 text-xs">Ref: {txn.ref_number}</p>}
+                            <p className="text-gray-400 text-xs mt-0.5" title="Pattern key used for ledger rule matching — what gets stored in ledger mapping rules">
+                              → <span className="font-mono">{extractPattern(txn.narration ?? "")}</span>
+                            </p>
                           </td>
                           <td className="px-4 py-2.5">
                             <LedgerCell
@@ -2066,6 +2170,11 @@ export default function ClientDetailPage() {
                             />
                             {txn.ledger_source && (
                               <p className="text-xs text-gray-400 mt-0.5 italic" title={txn.ledger_source}>{txn.ledger_source}</p>
+                            )}
+                            {txn.ledger_name && ledgers.length > 0 && !ledgers.some(l => l.ledger_name === txn.ledger_name) && (
+                              <p className="text-xs text-amber-500 mt-0.5 flex items-center gap-1" title="This ledger name is not in your ledger master — the CA should map it to their T&B name">
+                                <AlertTriangle size={9} /> Not in ledger master
+                              </p>
                             )}
                           </td>
                           <td className="px-4 py-2.5">

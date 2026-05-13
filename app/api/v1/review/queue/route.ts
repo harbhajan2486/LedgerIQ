@@ -28,7 +28,8 @@ export async function GET(request: NextRequest) {
         .from("documents")
         .select("*", { count: "exact", head: true })
         .eq("tenant_id", profile.tenant_id)
-        .eq("status", "review_required"),
+        .eq("status", "review_required")
+        .is("deleted_at", null),
       supabase
         .from("documents")
         .select(`
@@ -37,6 +38,7 @@ export async function GET(request: NextRequest) {
         `)
         .eq("tenant_id", profile.tenant_id)
         .eq("status", "review_required")
+        .is("deleted_at", null)
         .order("uploaded_at", { ascending: true })
         .range(offset, offset + limit - 1),
       // Failed docs — always show with retry option
@@ -45,6 +47,7 @@ export async function GET(request: NextRequest) {
         .select("id, original_filename, document_type, status, uploaded_at")
         .eq("tenant_id", profile.tenant_id)
         .eq("status", "failed")
+        .is("deleted_at", null)
         .order("uploaded_at", { ascending: false })
         .limit(20),
       // Docs still processing/queued after 2 minutes
@@ -53,6 +56,7 @@ export async function GET(request: NextRequest) {
         .select("id, original_filename, document_type, status, uploaded_at")
         .eq("tenant_id", profile.tenant_id)
         .in("status", ["extracting", "queued"])
+        .is("deleted_at", null)
         .lt("uploaded_at", stuckCutoff)
         .order("uploaded_at", { ascending: false })
         .limit(20),

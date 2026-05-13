@@ -126,7 +126,8 @@ export async function POST(
     const globalLedger     = suggestLedger(txn.narration ?? "") ? resolveToMasterLedger(suggestLedger(txn.narration ?? "")!) : null;
     const bestSuggestion = confirmedLedger
       ?? (industryLedger && validLedgerNames.has(industryLedger) ? industryLedger : null)
-      ?? (globalLedger && validLedgerNames.has(globalLedger) ? globalLedger : null);
+      ?? (globalLedger && validLedgerNames.has(globalLedger) ? globalLedger : null)
+      ?? globalLedger; // use global suggestion even when not in T&B — CA sees amber "Not in ledger master" warning and corrects once; Layer 3 rule then takes over
 
     const current = txn.ledger_name;
     const isStale   = !!current && !validLedgerNames.has(current);

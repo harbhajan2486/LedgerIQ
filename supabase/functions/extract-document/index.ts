@@ -904,8 +904,35 @@ Return JSON in this exact format:
       const vendorForLedger = (parsed["vendor_name"]?.value ?? "").toLowerCase();
       if (documentType === "purchase_invoice" || documentType === "expense") {
 
-        // 1. Vendor name keyword rules (highest priority)
-        for (const rule of INVOICE_LEDGER_RULES) {
+        // 0. Client's confirmed mapping rules (highest priority — uses the CA's actual T&B ledger names)
+        //    The CA has explicitly confirmed these patterns for this client, so trust them over global rules.
+        if (clientId && vendorForLedger) {
+          const vendorFirstWord = vendorForLedger
+            .replace(/[^a-z0-9\s]/g, " ")
+            .trim()
+            .split(/\s+/)[0];
+          if (vendorFirstWord && vendorFirstWord.length >= 4) {
+            const { data: confirmedRules } = await supabase
+              .from("ledger_mapping_rules")
+              .select("ledger_name, pattern")
+              .eq("client_id", clientId)
+              .eq("confirmed", true)
+              .limit(200);
+            if (confirmedRules?.length) {
+              const match = confirmedRules.find(r =>
+                r.pattern.includes(vendorFirstWord) ||
+                vendorFirstWord.includes(r.pattern.split(" ")[0] ?? "")
+              );
+              if (match) {
+                parsed["suggested_ledger"] = { value: match.ledger_name, confidence: 0.92 };
+                ledgerReasoning = `Client confirmed rule: "${match.pattern}" → ${match.ledger_name} (from your ledger master)`;
+              }
+            }
+          }
+        }
+
+        // 1. Vendor name keyword rules (global fallback if no client rule found)
+        if (!parsed["suggested_ledger"]?.value) for (const rule of INVOICE_LEDGER_RULES) {
           if (rule.keywords.test(vendorForLedger)) {
             parsed["suggested_ledger"] = { value: rule.ledger, confidence: 0.75 };
             ledgerReasoning = `Vendor name keyword match → ${rule.ledger}`;

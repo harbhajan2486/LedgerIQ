@@ -176,7 +176,9 @@ const GLOBAL_RULES: GlobalRule[] = [
   { pattern: /\bSWIGGY\b|\bZOMATO\b|\bDUNZO\b|\bBLINKIT\b|\bZEPTO\b|\bBIGBASKET\b/i,
     ledger: "Staff Welfare Expenses" },
   // Common food chains / QSR — UPI payments to these are almost always meals
-  { pattern: /\bMC\s*DONALDS?\b|\bMCDONALD|\bMCDONALD'?S\b|\bBURGER\s*KING\b|\bKFC\b|\bDOMINOS?\b|\bPIZZA\s*HUT\b|\bSUBWAY\b|\bCAFE\s*COFFEE\b|\bCOFFEE\s*DAY\b|\bCCD\b|\bSTARBUCKS\b|\bCHAI\s*POINT\b/i,
+  // Trailing \b removed from multi-word brands: UPI narrations often concatenate without space
+  // e.g. PIZZAHUTINDIA, DOMINOSPIZZA, BURGERKINGRESTAURANT — trailing \b would fail those
+  { pattern: /\bMC[\s_-]*DONALD|\bBURGER[\s_-]*KING|\bKFC\b|\bDOMINO'?S?|\bPIZZA[\s_-]*HUT|\bSUBWAY\b|\bCAFE[\s_-]*COFFEE|\bCOFFEE[\s_-]*DAY\b|\bCCD\b|\bSTARBUCKS|\bCHAI[\s_-]*POINT/i,
     ledger: "Staff Welfare Expenses" },
 ];
 
