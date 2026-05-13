@@ -906,6 +906,10 @@ Return JSON in this exact format:
 
         // 0. Client's confirmed mapping rules (highest priority — uses the CA's actual T&B ledger names)
         //    The CA has explicitly confirmed these patterns for this client, so trust them over global rules.
+        //
+        //    NOTE: The canonical narration-trimming logic is lib/ledger-rules.ts → extractPattern().
+        //    This edge function (Deno) cannot import from lib/, so vendor normalization is replicated inline.
+        //    If you update extractPattern() in lib/ledger-rules.ts, update this block to match.
         if (clientId && vendorForLedger) {
           const vendorFirstWord = vendorForLedger
             .replace(/[^a-z0-9\s]/g, " ")
