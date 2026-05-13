@@ -45,6 +45,7 @@ export async function PATCH(
     let ruleJustConfirmed = false;
     let rulePattern = "";
     let ruleLedger = "";
+    let ruleMatchCount = 0;
 
     // If ledger_name was set, learn the pattern for this client
     if (parsed.data.ledger_name) {
@@ -84,6 +85,7 @@ export async function PATCH(
             });
           }
           ruleJustConfirmed = newCount === 3;
+          ruleMatchCount = newCount;
           rulePattern = pattern;
           ruleLedger = parsed.data.ledger_name;
 
@@ -143,7 +145,13 @@ export async function PATCH(
 
     return NextResponse.json({
       success: true,
-      ...(ruleJustConfirmed ? { rule_confirmed: true, pattern: rulePattern, ledger: ruleLedger } : {}),
+      // Always return match progress so UI can show "Learning (X/3)"
+      ...(ruleMatchCount > 0 ? {
+        match_count: ruleMatchCount,
+        rule_confirmed: ruleJustConfirmed,
+        pattern: rulePattern,
+        ledger: ruleLedger,
+      } : {}),
     });
   } catch (err) {
     console.error("[transactions/patch]", err);

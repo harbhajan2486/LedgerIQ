@@ -55,6 +55,7 @@ interface BankTxn {
   voucher_type: string | null;
   ledger_name: string | null;
   ledger_source?: string | null;
+  ledger_rule_progress?: { count: number; total: number } | null;
   // match reasoning (only present for matched/possible_match)
   match_score?: number | null;
   match_reasons?: string[] | null;
@@ -64,6 +65,8 @@ interface BankTxn {
 
 interface BankSummary {
   total: number;
+  total_rows_in_db: number;
+  truncated: boolean;
   total_debit: number;
   total_credit: number;
   matched: number;
@@ -429,8 +432,9 @@ export default function ClientDetailPage() {
   // GST Filing tab state
   interface Gstr3b {
     outward_taxable: { taxable: number; igst: number; cgst: number; sgst: number };
-    itc_available: { igst: number; cgst: number; sgst: number };
+    inward_rcm: { taxable: number; igst: number; cgst: number; sgst: number };
     output_tax: { igst: number; cgst: number; sgst: number };
+    itc_available: { igst: number; cgst: number; sgst: number };
     net_payable: { igst: number; cgst: number; sgst: number };
     total_output: number;
     total_itc: number;
@@ -445,9 +449,36 @@ export default function ClientDetailPage() {
   });
   const [gstPeriodTo, setGstPeriodTo] = useState(() => new Date().toISOString().slice(0, 10));
 
-  function loadGstData() {
+  // GST quick period presets
+  const GST_PERIOD_PRESETS = (() => {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = now.getMonth(); // 0-indexed
+    const fyYear = m >= 3 ? y : y - 1; // FY starts April (month 3)
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const lastDay = (year: number, month: number) =>
+      new Date(year, month + 1, 0).getDate();
+    // Current month
+    const cmFrom = `${y}-${pad(m + 1)}-01`;
+    const cmTo   = `${y}-${pad(m + 1)}-${lastDay(y, m)}`;
+    // GST quarters (Apr-Jun, Jul-Sep, Oct-Dec, Jan-Mar)
+    const quarters = [
+      { label: "Q1 (Apr–Jun)", from: `${fyYear}-04-01`,   to: `${fyYear}-06-30` },
+      { label: "Q2 (Jul–Sep)", from: `${fyYear}-07-01`,   to: `${fyYear}-09-30` },
+      { label: "Q3 (Oct–Dec)", from: `${fyYear}-10-01`,   to: `${fyYear}-12-31` },
+      { label: "Q4 (Jan–Mar)", from: `${fyYear + 1}-01-01`, to: `${fyYear + 1}-03-31` },
+    ];
+    return [
+      { label: "This Month", from: cmFrom, to: cmTo },
+      ...quarters,
+      { label: `FY ${fyYear}-${String(fyYear + 1).slice(2)}`, from: `${fyYear}-04-01`, to: `${fyYear + 1}-03-31` },
+      { label: `FY ${fyYear - 1}-${String(fyYear).slice(2)}`, from: `${fyYear - 1}-04-01`, to: `${fyYear}-03-31` },
+    ];
+  })();
+
+  function loadGstData(from = gstPeriodFrom, to = gstPeriodTo) {
     setGstLoading(true);
-    fetch(`/api/v1/clients/${clientId}/gst-filing?from=${gstPeriodFrom}&to=${gstPeriodTo}`)
+    fetch(`/api/v1/clients/${clientId}/gst-filing?from=${from}&to=${to}`)
       .then((r) => r.json())
       .then((d) => setGstData(d.gstr3b ?? null))
       .finally(() => setGstLoading(false));
@@ -1884,6 +1915,15 @@ export default function ClientDetailPage() {
             </div>
           )}
 
+          {/* Truncation warning — shown when DB has more than 2000 rows */}
+          {bankSummary?.truncated && (
+            <div className="flex items-center gap-2 px-3 py-2 rounded bg-amber-50 border border-amber-200 text-xs text-amber-700">
+              <AlertTriangle size={13} />
+              Showing 2,000 of {bankSummary.total_rows_in_db.toLocaleString("en-IN")} transactions.
+              Use the date filter or upload the statement in monthly batches to see all rows.
+            </div>
+          )}
+
           {/* Inline bank statement upload panel */}
           {bankUploadOpen && (
             <Card className="border-blue-200 bg-blue-50/40">
@@ -2170,12 +2210,23 @@ export default function ClientDetailPage() {
                                 });
                                 const d = await res.json();
                                 if (d.rule_confirmed) {
-                                  toast.success(`"${d.pattern}" → ${d.ledger} will now auto-map on all future uploads`);
+                                  toast.success(`Rule confirmed — "${d.pattern}" → ${d.ledger} will now auto-map on future uploads`);
+                                } else if (d.match_count && d.match_count < 3) {
+                                  toast.info(`Learning (${d.match_count}/3) — assign ${3 - d.match_count} more time${3 - d.match_count !== 1 ? "s" : ""} to auto-confirm this rule`);
                                 }
                                 loadBankTxns();
                               }}
                             />
-                            {txn.ledger_source && (
+                            {txn.ledger_rule_progress && (
+                              <p className="text-xs text-amber-500 mt-0.5 flex items-center gap-1"
+                                title={`Learning: ${txn.ledger_rule_progress.count}/${txn.ledger_rule_progress.total} assignments. Assign ${txn.ledger_rule_progress.total - txn.ledger_rule_progress.count} more time(s) to auto-confirm.`}>
+                                {[...Array(txn.ledger_rule_progress.total)].map((_, i) => (
+                                  <span key={i} className={`inline-block w-1.5 h-1.5 rounded-full ${i < txn.ledger_rule_progress!.count ? "bg-amber-400" : "bg-gray-200"}`} />
+                                ))}
+                                <span>Learning ({txn.ledger_rule_progress.count}/{txn.ledger_rule_progress.total})</span>
+                              </p>
+                            )}
+                            {txn.ledger_source && !txn.ledger_rule_progress && (
                               <p className="text-xs text-gray-400 mt-0.5 italic" title={txn.ledger_source}>{txn.ledger_source}</p>
                             )}
                             {txn.ledger_name && ledgers.length > 0 && !ledgers.some(l => l.ledger_name === txn.ledger_name) && (
@@ -3326,22 +3377,45 @@ export default function ClientDetailPage() {
       {/* ── GST FILING TAB ─────────────────────────────────────────────── */}
       {activeTab === "gst" && (
         <div className="space-y-4">
-          {/* Period picker + download */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <label className="text-xs text-gray-500">Period:</label>
-              <input type="date" value={gstPeriodFrom} onChange={(e) => setGstPeriodFrom(e.target.value)}
-                className="text-xs border border-gray-300 rounded px-2 py-1" />
-              <span className="text-xs text-gray-400">to</span>
-              <input type="date" value={gstPeriodTo} onChange={(e) => setGstPeriodTo(e.target.value)}
-                className="text-xs border border-gray-300 rounded px-2 py-1" />
+          {/* Period picker + presets + download */}
+          <div className="space-y-2">
+            {/* Quick preset buttons */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-xs text-gray-400 mr-1">Quick:</span>
+              {GST_PERIOD_PRESETS.map((p) => {
+                const active = gstPeriodFrom === p.from && gstPeriodTo === p.to;
+                return (
+                  <button key={p.label}
+                    onClick={() => { setGstPeriodFrom(p.from); setGstPeriodTo(p.to); loadGstData(p.from, p.to); }}
+                    className={`text-xs px-2 py-0.5 rounded border transition-colors ${active
+                      ? "bg-blue-600 border-blue-600 text-white"
+                      : "border-gray-300 text-gray-600 hover:border-blue-400 hover:text-blue-600"}`}
+                  >
+                    {p.label}
+                  </button>
+                );
+              })}
             </div>
-            <a
-              href={`/api/v1/clients/${clientId}/gst-filing?from=${gstPeriodFrom}&to=${gstPeriodTo}&format=excel`}
-              className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded bg-green-600 text-white hover:bg-green-700"
-            >
-              <Download size={12} /> Download GST Filing Excel (GSTR-1 + 3B)
-            </a>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-gray-500">Custom:</label>
+                <input type="date" value={gstPeriodFrom} onChange={(e) => setGstPeriodFrom(e.target.value)}
+                  className="text-xs border border-gray-300 rounded px-2 py-1" />
+                <span className="text-xs text-gray-400">to</span>
+                <input type="date" value={gstPeriodTo} onChange={(e) => setGstPeriodTo(e.target.value)}
+                  className="text-xs border border-gray-300 rounded px-2 py-1" />
+                <button onClick={() => loadGstData()}
+                  className="text-xs px-2.5 py-1 rounded bg-gray-100 hover:bg-gray-200 border border-gray-300 text-gray-700">
+                  Load
+                </button>
+              </div>
+              <a
+                href={`/api/v1/clients/${clientId}/gst-filing?from=${gstPeriodFrom}&to=${gstPeriodTo}&format=excel`}
+                className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded bg-green-600 text-white hover:bg-green-700"
+              >
+                <Download size={12} /> Download GST Filing Excel (GSTR-1 + 3B)
+              </a>
+            </div>
           </div>
 
           {gstLoading ? (
@@ -3362,18 +3436,18 @@ export default function ClientDetailPage() {
                   <h2 className="text-base font-semibold text-gray-900">GSTR-3B Filing Numbers</h2>
                   <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded">Copy these into the GST portal</span>
                 </div>
-                <div className="grid grid-cols-3 gap-4">
-                  {/* Output Tax */}
+                <div className={`grid gap-4 ${gstData.inward_rcm && (gstData.inward_rcm.igst + gstData.inward_rcm.cgst + gstData.inward_rcm.sgst) > 0 ? "grid-cols-2 lg:grid-cols-4" : "grid-cols-3"}`}>
+                  {/* 3.1(a) Output Tax */}
                   <Card className="border-blue-200">
                     <CardHeader className="py-2 px-4 border-b bg-blue-50/50">
-                      <CardTitle className="text-xs font-semibold text-blue-700 uppercase tracking-wide">3.1(a) — Output Tax</CardTitle>
+                      <CardTitle className="text-xs font-semibold text-blue-700 uppercase tracking-wide">3.1(a) — Outward Supplies</CardTitle>
                     </CardHeader>
                     <CardContent className="py-3 px-4 space-y-1.5">
                       {[
                         { label: "Taxable Value", value: gstData.outward_taxable.taxable },
-                        { label: "Integrated Tax (IGST)", value: gstData.output_tax.igst },
-                        { label: "Central Tax (CGST)", value: gstData.output_tax.cgst },
-                        { label: "State Tax (SGST)", value: gstData.output_tax.sgst },
+                        { label: "IGST", value: gstData.outward_taxable.igst },
+                        { label: "CGST", value: gstData.outward_taxable.cgst },
+                        { label: "SGST", value: gstData.outward_taxable.sgst },
                       ].map(({ label, value }) => (
                         <div key={label} className="flex justify-between text-xs">
                           <span className="text-gray-500">{label}</span>
@@ -3387,16 +3461,39 @@ export default function ClientDetailPage() {
                     </CardContent>
                   </Card>
 
-                  {/* ITC Available */}
+                  {/* 3.1(d) Inward RCM — only shown when there are RCM purchases */}
+                  {gstData.inward_rcm && (gstData.inward_rcm.igst + gstData.inward_rcm.cgst + gstData.inward_rcm.sgst) > 0 && (
+                    <Card className="border-purple-200">
+                      <CardHeader className="py-2 px-4 border-b bg-purple-50/50">
+                        <CardTitle className="text-xs font-semibold text-purple-700 uppercase tracking-wide">3.1(d) — Inward RCM</CardTitle>
+                      </CardHeader>
+                      <CardContent className="py-3 px-4 space-y-1.5">
+                        <p className="text-[10px] text-gray-400 leading-tight">GTA, security, legal — you pay tax as recipient</p>
+                        {[
+                          { label: "Taxable Value", value: gstData.inward_rcm.taxable },
+                          { label: "IGST", value: gstData.inward_rcm.igst },
+                          { label: "CGST", value: gstData.inward_rcm.cgst },
+                          { label: "SGST", value: gstData.inward_rcm.sgst },
+                        ].map(({ label, value }) => (
+                          <div key={label} className="flex justify-between text-xs">
+                            <span className="text-gray-500">{label}</span>
+                            <span className="font-mono font-medium text-gray-900">₹{value.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</span>
+                          </div>
+                        ))}
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {/* 4(A) ITC Available */}
                   <Card className="border-green-200">
                     <CardHeader className="py-2 px-4 border-b bg-green-50/50">
                       <CardTitle className="text-xs font-semibold text-green-700 uppercase tracking-wide">4(A) — ITC Available</CardTitle>
                     </CardHeader>
                     <CardContent className="py-3 px-4 space-y-1.5">
                       {[
-                        { label: "Integrated Tax (IGST)", value: gstData.itc_available.igst },
-                        { label: "Central Tax (CGST)", value: gstData.itc_available.cgst },
-                        { label: "State Tax (SGST)", value: gstData.itc_available.sgst },
+                        { label: "IGST", value: gstData.itc_available.igst },
+                        { label: "CGST", value: gstData.itc_available.cgst },
+                        { label: "SGST", value: gstData.itc_available.sgst },
                       ].map(({ label, value }) => (
                         <div key={label} className="flex justify-between text-xs">
                           <span className="text-gray-500">{label}</span>
@@ -3407,6 +3504,7 @@ export default function ClientDetailPage() {
                         <span className="text-green-700">Total ITC</span>
                         <span className="font-mono text-green-700">₹{gstData.total_itc.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</span>
                       </div>
+                      <p className="text-[10px] text-gray-400 mt-1">Applied as per Rule 88A order</p>
                     </CardContent>
                   </Card>
 

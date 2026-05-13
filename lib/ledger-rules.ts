@@ -226,7 +226,9 @@ export function extractPattern(narration: string): string {
   n = n.replace(/\s+(upi|neft|rtgs|imps|mmt|ref|cr|dr)$/i, "").trim();
 
   // Take first 30 chars of what remains
-  return n.slice(0, 30).trim();
+  const result = n.slice(0, 30).trim();
+  // Guard: never return empty string — an empty key would match any rule stored with ""
+  return result || "__unknown__";
 }
 
 // ── Layer 1 display metadata (for Rules Library UI) ──────────────────────────

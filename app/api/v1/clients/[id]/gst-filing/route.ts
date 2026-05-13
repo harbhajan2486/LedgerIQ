@@ -23,6 +23,53 @@ function normaliseDate(d: string | undefined | null): string | null {
   return d;
 }
 
+// ─── GST Rule 88A ITC set-off order ─────────────────────────────────────────
+// IGST ITC → IGST first, then CGST, then SGST (in any proportion)
+// CGST ITC → CGST first, then IGST (never SGST)
+// SGST ITC → SGST first, then IGST (never CGST)
+function applyITCRule88A(
+  igstOut: number, cgstOut: number, sgstOut: number,
+  igstItc: number, cgstItc: number, sgstItc: number,
+): { igst: number; cgst: number; sgst: number } {
+  // Step 1: IGST ITC offsets IGST output
+  const igstUsedForIgst = Math.min(igstItc, igstOut);
+  let igstPayable = igstOut - igstUsedForIgst;
+  let igstItcLeft = igstItc - igstUsedForIgst;
+
+  // Step 2: Remaining IGST ITC → CGST output
+  const igstUsedForCgst = Math.min(igstItcLeft, cgstOut);
+  let cgstPayable = cgstOut - igstUsedForCgst;
+  igstItcLeft -= igstUsedForCgst;
+
+  // Step 3: Remaining IGST ITC → SGST output
+  const igstUsedForSgst = Math.min(igstItcLeft, sgstOut);
+  let sgstPayable = sgstOut - igstUsedForSgst;
+
+  // Step 4: CGST ITC → remaining CGST payable
+  const cgstUsedForCgst = Math.min(cgstItc, cgstPayable);
+  cgstPayable -= cgstUsedForCgst;
+  let cgstItcLeft = cgstItc - cgstUsedForCgst;
+
+  // Step 5: CGST ITC (remaining) → remaining IGST payable
+  const cgstUsedForIgst = Math.min(cgstItcLeft, igstPayable);
+  igstPayable -= cgstUsedForIgst;
+
+  // Step 6: SGST ITC → remaining SGST payable
+  const sgstUsedForSgst = Math.min(sgstItc, sgstPayable);
+  sgstPayable -= sgstUsedForSgst;
+  let sgstItcLeft = sgstItc - sgstUsedForSgst;
+
+  // Step 7: SGST ITC (remaining) → remaining IGST payable
+  const sgstUsedForIgst = Math.min(sgstItcLeft, igstPayable);
+  igstPayable -= sgstUsedForIgst;
+
+  return {
+    igst: Math.max(0, igstPayable),
+    cgst: Math.max(0, cgstPayable),
+    sgst: Math.max(0, sgstPayable),
+  };
+}
+
 // ─── types ──────────────────────────────────────────────────────────────────
 
 interface FieldMap {
@@ -70,8 +117,7 @@ export async function GET(
 
   // ── Fetch all verified docs for this client ──────────────────────────────
   // Only reviewed/reconciled/posted (human-verified). review_required = unverified AI, excluded.
-  // No DB-level date filter — we filter by invoice_date in JS to match GSTR-1 tax period logic.
-  const docQ = supabase
+  const { data: docs } = await supabase
     .from("documents")
     .select("id, document_type, original_filename, uploaded_at")
     .eq("tenant_id", profile.tenant_id)
@@ -79,7 +125,6 @@ export async function GET(
     .in("document_type", ["sales_invoice", "purchase_invoice", "expense", "credit_note", "debit_note"])
     .in("status", ["reviewed", "reconciled", "posted"]);
 
-  const { data: docs } = await docQ;
   if (!docs?.length) {
     if (fmt === "excel") return NextResponse.json({ error: "No documents found" }, { status: 404 });
     return NextResponse.json({ b2b: [], b2c_large: [], b2c_small: [], hsn: [], itc: [], gstr3b: null });
@@ -103,17 +148,15 @@ export async function GET(
 
   // Build per-doc field map — deduplicate: one value per field per doc.
   // Priority: accepted/corrected (human-verified) over pending, newest first.
-  // Handles duplicate rows from concurrent re-extractions.
   type ExtRow = { document_id: string; field_name: string; extracted_value: string | null; status: string };
-  const verifiedMap: Record<string, Record<string, string>> = {}; // doc → field → value (human-verified)
-  const pendingMap:  Record<string, Record<string, string>> = {}; // doc → field → value (AI, not yet reviewed)
+  const verifiedMap: Record<string, Record<string, string>> = {};
+  const pendingMap:  Record<string, Record<string, string>> = {};
 
   for (const ext of (extractions ?? []) as ExtRow[]) {
     if (!ext.extracted_value) continue;
     const isVerified = ext.status === "accepted" || ext.status === "corrected";
     const target = isVerified ? verifiedMap : pendingMap;
     if (!target[ext.document_id]) target[ext.document_id] = {};
-    // First write wins (newest first from Supabase default order)
     if (!target[ext.document_id][ext.field_name]) {
       target[ext.document_id][ext.field_name] = ext.extracted_value;
     }
@@ -127,7 +170,6 @@ export async function GET(
   }
 
   // ── Filter by invoice_date (not uploaded_at) — matches GSTR-1 tax period ──
-  // GSTR-1 period is determined by invoice date, not when the doc was uploaded.
   const filteredDocs = docs.filter((d) => {
     if (!from && !to) return true;
     const invDate = normaliseDate((fieldMap[d.id] as FieldMap | undefined)?.invoice_date);
@@ -147,7 +189,9 @@ export async function GET(
   const b2b = salesDocs
     .map((doc, i) => {
       const f = fieldMap[doc.id] ?? {};
-      const buyerGstin = f.buyer_gstin ?? f.party_gstin ?? f.vendor_gstin ?? "";
+      // Use buyer_gstin or party_gstin only — never fall back to vendor_gstin
+      // (vendor_gstin is the seller's own GSTIN, not the recipient's)
+      const buyerGstin = f.buyer_gstin ?? f.party_gstin ?? "";
       if (!buyerGstin || buyerGstin.length < 10) return null;
       const taxable = n(f.taxable_value ?? f.total_amount);
       const cgst = n(f.cgst_amount);
@@ -174,7 +218,7 @@ export async function GET(
   const b2cAll = salesDocs
     .map((doc) => {
       const f = fieldMap[doc.id] ?? {};
-      const buyerGstin = f.buyer_gstin ?? f.party_gstin ?? f.vendor_gstin ?? "";
+      const buyerGstin = f.buyer_gstin ?? f.party_gstin ?? "";
       if (buyerGstin && buyerGstin.length >= 10) return null;
       const taxable = n(f.taxable_value ?? f.total_amount);
       if (taxable === 0) return null;
@@ -182,7 +226,6 @@ export async function GET(
       const cgst = n(f.cgst_amount);
       const sgst = n(f.sgst_amount);
       const invoiceValue = n(f.total_amount ?? f.taxable_value);
-      // B2C Large: interstate (IGST > 0) and value > 2.5L
       const isLarge = igst > 0 && invoiceValue > 250000;
       return {
         type: isLarge ? "large" : "small" as "large" | "small",
@@ -212,7 +255,6 @@ export async function GET(
 
   const b2c_large = b2cAll.filter((r) => r.type === "large").map(({ type: _t, ...r }) => r);
 
-  // B2C Small: aggregate by rate + place_of_supply
   const b2cSmallMap: Record<string, { place_of_supply: string; rate: number; taxable: number; igst: number; cgst: number; sgst: number }> = {};
   for (const r of b2cAll.filter((x) => x.type === "small")) {
     const key = `${r.place_of_supply}||${r.applicable_tax_rate}`;
@@ -225,19 +267,21 @@ export async function GET(
   const b2c_small = Object.values(b2cSmallMap);
 
   // ── GSTR-1: HSN/SAC Summary ──────────────────────────────────────────────
-  // Aggregate all sales docs by HSN code
   const hsnMap: Record<string, { hsn: string; description: string; uqc: string; qty: number; taxable: number; igst: number; cgst: number; sgst: number; rate: number }> = {};
   for (const doc of salesDocs) {
     const f = fieldMap[doc.id] ?? {};
     const hsn = f.hsn_sac_code ?? "Unknown";
     const taxable = n(f.taxable_value ?? f.total_amount);
     if (taxable === 0) continue;
+    const igst = n(f.igst_amount);
+    const cgst = n(f.cgst_amount);
+    const sgst = n(f.sgst_amount);
     if (!hsnMap[hsn]) hsnMap[hsn] = { hsn, description: "", uqc: "NOS", qty: 0, taxable: 0, igst: 0, cgst: 0, sgst: 0, rate: n(f.gst_rate) };
     hsnMap[hsn].qty     += 1;
     hsnMap[hsn].taxable += taxable;
-    hsnMap[hsn].igst    += n(f.igst_amount);
-    hsnMap[hsn].cgst    += n(f.cgst_amount);
-    hsnMap[hsn].sgst    += n(f.sgst_amount);
+    hsnMap[hsn].igst    += igst;
+    hsnMap[hsn].cgst    += cgst;
+    hsnMap[hsn].sgst    += sgst;
   }
   const hsn = Object.values(hsnMap);
 
@@ -249,8 +293,8 @@ export async function GET(
       const sgst = n(f.sgst_amount);
       const igst = n(f.igst_amount);
       if (cgst + sgst + igst === 0) return null;
-      // Only explicit "Yes" counts as eligible — null/unknown = not counted (conservative)
-      const itcEligible = f.itc_eligible === "Yes";
+      // Case-insensitive "Yes" check — AI may return "yes", "YES", "Yes"
+      const itcEligible = f.itc_eligible?.toLowerCase() === "yes";
       return {
         sr: i + 1,
         vendor_name: f.vendor_name ?? "",
@@ -267,7 +311,8 @@ export async function GET(
     .filter(Boolean);
 
   // ── GSTR-3B Summary ──────────────────────────────────────────────────────
-  // 3.1(a): Outward taxable supplies (sales, non-RC)
+
+  // 3.1(a): Outward taxable supplies (non-RCM sales)
   const outward = salesDocs.reduce((acc, doc) => {
     const f = fieldMap[doc.id] ?? {};
     if ((f.reverse_charge ?? "No") === "Yes") return acc;
@@ -278,8 +323,38 @@ export async function GET(
     return acc;
   }, { taxable: 0, igst: 0, cgst: 0, sgst: 0 });
 
-  // 3.1(a) RCM outward
-  const outwardRcm = salesDocs.reduce((acc, doc) => {
+  // Credit notes reduce 3.1(a) — track taxable too for consistency
+  const cnReduction = creditDocs.reduce((acc, doc) => {
+    const f = fieldMap[doc.id] ?? {};
+    acc.taxable += n(f.taxable_value ?? f.total_amount);
+    acc.igst += n(f.igst_amount);
+    acc.cgst += n(f.cgst_amount);
+    acc.sgst += n(f.sgst_amount);
+    return acc;
+  }, { taxable: 0, igst: 0, cgst: 0, sgst: 0 });
+
+  // Debit notes increase 3.1(a)
+  const debitNoteAddition = debitDocs.reduce((acc, doc) => {
+    const f = fieldMap[doc.id] ?? {};
+    acc.taxable += n(f.taxable_value ?? f.total_amount);
+    acc.igst += n(f.igst_amount);
+    acc.cgst += n(f.cgst_amount);
+    acc.sgst += n(f.sgst_amount);
+    return acc;
+  }, { taxable: 0, igst: 0, cgst: 0, sgst: 0 });
+
+  // Net 3.1(a) outward tax (gross outward + debit notes - credit notes)
+  const outwardNet = {
+    taxable: outward.taxable + debitNoteAddition.taxable - cnReduction.taxable,
+    igst:    outward.igst    + debitNoteAddition.igst    - cnReduction.igst,
+    cgst:    outward.cgst    + debitNoteAddition.cgst    - cnReduction.cgst,
+    sgst:    outward.sgst    + debitNoteAddition.sgst    - cnReduction.sgst,
+  };
+
+  // 3.1(d): Inward supplies liable to RCM — PURCHASE invoices where YOU pay tax
+  // (GTA, security agency, legal advocates, etc.)
+  // Note: this was previously wrong (using salesDocs). Fixed.
+  const inwardRcm = purchaseDocs.reduce((acc, doc) => {
     const f = fieldMap[doc.id] ?? {};
     if ((f.reverse_charge ?? "No") !== "Yes") return acc;
     acc.taxable += n(f.taxable_value ?? f.total_amount);
@@ -297,40 +372,32 @@ export async function GET(
       return acc;
     }, { igst: 0, cgst: 0, sgst: 0 });
 
-  // Credit notes (reduce output tax)
-  const cnReduction = creditDocs.reduce((acc, doc) => {
-    const f = fieldMap[doc.id] ?? {};
-    acc.igst += n(f.igst_amount);
-    acc.cgst += n(f.cgst_amount);
-    acc.sgst += n(f.sgst_amount);
-    return acc;
-  }, { igst: 0, cgst: 0, sgst: 0 });
+  // Total output tax = 3.1(a) net + 3.1(d) RCM liability
+  const totalOutputIgst = outwardNet.igst + inwardRcm.igst;
+  const totalOutputCgst = outwardNet.cgst + inwardRcm.cgst;
+  const totalOutputSgst = outwardNet.sgst + inwardRcm.sgst;
 
-  const outputTax = {
-    igst: outward.igst - cnReduction.igst,
-    cgst: outward.cgst - cnReduction.cgst,
-    sgst: outward.sgst - cnReduction.sgst,
-  };
-  const netPayable = {
-    igst: Math.max(0, outputTax.igst - itcTotal.igst),
-    cgst: Math.max(0, outputTax.cgst - itcTotal.cgst),
-    sgst: Math.max(0, outputTax.sgst - itcTotal.sgst),
-  };
+  // Net payable: apply Rule 88A ITC cross-utilization order
+  const netPayable = applyITCRule88A(
+    totalOutputIgst, totalOutputCgst, totalOutputSgst,
+    itcTotal.igst, itcTotal.cgst, itcTotal.sgst,
+  );
 
   const gstr3b = {
-    outward_taxable: outward,
-    outward_rcm: outwardRcm,
+    outward_taxable:      outwardNet,
+    inward_rcm:           inwardRcm,
     credit_note_reduction: cnReduction,
-    output_tax: outputTax,
-    itc_available: itcTotal,
-    net_payable: netPayable,
-    total_net_payable: netPayable.igst + netPayable.cgst + netPayable.sgst,
-    total_output: outputTax.igst + outputTax.cgst + outputTax.sgst,
-    total_itc: itcTotal.igst + itcTotal.cgst + itcTotal.sgst,
-    period_from: from ?? "",
-    period_to: to ?? "",
-    client_name: client.client_name,
-    client_gstin: client.gstin ?? "",
+    debit_note_addition:   debitNoteAddition,
+    output_tax: { igst: totalOutputIgst, cgst: totalOutputCgst, sgst: totalOutputSgst },
+    itc_available:        itcTotal,
+    net_payable:          netPayable,
+    total_net_payable:    netPayable.igst + netPayable.cgst + netPayable.sgst,
+    total_output:         totalOutputIgst + totalOutputCgst + totalOutputSgst,
+    total_itc:            itcTotal.igst + itcTotal.cgst + itcTotal.sgst,
+    period_from:          from ?? "",
+    period_to:            to ?? "",
+    client_name:          client.client_name,
+    client_gstin:         client.gstin ?? "",
   };
 
   // ── Return JSON ──────────────────────────────────────────────────────────
@@ -342,25 +409,30 @@ export async function GET(
   const wb = XLSX.utils.book_new();
 
   // Sheet 1: GSTR-3B Filing Summary
-  const safe = (n: number) => n.toFixed(2);
+  const safe = (v: number) => v.toFixed(2);
   const g3bRows = [
     ["GSTR-3B FILING DATA", "", "", "", ""],
     [`Client: ${client.client_name}`, `GSTIN: ${client.gstin ?? "N/A"}`, "", `Period: ${from ?? "All"} to ${to ?? "All"}`, ""],
     ["", "", "", "", ""],
     ["Section", "Description", "Taxable Value (₹)", "Integrated Tax (₹)", "Central Tax (₹)", "State/UT Tax (₹)"],
-    ["3.1(a)", "Outward taxable supplies (other than zero, nil, exempt)", safe(outward.taxable), safe(outputTax.igst), safe(outputTax.cgst), safe(outputTax.sgst)],
-    ["3.1(d)", "Inward supplies liable to RCM", safe(outwardRcm.taxable), safe(outwardRcm.igst), safe(outwardRcm.cgst), safe(outwardRcm.sgst)],
+    ["3.1(a)", "Outward taxable supplies (net of credit/debit notes)", safe(outwardNet.taxable), safe(outwardNet.igst), safe(outwardNet.cgst), safe(outwardNet.sgst)],
+    ["3.1(d)", "Inward supplies liable to reverse charge (GTA, security, legal etc.)", safe(inwardRcm.taxable), safe(inwardRcm.igst), safe(inwardRcm.cgst), safe(inwardRcm.sgst)],
+    ["", "", "", "", "", ""],
+    ["", "Total Output Tax Liability", "", safe(totalOutputIgst), safe(totalOutputCgst), safe(totalOutputSgst)],
     ["", "", "", "", "", ""],
     ["4(A)(5)", "All other ITC (inputs/services from registered suppliers)", "", safe(itcTotal.igst), safe(itcTotal.cgst), safe(itcTotal.sgst)],
     ["", "", "", "", "", ""],
-    ["NET", "Output Tax", "", safe(outputTax.igst), safe(outputTax.cgst), safe(outputTax.sgst)],
-    ["NET", "Less: ITC Available", "", safe(itcTotal.igst), safe(itcTotal.cgst), safe(itcTotal.sgst)],
-    ["NET", "TAX PAYABLE (after ITC)", "", safe(netPayable.igst), safe(netPayable.cgst), safe(netPayable.sgst)],
+    ["NET", "Output Tax Liability", "", safe(totalOutputIgst), safe(totalOutputCgst), safe(totalOutputSgst)],
+    ["NET", "Less: ITC Available (Rule 88A order)", "", safe(itcTotal.igst), safe(itcTotal.cgst), safe(itcTotal.sgst)],
+    ["NET", "TAX PAYABLE (after ITC set-off per Rule 88A)", "", safe(netPayable.igst), safe(netPayable.cgst), safe(netPayable.sgst)],
     ["", "", "", "", "", ""],
     ["TOTAL NET PAYABLE", "", "", "", "", safe(gstr3b.total_net_payable)],
+    ["", "", "", "", "", ""],
+    ["NOTE", "Sections 3.1(b) zero-rated exports and 3.1(c) nil-rated/exempt supplies are not auto-computed.", "", "", "", ""],
+    ["NOTE", "Verify GSTR-2B before claiming ITC. Amounts are based on reviewed documents only.", "", "", "", ""],
   ];
   const ws3b = XLSX.utils.aoa_to_sheet(g3bRows);
-  ws3b["!cols"] = [{ wch: 12 }, { wch: 52 }, { wch: 20 }, { wch: 20 }, { wch: 20 }, { wch: 20 }];
+  ws3b["!cols"] = [{ wch: 12 }, { wch: 58 }, { wch: 20 }, { wch: 20 }, { wch: 20 }, { wch: 20 }];
   ws3b["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 5 } }];
   XLSX.utils.book_append_sheet(wb, ws3b, "GSTR-3B Summary");
 
@@ -434,7 +506,8 @@ export async function GET(
     "Description": r.description || "—",
     "UQC": r.uqc,
     "Total Qty": r.qty,
-    "Total Value (₹)": fmt2(r.taxable),
+    // Total Value = taxable + all tax (correct per GSTR-1 Table 12)
+    "Total Value (₹)": fmt2(r.taxable + r.igst + r.cgst + r.sgst),
     "Taxable Value (₹)": fmt2(r.taxable),
     "IGST (₹)": fmt2(r.igst),
     "CGST (₹)": fmt2(r.cgst),

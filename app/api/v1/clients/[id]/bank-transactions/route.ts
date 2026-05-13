@@ -18,24 +18,25 @@ export async function GET(
     const { id: clientId } = await params;
 
     // Fetch client industry + confirmed rules for ledger source derivation
-    const [txnsResult, clientRow, rulesResult, industryRulesResult] = await Promise.all([
+    const [txnsResult, clientRow, rulesResult, industryRulesResult, allClientRulesResult] = await Promise.all([
       supabase
         .from("bank_transactions")
         .select("id, transaction_date, narration, ref_number, debit_amount, credit_amount, balance, bank_name, status, category, voucher_type, ledger_name")
         .eq("tenant_id", profile.tenant_id)
         .eq("client_id", clientId)
         .order("transaction_date", { ascending: true })
-        .limit(1000),
+        .limit(2000),
       supabase.from("clients").select("industry_name").eq("id", clientId).single(),
       supabase.from("ledger_mapping_rules").select("pattern, ledger_name")
         .eq("client_id", clientId).eq("tenant_id", profile.tenant_id).eq("confirmed", true),
       supabase.from("ledger_mapping_rules").select("pattern, ledger_name, industry_name")
         .eq("tenant_id", profile.tenant_id).is("client_id", null).eq("confirmed", true),
+      // Load all client rules including unconfirmed, for Learning (X/3) progress display
+      supabase.from("ledger_mapping_rules").select("pattern, match_count, confirmed")
+        .eq("client_id", clientId).eq("tenant_id", profile.tenant_id),
     ]);
 
-    const txns = txnsResult;
-
-    const rows = txns.data ?? [];
+    const rows = txnsResult.data ?? [];
 
     // Build rule maps for ledger source derivation
     const industryName = clientRow.data?.industry_name ?? null;
@@ -44,6 +45,11 @@ export async function GET(
     const industryRuleMap: Record<string, string> = {};
     for (const r of (industryRulesResult.data ?? []).filter(r => r.industry_name === industryName)) {
       industryRuleMap[r.pattern] = r.ledger_name;
+    }
+    // Map for Learning (X/3) progress: pattern → {count, confirmed}
+    const ruleProgressMap: Record<string, { count: number; confirmed: boolean }> = {};
+    for (const r of allClientRulesResult.data ?? []) {
+      ruleProgressMap[r.pattern] = { count: r.match_count ?? 1, confirmed: r.confirmed ?? false };
     }
 
     function deriveLedgerSource(narration: string, ledgerName: string | null): string | null {
@@ -119,13 +125,20 @@ export async function GET(
       }
     }
 
-    // Enrich transactions with match info + ledger source
+    // Enrich transactions with match info + ledger source + rule progress
     const enrichedRows = rows.map((txn) => {
       const recon = reconMap[txn.id];
       const docInfo = recon?.document_id ? docInfoMap[recon.document_id] : null;
+      const pattern = extractPattern(txn.narration ?? "");
+      const progress = ruleProgressMap[pattern];
+      // Show Learning (X/3) if rule exists but not yet confirmed
+      const ledgerRuleProgress = (progress && !progress.confirmed)
+        ? { count: progress.count, total: 3 }
+        : null;
       return {
         ...txn,
         ledger_source: deriveLedgerSource(txn.narration ?? "", txn.ledger_name),
+        ledger_rule_progress: ledgerRuleProgress,
         ...(recon ? {
           match_score: recon.match_score,
           match_reasons: recon.match_reasons,
@@ -141,10 +154,19 @@ export async function GET(
     const matched = rows.filter((r) => r.status === "matched").length;
     const unmatched = rows.filter((r) => r.status === "unmatched").length;
 
+    // Get true total count to detect if we hit the 2000-row cap
+    const { count: totalRowsInDb } = await supabase
+      .from("bank_transactions")
+      .select("*", { count: "exact", head: true })
+      .eq("tenant_id", profile.tenant_id)
+      .eq("client_id", clientId);
+
     return NextResponse.json({
       transactions: enrichedRows,
       summary: {
         total: rows.length,
+        total_rows_in_db: totalRowsInDb ?? rows.length,
+        truncated: rows.length === 2000 && (totalRowsInDb ?? 0) > 2000,
         total_debit: totalDebit,
         total_credit: totalCredit,
         matched,
