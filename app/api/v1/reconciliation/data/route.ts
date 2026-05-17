@@ -15,6 +15,7 @@ export async function GET(request: NextRequest) {
   const clientId = new URL(request.url).searchParams.get("clientId") ?? null;
 
   // Fetch reconciliations with their bank transaction + document data
+  // Include exceptions in the main fetch so we can count them correctly in summary
   const reconQuery = supabase
     .from("reconciliations")
     .select(`
@@ -58,7 +59,7 @@ export async function GET(request: NextRequest) {
         .in("document_id", reconDocIds)
         .in("field_name", ["total_amount", "invoice_number"])
         .in("status", ["accepted", "corrected", "pending"])
-        .order("status", { ascending: true }) // corrected last = wins
+        .order("status", { ascending: false }) // descending: corrected > pending > accepted → corrected wins
     : { data: [] };
 
   // Build per-doc extraction map: corrected > accepted > pending
@@ -115,7 +116,7 @@ export async function GET(request: NextRequest) {
         .in("document_id", unmatchedDocIds)
         .in("field_name", ["total_amount", "invoice_date", "invoice_number"])
         .in("status", ["accepted", "corrected"])
-        .order("status", { ascending: true }) // corrected last = wins
+        .order("status", { ascending: false }) // descending: corrected > accepted → corrected wins
     : { data: [] };
   const amountMap: Record<string, string> = {};
   const invoiceDateMap: Record<string, string> = {};
@@ -128,7 +129,8 @@ export async function GET(request: NextRequest) {
 
   const matched    = enrichedRecons.filter((r) => r.status === "matched").length;
   const possible   = enrichedRecons.filter((r) => r.status === "possible_match").length;
-  const exceptions = enrichedRecons.filter((r) => r.status === "exception").length;
+  // Count exceptions from ALL recons (enrichedRecons excludes exception rows, so count from raw)
+  const exceptions = (recons ?? []).filter((r) => r.status === "exception").length;
   const unmatchedTxns = allTxns ?? [];
   const unresolved = unmatchedTxns.filter((t) => !t.category).length;
   const categorized_no_invoice = unmatchedTxns.filter((t) => !!t.category).length;

@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Loader2, Trash2, Plus, Search, ShieldCheck, Building2, User,
-  ChevronDown, ChevronUp, BookOpen, Scale, TrendingUp, Copy,
+  ChevronDown, ChevronUp, BookOpen, Scale, TrendingUp, Copy, Globe, Check, X,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -31,7 +31,23 @@ interface ClientForSelect {
   client_name: string;
 }
 
-type TopTab = "ledger" | "taxation";
+type TopTab = "ledger" | "taxation" | "nominations";
+
+interface GlobalNomination {
+  id: string;
+  pattern: string;
+  ledger_name: string;
+  industry_name: string | null;
+  rcm_applicable: boolean;
+  tds_section: string | null;
+  suggested_gst_rate: number | null;
+  tenant_count: number;
+  total_confirmations: number;
+  status: "nominated" | "approved" | "rejected";
+  rejection_reason: string | null;
+  approved_at: string | null;
+  created_at: string;
+}
 type LayerTab = "layer3" | "layer2" | "layer1";
 type TaxTab = "tds" | "hsn" | "sac" | "rcm" | "itc";
 
@@ -66,6 +82,12 @@ export default function RulesLibraryPage() {
   const [copyOpen, setCopyOpen] = useState<string | null>(null); // clientId whose copy panel is open
   const [copying, setCopying] = useState(false);
 
+  // Global nominations state
+  const [nominations, setNominations] = useState<GlobalNomination[]>([]);
+  const [loadingNominations, setLoadingNominations] = useState(false);
+  const [actingNominationId, setActingNominationId] = useState<string | null>(null);
+  const [nomFilter, setNomFilter] = useState<"all" | "nominated" | "approved" | "rejected">("nominated");
+
   const loadLedger = useCallback(async () => {
     setLoadingLedger(true);
     try {
@@ -88,6 +110,33 @@ export default function RulesLibraryPage() {
   }, []);
 
   useEffect(() => { loadLedger(); }, [loadLedger]);
+
+  async function loadNominations() {
+    setLoadingNominations(true);
+    try {
+      const res = await fetch("/api/v1/admin/nominations");
+      if (res.ok) { const d = await res.json(); setNominations(d.nominations ?? []); }
+    } finally { setLoadingNominations(false); }
+  }
+
+  async function actOnNomination(id: string, action: "approve" | "reject") {
+    setActingNominationId(id);
+    const res = await fetch("/api/v1/admin/nominations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nominationId: id, action }),
+    });
+    if (res.ok) {
+      toast.success(action === "approve" ? "Rule approved — now active for all tenants" : "Rule rejected");
+      loadNominations();
+    } else {
+      const d = await res.json();
+      toast.error(d.error ?? "Failed");
+    }
+    setActingNominationId(null);
+  }
+
+  useEffect(() => { if (topTab === "nominations") loadNominations(); }, [topTab]);
 
   async function addRule() {
     if (!newPattern.trim() || !newLedger) return;
@@ -242,6 +291,22 @@ export default function RulesLibraryPage() {
         >
           <Scale size={13} />
           Taxation Rules
+        </button>
+        <button
+          onClick={() => setTopTab("nominations")}
+          className={`flex items-center gap-1.5 px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${
+            topTab === "nominations"
+              ? "bg-white text-gray-900 shadow-sm"
+              : "text-gray-500 hover:text-gray-700"
+          }`}
+        >
+          <Globe size={13} />
+          Global Learning
+          {nominations.filter(n => n.status === "nominated").length > 0 && (
+            <span className="ml-0.5 bg-blue-100 text-blue-700 text-[10px] px-1.5 py-0.5 rounded-full font-semibold">
+              {nominations.filter(n => n.status === "nominated").length}
+            </span>
+          )}
         </button>
       </div>
 
@@ -529,6 +594,122 @@ export default function RulesLibraryPage() {
           </div>
 
           <TaxationSection tab={taxTab} search={taxSearch} />
+        </>
+      )}
+
+      {/* ══════════════════════════════════════════════════════════
+          GLOBAL LEARNING — cross-tenant nominations
+         ══════════════════════════════════════════════════════════ */}
+      {topTab === "nominations" && (
+        <>
+          <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 text-sm text-blue-800 space-y-1">
+            <p className="font-medium">Global Rule Learning</p>
+            <p className="text-xs text-blue-700">
+              When 3+ CA firms confirm the same narration pattern → ledger mapping (and the pattern contains no client names),
+              it is automatically nominated here for admin review. Approving a rule promotes it to Layer 1 —
+              active for all tenants immediately. Tax metadata (RCM, TDS section) is captured from the confirming invoices.
+            </p>
+          </div>
+
+          <div className="flex gap-1">
+            {(["nominated", "approved", "rejected", "all"] as const).map((f) => (
+              <button key={f} onClick={() => setNomFilter(f)}
+                className={`px-3 py-1 text-xs rounded-full border font-medium transition-colors ${
+                  nomFilter === f
+                    ? "bg-blue-600 text-white border-blue-600"
+                    : "bg-white text-gray-600 border-gray-300 hover:border-blue-400"
+                }`}>
+                {f.charAt(0).toUpperCase() + f.slice(1)}
+                {f !== "all" && (
+                  <span className="ml-1 opacity-70">({nominations.filter(n => n.status === f).length})</span>
+                )}
+              </button>
+            ))}
+          </div>
+
+          {loadingNominations ? (
+            <div className="flex justify-center py-10"><Loader2 className="animate-spin text-gray-400" size={20} /></div>
+          ) : (() => {
+            const filtered = nominations.filter(n => nomFilter === "all" || n.status === nomFilter);
+            if (filtered.length === 0) {
+              return (
+                <div className="text-center py-12 text-gray-400 text-sm border border-dashed border-gray-200 rounded-lg">
+                  {nomFilter === "nominated" ? "No pending nominations — keep assigning ledgers and rules will surface here automatically." : `No ${nomFilter} nominations.`}
+                </div>
+              );
+            }
+            return (
+              <div className="overflow-x-auto border border-gray-200 rounded-lg">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="bg-gray-50 text-gray-500 uppercase tracking-wide text-[10px] border-b">
+                      <th className="text-left px-4 py-2.5 font-semibold">Pattern</th>
+                      <th className="text-left px-4 py-2.5 font-semibold">Ledger</th>
+                      <th className="text-left px-4 py-2.5 font-semibold">Industry</th>
+                      <th className="text-left px-4 py-2.5 font-semibold">Tax Attributes</th>
+                      <th className="text-center px-4 py-2.5 font-semibold">Tenants</th>
+                      <th className="text-left px-4 py-2.5 font-semibold">Status</th>
+                      <th className="text-right px-4 py-2.5 font-semibold">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filtered.map((n) => (
+                      <tr key={n.id} className="border-b hover:bg-gray-50">
+                        <td className="px-4 py-3">
+                          <code className="font-mono text-gray-800 bg-gray-100 px-1.5 py-0.5 rounded text-[11px]">{n.pattern}</code>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="bg-green-50 text-green-700 border border-green-200 px-2 py-0.5 rounded text-[11px] font-medium">{n.ledger_name}</span>
+                        </td>
+                        <td className="px-4 py-3 text-gray-500">{n.industry_name ?? "—"}</td>
+                        <td className="px-4 py-3">
+                          <div className="flex flex-wrap gap-1">
+                            {n.rcm_applicable && <span className="bg-amber-50 text-amber-700 border border-amber-200 px-1.5 py-0.5 rounded text-[10px] font-medium">RCM</span>}
+                            {n.tds_section && <span className="bg-purple-50 text-purple-700 border border-purple-200 px-1.5 py-0.5 rounded text-[10px] font-medium">TDS §{n.tds_section}</span>}
+                            {n.suggested_gst_rate != null && <span className="bg-blue-50 text-blue-700 border border-blue-200 px-1.5 py-0.5 rounded text-[10px] font-medium">GST {n.suggested_gst_rate}%</span>}
+                            {!n.rcm_applicable && !n.tds_section && n.suggested_gst_rate == null && <span className="text-gray-400">—</span>}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          <span className="font-semibold text-blue-700">{n.tenant_count}</span>
+                          <span className="text-gray-400"> / {n.total_confirmations}</span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                            n.status === "approved" ? "bg-green-50 text-green-700" :
+                            n.status === "rejected" ? "bg-red-50 text-red-600" :
+                            "bg-amber-50 text-amber-700"
+                          }`}>
+                            {n.status.charAt(0).toUpperCase() + n.status.slice(1)}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          {n.status === "nominated" && (
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                onClick={() => actOnNomination(n.id, "approve")}
+                                disabled={actingNominationId === n.id}
+                                className="flex items-center gap-1 px-2.5 py-1 bg-green-600 text-white rounded text-[11px] font-medium hover:bg-green-700 disabled:opacity-50">
+                                {actingNominationId === n.id ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} />}
+                                Approve
+                              </button>
+                              <button
+                                onClick={() => actOnNomination(n.id, "reject")}
+                                disabled={actingNominationId === n.id}
+                                className="flex items-center gap-1 px-2.5 py-1 bg-white text-red-600 border border-red-300 rounded text-[11px] font-medium hover:bg-red-50 disabled:opacity-50">
+                                <X size={10} />
+                                Reject
+                              </button>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })()}
         </>
       )}
     </div>

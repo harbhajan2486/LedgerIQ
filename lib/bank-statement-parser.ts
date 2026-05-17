@@ -554,6 +554,7 @@ export interface InvoiceForMatching {
   tds_amount: number | null;
   vendor_name: string | null;
   buyer_name: string | null;         // for sales invoices
+  vendor_gstin?: string | null;      // 15-char GSTIN — strong signal if found in narration
   payment_reference: string | null;
   suggested_ledger: string | null;   // propagated to bank txn on match
 }
@@ -690,6 +691,16 @@ export function scoreMatch(
     const narrClean = narr.replace(/\s/g, "");
     if (invRef.length >= 8 && narrClean.includes(invRef)) {
       score += 45; reasons.push("Payment reference found in narration");
+    }
+  }
+
+  // Vendor GSTIN in narration (strong unique signal — 15-char alphanumeric)
+  // Many NEFT/RTGS narrations include the beneficiary's GSTIN
+  if (invoice.vendor_gstin && invoice.vendor_gstin.length >= 15) {
+    const gstinClean = invoice.vendor_gstin.replace(/\s/g, "").toUpperCase();
+    const narrUp = narr.replace(/\s/g, "").toUpperCase();
+    if (narrUp.includes(gstinClean)) {
+      score += 40; reasons.push("Vendor GSTIN in narration");
     }
   }
 

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { extractPattern, suggestLedger } from "@/lib/ledger-rules";
+import { fetchApprovedGlobalRules } from "@/lib/global-rules";
 
 export async function GET(
   _request: NextRequest,
@@ -38,6 +39,9 @@ export async function GET(
 
     const rows = txnsResult.data ?? [];
 
+    // Load approved global rules (dynamic Layer 1 from crowd-sourced nominations)
+    const approvedGlobalRules = await fetchApprovedGlobalRules();
+
     // Build rule maps for ledger source derivation
     const industryName = clientRow.data?.industry_name ?? null;
     const clientRuleMap: Record<string, string> = {};
@@ -57,12 +61,18 @@ export async function GET(
       const pattern = extractPattern(narration);
       if (clientRuleMap[pattern] === ledgerName) return "Layer 3 – client rule";
       if (industryRuleMap[pattern] === ledgerName) return "Layer 2 – industry rule";
+
+      // Check approved global rules (dynamic Layer 1 from crowd-sourced nominations)
+      const approvedMatch = approvedGlobalRules.find(
+        (r) => r.pattern === pattern && r.ledger_name.toLowerCase() === ledgerName.toLowerCase()
+      );
+      if (approvedMatch) return "Layer 1 – global keyword";
+
+      // Check built-in Layer 1 keyword rules
       const globalSuggestion = suggestLedger(narration);
       if (globalSuggestion) {
         const gLower = globalSuggestion.toLowerCase();
         const lLower = ledgerName.toLowerCase();
-        // Also match T&B-resolved names: e.g. global "Salary Expenses" → T&B "Salary"
-        // or first word of global matches start of T&B (min 5 chars avoids "bank", "rent" noise)
         const gFirst = gLower.split(/\s+/)[0];
         if (gLower === lLower || gLower.startsWith(lLower) || lLower.startsWith(gLower)
             || (gFirst.length >= 5 && lLower.startsWith(gFirst))) {

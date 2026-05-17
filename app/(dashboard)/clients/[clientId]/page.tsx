@@ -211,6 +211,8 @@ export default function ClientDetailPage() {
   const [reconTab, setReconTab] = useState<"matched" | "possible" | "unmatched" | "invoices">("unmatched");
   const [reconFilter, setReconFilter] = useState("");
   const [bankFilter, setBankFilter] = useState("");
+  const [bsFromDate, setBsFromDate] = useState("");
+  const [bsToDate,   setBsToDate]   = useState("");
   const [bsLedgerFilters, setBsLedgerFilters] = useState<Set<string>>(new Set());
   const [bsStatusFilters, setBsStatusFilters] = useState<Set<string>>(new Set());
   const [bsCategoryFilters, setBsCategoryFilters] = useState<Set<string>>(new Set());
@@ -2006,17 +2008,26 @@ export default function ClientDetailPage() {
             </Card>
           )}
 
-          {/* Bank filter bar — text search */}
-          <div className="flex items-center gap-2">
+          {/* Bank filter bar — text search + date range */}
+          <div className="flex flex-wrap items-center gap-2">
             <input
               type="text"
               placeholder="Filter by narration, ref number, category, ledger, amount…"
               value={bankFilter}
               onChange={e => setBankFilter(e.target.value)}
-              className="flex-1 text-sm border border-gray-300 rounded-md px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-400"
+              className="flex-1 min-w-[200px] text-sm border border-gray-300 rounded-md px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-400"
             />
-            {bankFilter && (
-              <button onClick={() => setBankFilter("")} className="text-xs text-gray-400 hover:text-gray-600 px-2 py-1.5 rounded border border-gray-200">Clear</button>
+            <div className="flex items-center gap-1.5 text-sm text-gray-500">
+              <span className="text-xs">From</span>
+              <input type="date" value={bsFromDate} onChange={e => setBsFromDate(e.target.value)}
+                className="text-xs border border-gray-300 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-400" />
+              <span className="text-xs">To</span>
+              <input type="date" value={bsToDate} onChange={e => setBsToDate(e.target.value)}
+                className="text-xs border border-gray-300 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-400" />
+            </div>
+            {(bankFilter || bsFromDate || bsToDate) && (
+              <button onClick={() => { setBankFilter(""); setBsFromDate(""); setBsToDate(""); }}
+                className="text-xs text-gray-400 hover:text-gray-600 px-2 py-1.5 rounded border border-gray-200">Clear</button>
             )}
           </div>
 
@@ -2193,6 +2204,8 @@ export default function ClientDetailPage() {
                           String(txn.credit_amount ?? "").includes(q)
                         );
                       })
+                      .filter(txn => !bsFromDate || txn.transaction_date >= bsFromDate)
+                      .filter(txn => !bsToDate   || txn.transaction_date <= bsToDate)
                       .filter(txn => bsLedgerFilters.size   === 0 || bsLedgerFilters.has(txn.ledger_name ?? ""))
                       .filter(txn => bsStatusFilters.size   === 0 || bsStatusFilters.has(txn.status ?? "unmatched"))
                       .filter(txn => bsCategoryFilters.size === 0 || bsCategoryFilters.has(txn.category ?? ""))

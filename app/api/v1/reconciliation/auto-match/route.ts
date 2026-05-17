@@ -23,7 +23,7 @@ export async function POST(request: NextRequest) {
   // Include already-matched/possible_match txns so we can re-score and update reasons
   const txnQuery = supabase
     .from("bank_transactions")
-    .select("id, transaction_date, narration, ref_number, debit_amount, credit_amount, balance")
+    .select("id, transaction_date, narration, ref_number, debit_amount, credit_amount, balance, ledger_name")
     .eq("tenant_id", tenantId)
     .in("status", ["unmatched", "matched", "possible_match"]);
 
@@ -31,7 +31,7 @@ export async function POST(request: NextRequest) {
 
   const MATCH_FIELDS = [
     "invoice_number", "invoice_date", "due_date", "total_amount",
-    "tds_amount", "vendor_name", "buyer_name", "payment_reference", "suggested_ledger",
+    "tds_amount", "vendor_name", "buyer_name", "vendor_gstin", "payment_reference", "suggested_ledger",
   ];
 
   const [
@@ -86,6 +86,7 @@ export async function POST(request: NextRequest) {
       tds_amount: fields.tds_amount ? parseFloat(fields.tds_amount) : null,
       vendor_name: fields.vendor_name ?? null,
       buyer_name: fields.buyer_name ?? null,
+      vendor_gstin: fields.vendor_gstin ?? null,
       payment_reference: fields.payment_reference ?? null,
       suggested_ledger: fields.suggested_ledger ?? null,
     }));
@@ -204,12 +205,17 @@ export async function POST(request: NextRequest) {
   const matchedTxnIds  = matchedTxnUpdates.filter((u) => u.status === "matched").map((u) => u.id);
   const possibleTxnIds = matchedTxnUpdates.filter((u) => u.status === "possible_match").map((u) => u.id);
 
-  // Build ledger_name update map: for each matched txn, propagate suggested_ledger from invoice
+  // Propagate suggested_ledger from invoice ONLY if txn has no existing ledger assignment.
+  // This prevents overwriting a CA's manual assignment (Bug: silent overwrite).
+  const txnsWithLedger = new Set(
+    transactions.filter((t) => (t as { ledger_name?: string | null }).ledger_name).map((t) => t.id)
+  );
   const ledgerUpdates: { txnId: string; ledger: string }[] = [];
   for (const row of reconRows) {
     if ((row as { status: string }).status !== "matched") continue;
     const docId = (row as { document_id: string }).document_id;
     const txnId = (row as { bank_transaction_id: string }).bank_transaction_id;
+    if (txnsWithLedger.has(txnId)) continue; // respect manual assignment
     const ledger = invoiceMap[docId]?.suggested_ledger;
     if (ledger) ledgerUpdates.push({ txnId, ledger });
   }

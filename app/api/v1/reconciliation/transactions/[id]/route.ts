@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { z } from "zod";
 import { extractPattern, ledgerToMeta } from "@/lib/ledger-rules";
+import { tryNominate } from "@/lib/global-rules";
 
 const patchSchema = z.object({
   category:     z.string().optional(),
@@ -133,6 +134,43 @@ export async function PATCH(
                     },
                     { onConflict: "tenant_id,industry_name,pattern" }
                   );
+
+                  // ── Layer 2 → cross-tenant nomination ─────────────────────────
+                  // Nominate this pattern for global Layer 1 (admin must approve).
+                  // Tax metadata (RCM, TDS section) fetched from linked invoice if available.
+                  try {
+                    const { data: relatedDoc } = await supabase
+                      .from("reconciliations")
+                      .select("document_id")
+                      .eq("tenant_id", profile.tenant_id)
+                      .eq("bank_transaction_id", id)
+                      .single();
+                    let rcmApplicable = false;
+                    let tdsSection: string | null = null;
+                    let suggestedGstRate: number | null = null;
+                    if (relatedDoc?.document_id) {
+                      const { data: taxExts } = await supabase
+                        .from("extractions")
+                        .select("field_name, extracted_value")
+                        .eq("document_id", relatedDoc.document_id)
+                        .in("field_name", ["reverse_charge", "tds_section", "gst_rate"])
+                        .in("status", ["accepted", "corrected"]);
+                      for (const e of taxExts ?? []) {
+                        if (e.field_name === "reverse_charge" && e.extracted_value?.toLowerCase() === "yes") rcmApplicable = true;
+                        if (e.field_name === "tds_section") tdsSection = e.extracted_value;
+                        if (e.field_name === "gst_rate") suggestedGstRate = parseFloat(e.extracted_value) || null;
+                      }
+                    }
+                    void tryNominate({
+                      pattern,
+                      ledgerName: parsed.data.ledger_name,
+                      industryName: industry,
+                      tenantId: profile.tenant_id,
+                      rcmApplicable,
+                      tdsSection,
+                      suggestedGstRate,
+                    });
+                  } catch { /* best-effort */ }
                 }
               }
             }

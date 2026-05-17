@@ -211,7 +211,7 @@ export default async function DashboardPage() {
 function StatCard({
   title, value, icon, href, badge, emptyHint,
 }: {
-  title: string; value: number; icon: React.ReactNode; href: string;
+  title: string; value: number | string; icon: React.ReactNode; href: string;
   badge?: { label: string; variant: "destructive" | "secondary" }; emptyHint?: string;
 }) {
   return (
@@ -224,9 +224,9 @@ function StatCard({
           </div>
           <div className="flex items-end gap-2">
             <span className="text-3xl font-bold text-gray-900">{value}</span>
-            {badge && value > 0 && <Badge variant={badge.variant} className="mb-1 text-xs">{badge.label}</Badge>}
+            {badge && !!value && value !== 0 && <Badge variant={badge.variant} className="mb-1 text-xs">{badge.label}</Badge>}
           </div>
-          {value === 0 && emptyHint && <p className="text-xs text-blue-500 mt-1">{emptyHint}</p>}
+          {(value === 0 || value === "0%") && emptyHint && <p className="text-xs text-blue-500 mt-1">{emptyHint}</p>}
         </CardContent>
       </Card>
     </Link>
