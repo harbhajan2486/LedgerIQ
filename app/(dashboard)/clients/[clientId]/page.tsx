@@ -1924,6 +1924,19 @@ export default function ClientDetailPage() {
             </div>
           )}
 
+          {/* How ledger matching works — shown when there are transactions */}
+          {bankSummary && bankSummary.total > 0 && (
+            <div className="px-3 py-2.5 rounded bg-gray-50 border border-gray-200 text-xs text-gray-500 space-y-1">
+              <p className="font-medium text-gray-600">How auto-matching works</p>
+              <p>
+                <span className="font-medium text-gray-700">Pattern key</span> — each narration is normalised: payment prefixes (UPI/, NEFT/, MB:SENT TO) are stripped, reference numbers (6+ digits) removed, lowercased, and the first 30 characters are used as the pattern key shown as <span className="font-mono text-gray-600">→ key</span> below each transaction.
+              </p>
+              <p>
+                <span className="font-medium text-gray-700">Layers</span> — ledger suggestions come from four sources in priority order: <span className="text-blue-600">Layer 3</span> (your confirmed assignments for this client, 3+ times), <span className="text-blue-600">Layer 2</span> (industry-shared rules), <span className="text-blue-600">Layer 1</span> (built-in keyword rules e.g. "salary", "rent", "gst"), and manual assignment. Fuzzy prefix matching is used — so your T&amp;B ledger "Salary" will match the global rule "Salary Expenses".
+              </p>
+            </div>
+          )}
+
           {/* Inline bank statement upload panel */}
           {bankUploadOpen && (
             <Card className="border-blue-200 bg-blue-50/40">
@@ -2187,15 +2200,9 @@ export default function ClientDetailPage() {
                           <td className="px-4 py-2.5 max-w-xs">
                             <p className="text-gray-800">{txn.narration}</p>
                             {txn.ref_number && <p className="text-gray-400 text-xs">Ref: {txn.ref_number}</p>}
-                            <p className="text-gray-400 text-xs mt-0.5 flex items-center gap-1">
-                              <span className="text-gray-300">→</span>
+                            <p className="text-gray-400 text-xs mt-0.5">
+                              <span className="text-gray-300">→</span>{" "}
                               <span className="font-mono">{extractPattern(txn.narration ?? "")}</span>
-                              <span
-                                className="cursor-help text-gray-300 hover:text-gray-500"
-                                title={`Pattern key — used to auto-apply ledger rules on future uploads.\n\nHow it's built:\n1. Strip payment prefix (UPI/, NEFT/, IMPS/, MB:SENT TO, etc.)\n2. Remove reference numbers (6+ digit sequences)\n3. Lowercase and take first 30 characters\n\nExample: "UPI/ZOMATO/417972996010/UPI [Ref: UPI-417990399998]"\n→ "zomato"`}
-                              >
-                                <Info size={10} />
-                              </span>
                             </p>
                           </td>
                           <td className="px-4 py-2.5">
