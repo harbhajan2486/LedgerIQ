@@ -96,6 +96,8 @@ interface Reconciliation {
   documents: ReconDoc | ReconDoc[];
   doc_total_amount: string | null;
   doc_invoice_number: string | null;
+  doc_tds_amount: string | null;
+  doc_tds_section: string | null;
 }
 
 interface ReconData {
@@ -972,7 +974,14 @@ export default function ClientDetailPage() {
     setImportingLedgers(false);
   }
 
-  useEffect(() => { loadData(); loadRecon(); }, [clientId]);
+  useEffect(() => {
+    loadData();
+    loadRecon();
+    // Re-fetch when user returns from review page so pending count reflects actual DB state
+    const onFocus = () => loadData();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [clientId]);
   useEffect(() => { if (activeTab === "bank") { loadBankTxns(); if (ledgers.length === 0) loadLedgers(); } }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "reconciliation") loadRecon(); }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "ledger_view" && !ledgerData) loadLedger(ledgerFromDate || undefined, ledgerToDate || undefined); }, [activeTab, clientId]);
@@ -1709,6 +1718,8 @@ export default function ClientDetailPage() {
                               const bankAmt = Number(txn?.debit_amount ?? txn?.credit_amount ?? 0);
                               const isDebit = !!txn?.debit_amount;
                               const invAmt = r.doc_total_amount ? Number(r.doc_total_amount) : null;
+                              const tdsAmt = r.doc_tds_amount ? Number(r.doc_tds_amount) : 0;
+                              const netAmt = invAmt !== null ? invAmt - tdsAmt : null;
                               const score = r.match_score ?? 0;
                               const scoreColor = score >= 80 ? "bg-green-100 text-green-700" : score >= 60 ? "bg-yellow-100 text-yellow-700" : "bg-red-100 text-red-700";
                               const amtMismatch = invAmt !== null && bankAmt > 0 && Math.abs(bankAmt - invAmt) / Math.max(bankAmt, invAmt) > 0.02;
@@ -1730,9 +1741,18 @@ export default function ClientDetailPage() {
                                     <p className="font-medium text-gray-900 break-words leading-snug">{doc?.original_filename ?? "—"}</p>
                                     <p className="text-gray-400 mt-0.5 capitalize">{doc?.document_type?.replace(/_/g, " ")}</p>
                                   </td>
-                                  <td className={`px-4 py-3 text-right font-semibold whitespace-nowrap ${amtMismatch ? "text-amber-600" : "text-gray-700"}`}>
-                                    {invAmt !== null ? `₹${inr(invAmt)}` : "—"}
-                                    {amtMismatch && <span className="block text-[10px] font-normal text-amber-500">Amt diff</span>}
+                                  <td className={`px-4 py-3 text-right whitespace-nowrap ${amtMismatch ? "text-amber-600" : "text-gray-700"}`}>
+                                    {invAmt !== null ? (
+                                      <div>
+                                        <div className="font-semibold">₹{inr(invAmt)}</div>
+                                        {tdsAmt > 0 && (
+                                          <div className="text-[10px] font-normal text-gray-400 mt-0.5">
+                                            Net: ₹{inr(netAmt!)} <span className="text-orange-500">−TDS</span>
+                                          </div>
+                                        )}
+                                        {amtMismatch && <div className="text-[10px] font-normal text-amber-500">Amt diff</div>}
+                                      </div>
+                                    ) : "—"}
                                   </td>
                                   <td className="px-4 py-3 text-center">
                                     <span className={`px-2 py-0.5 rounded-full font-bold ${scoreColor}`}>{score}%</span>
@@ -1811,6 +1831,8 @@ export default function ClientDetailPage() {
                               const bankAmt = Number(txn?.debit_amount ?? txn?.credit_amount ?? 0);
                               const isDebit = !!txn?.debit_amount;
                               const invAmt = r.doc_total_amount ? Number(r.doc_total_amount) : null;
+                              const tdsAmt = r.doc_tds_amount ? Number(r.doc_tds_amount) : 0;
+                              const netAmt = invAmt !== null ? invAmt - tdsAmt : null;
                               const score = r.match_score ?? 0;
                               const scoreColor = score >= 70 ? "bg-yellow-100 text-yellow-700" : "bg-orange-100 text-orange-700";
                               const amtMismatch = invAmt !== null && bankAmt > 0 && Math.abs(bankAmt - invAmt) / Math.max(bankAmt, invAmt) > 0.02;
@@ -1832,9 +1854,18 @@ export default function ClientDetailPage() {
                                     <p className="font-medium text-gray-900 break-words leading-snug">{doc?.original_filename ?? "—"}</p>
                                     <p className="text-gray-400 mt-0.5 capitalize">{doc?.document_type?.replace(/_/g, " ")}</p>
                                   </td>
-                                  <td className={`px-4 py-3 text-right font-semibold whitespace-nowrap ${amtMismatch ? "text-amber-600" : "text-gray-700"}`}>
-                                    {invAmt !== null ? `₹${inr(invAmt)}` : "—"}
-                                    {amtMismatch && <span className="block text-[10px] font-normal text-amber-500">Amt diff</span>}
+                                  <td className={`px-4 py-3 text-right whitespace-nowrap ${amtMismatch ? "text-amber-600" : "text-gray-700"}`}>
+                                    {invAmt !== null ? (
+                                      <div>
+                                        <div className="font-semibold">₹{inr(invAmt)}</div>
+                                        {tdsAmt > 0 && (
+                                          <div className="text-[10px] font-normal text-gray-400 mt-0.5">
+                                            Net: ₹{inr(netAmt!)} <span className="text-orange-500">−TDS</span>
+                                          </div>
+                                        )}
+                                        {amtMismatch && <div className="text-[10px] font-normal text-amber-500">Amt diff</div>}
+                                      </div>
+                                    ) : "—"}
                                   </td>
                                   <td className="px-4 py-3 text-center">
                                     <span className={`px-2 py-0.5 rounded-full font-bold ${scoreColor}`}>{score}%</span>

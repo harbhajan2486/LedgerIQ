@@ -57,24 +57,30 @@ export async function GET(request: NextRequest) {
         .from("extractions")
         .select("document_id, field_name, extracted_value, status")
         .in("document_id", reconDocIds)
-        .in("field_name", ["total_amount", "invoice_number"])
+        .in("field_name", ["total_amount", "invoice_number", "tds_amount", "tds_section"])
         .in("status", ["accepted", "corrected", "pending"])
-        .order("status", { ascending: false }) // descending: corrected > pending > accepted → corrected wins
     : { data: [] };
 
-  // Build per-doc extraction map: corrected > accepted > pending
-  const reconExtMap: Record<string, { total_amount?: string; invoice_number?: string }> = {};
+  // Build per-doc extraction map: corrected (3) > accepted (2) > pending (1)
+  const STATUS_PRIO: Record<string, number> = { corrected: 3, accepted: 2, pending: 1 };
+  const reconExtMap: Record<string, { total_amount?: string; invoice_number?: string; tds_amount?: string; tds_section?: string }> = {};
+  const reconExtPrio: Record<string, Record<string, number>> = {};
   for (const ext of (reconExtractions ?? [])) {
-    if (!reconExtMap[ext.document_id]) reconExtMap[ext.document_id] = {};
-    // Always overwrite — since corrected sorts last alphabetically, it wins
-    (reconExtMap[ext.document_id] as Record<string, string>)[ext.field_name] = ext.extracted_value ?? "";
+    if (!reconExtMap[ext.document_id]) { reconExtMap[ext.document_id] = {}; reconExtPrio[ext.document_id] = {}; }
+    const prio = STATUS_PRIO[ext.status] ?? 0;
+    if (prio > (reconExtPrio[ext.document_id][ext.field_name] ?? 0)) {
+      (reconExtMap[ext.document_id] as Record<string, string>)[ext.field_name] = ext.extracted_value ?? "";
+      reconExtPrio[ext.document_id][ext.field_name] = prio;
+    }
   }
 
-  // Enrich each reconciliation with invoice amount + number
+  // Enrich each reconciliation with invoice amount + number + TDS
   const enrichedRecons = filteredRecons.map((r) => ({
     ...r,
     doc_total_amount:   reconExtMap[r.document_id]?.total_amount   ?? null,
     doc_invoice_number: reconExtMap[r.document_id]?.invoice_number ?? null,
+    doc_tds_amount:     reconExtMap[r.document_id]?.tds_amount     ?? null,
+    doc_tds_section:    reconExtMap[r.document_id]?.tds_section    ?? null,
   }));
 
   // Fetch unmatched bank transactions + total count in parallel
