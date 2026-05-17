@@ -100,23 +100,31 @@ export async function GET(request: NextRequest) {
     .select("id, original_filename, document_type, status")
     .eq("tenant_id", tenantId)
     .in("status", ["review_required", "reviewed"])
+    .is("deleted_at", null)
     .order("created_at", { ascending: false })
     .limit(200);
   if (clientId) docsQuery = docsQuery.eq("client_id", clientId);
   const { data: unmatchedDocs } = await docsQuery;
 
-  // Get amounts for unmatched docs
+  // Get amounts and invoice dates for unmatched docs
   const unmatchedDocIds = (unmatchedDocs ?? []).map((d) => d.id);
-  const { data: amounts } = unmatchedDocIds.length > 0
+  const { data: unmatchedExts } = unmatchedDocIds.length > 0
     ? await supabase
         .from("extractions")
-        .select("document_id, extracted_value")
+        .select("document_id, field_name, extracted_value")
         .in("document_id", unmatchedDocIds)
-        .eq("field_name", "total_amount")
+        .in("field_name", ["total_amount", "invoice_date", "invoice_number"])
         .in("status", ["accepted", "corrected"])
+        .order("status", { ascending: true }) // corrected last = wins
     : { data: [] };
   const amountMap: Record<string, string> = {};
-  for (const a of amounts ?? []) amountMap[a.document_id] = a.extracted_value;
+  const invoiceDateMap: Record<string, string> = {};
+  const invoiceNumberUnmatchedMap: Record<string, string> = {};
+  for (const e of unmatchedExts ?? []) {
+    if (e.field_name === "total_amount") amountMap[e.document_id] = e.extracted_value;
+    if (e.field_name === "invoice_date") invoiceDateMap[e.document_id] = e.extracted_value;
+    if (e.field_name === "invoice_number") invoiceNumberUnmatchedMap[e.document_id] = e.extracted_value;
+  }
 
   const matched    = enrichedRecons.filter((r) => r.status === "matched").length;
   const possible   = enrichedRecons.filter((r) => r.status === "possible_match").length;
@@ -141,7 +149,9 @@ export async function GET(request: NextRequest) {
     unmatched_transactions: allTxns ?? [],
     unmatched_invoices: (unmatchedDocs ?? []).map((d) => ({
       ...d,
-      total_amount: amountMap[d.id] ?? null,
+      total_amount:    amountMap[d.id]                  ?? null,
+      invoice_date:    invoiceDateMap[d.id]              ?? null,
+      invoice_number:  invoiceNumberUnmatchedMap[d.id]   ?? null,
     })),
   });
   } catch (err) {

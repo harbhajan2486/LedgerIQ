@@ -79,6 +79,8 @@ interface ReconDoc {
   document_type: string;
   status?: string;
   total_amount?: string | null;
+  invoice_date?: string | null;
+  invoice_number?: string | null;
 }
 
 interface Reconciliation {
@@ -468,11 +470,16 @@ export default function ClientDetailPage() {
       { label: "Q3 (Oct–Dec)", from: `${fyYear}-10-01`,   to: `${fyYear}-12-31` },
       { label: "Q4 (Jan–Mar)", from: `${fyYear + 1}-01-01`, to: `${fyYear + 1}-03-31` },
     ];
+    // Build FY list: current FY + up to (currentYear - 2021) prior years, max 5
+    const fyLabels = Array.from({ length: Math.min(5, fyYear - 2020) }, (_, i) => fyYear - i).map((fy) => ({
+      label: `FY ${fy}-${String(fy + 1).slice(2)}`,
+      from:  `${fy}-04-01`,
+      to:    `${fy + 1}-03-31`,
+    }));
     return [
       { label: "This Month", from: cmFrom, to: cmTo },
       ...quarters,
-      { label: `FY ${fyYear}-${String(fyYear + 1).slice(2)}`, from: `${fyYear}-04-01`, to: `${fyYear + 1}-03-31` },
-      { label: `FY ${fyYear - 1}-${String(fyYear).slice(2)}`, from: `${fyYear - 1}-04-01`, to: `${fyYear}-03-31` },
+      ...fyLabels,
     ];
   })();
 
@@ -1457,6 +1464,23 @@ export default function ClientDetailPage() {
             </div>
           )}
 
+          {/* Invoice matching summary */}
+          {reconData && (
+            <div className="grid grid-cols-4 gap-3">
+              {[
+                { label: "Invoices matched",    value: reconData.summary.matched,           cls: "text-green-600" },
+                { label: "Possible matches",    value: reconData.summary.possible,          cls: "text-amber-600" },
+                { label: "Awaiting payment",    value: reconData.summary.unmatched_invoices, cls: "text-blue-600" },
+                { label: "Unexplained txns",    value: reconData.summary.unresolved,        cls: reconData.summary.unresolved > 0 ? "text-red-600" : "text-gray-500" },
+              ].map(({ label, value, cls }) => (
+                <Card key={label}><CardContent className="py-3 px-4">
+                  <p className="text-xs text-gray-500">{label}</p>
+                  <p className={`text-xl font-bold mt-0.5 ${cls}`}>{value}</p>
+                </CardContent></Card>
+              ))}
+            </div>
+          )}
+
           {/* Summary + progress */}
           {reconData && (() => {
             const total = reconData.summary.total_bank_transactions;
@@ -1861,8 +1885,9 @@ export default function ClientDetailPage() {
                       <table className="w-full text-xs">
                         <thead>
                           <tr className="border-b bg-gray-50 text-gray-500 uppercase tracking-wide text-[11px]">
-                            <th className="text-left px-4 py-2.5 font-semibold">File</th>
+                            <th className="text-left px-4 py-2.5 font-semibold">File / Invoice #</th>
                             <th className="text-left px-4 py-2.5 font-semibold">Type</th>
+                            <th className="text-left px-4 py-2.5 font-semibold">Invoice Date</th>
                             <th className="text-left px-4 py-2.5 font-semibold">Status</th>
                             <th className="text-right px-4 py-2.5 font-semibold">Amount</th>
                           </tr>
@@ -1870,10 +1895,12 @@ export default function ClientDetailPage() {
                         <tbody>
                           {(reconData?.unmatched_invoices ?? []).map((doc) => (
                             <tr key={doc.id} className="border-b hover:bg-gray-50">
-                              <td className="px-4 py-3 font-medium text-gray-900 max-w-[260px]">
+                              <td className="px-4 py-3 font-medium text-gray-900 max-w-[240px]">
                                 <p className="truncate">{doc.original_filename}</p>
+                                {doc.invoice_number && <p className="text-xs text-gray-400 font-normal mt-0.5">#{doc.invoice_number}</p>}
                               </td>
                               <td className="px-4 py-3 text-gray-500 capitalize whitespace-nowrap">{doc.document_type?.replace(/_/g, " ")}</td>
+                              <td className="px-4 py-3 text-gray-600 whitespace-nowrap text-sm">{doc.invoice_date ?? "—"}</td>
                               <td className="px-4 py-3">
                                 <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${doc.status === "reviewed" ? "bg-green-50 text-green-700" : "bg-amber-50 text-amber-700"}`}>
                                   {doc.status === "reviewed" ? "Reviewed" : "Pending review"}

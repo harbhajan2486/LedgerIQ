@@ -571,7 +571,7 @@ function daysDiff(a: string, b: string): number {
 
 // Narrations that should NEVER match an invoice — these are salary, tax payments,
 // bank charges, internal transfers etc. Amount coincidence must not trigger a match.
-const BLOCKED_NARRATION_PATTERNS = [
+export const BLOCKED_NARRATION_PATTERNS = [
   /\bsalar(y|ies|ied)\b/i,
   /\bpayroll\b/i,
   /\bwages?\b/i,

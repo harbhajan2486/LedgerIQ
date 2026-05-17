@@ -45,6 +45,7 @@ export async function GET(
       .select("id, original_filename, document_type, status, uploaded_at, processed_at, ai_model_used")
       .eq("client_id", id)
       .eq("tenant_id", profile.tenant_id)
+      .is("deleted_at", null)
       .order("uploaded_at", { ascending: false })
       .limit(200);
     if (fromDate) docQuery = docQuery.gte("uploaded_at", fromDate);

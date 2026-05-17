@@ -26,6 +26,8 @@ async function getDashboardStats(tenantId: string) {
       { count: pendingReview },
       { count: matchedThisWeek },
       { count: exceptions },
+      { count: totalClients },
+      { data: clientRows },
       { data: recentActivity },
     ] = await Promise.all([
       supabase
@@ -37,7 +39,8 @@ async function getDashboardStats(tenantId: string) {
         .from("documents")
         .select("*", { count: "exact", head: true })
         .eq("tenant_id", tenantId)
-        .eq("status", "review_required"),
+        .eq("status", "review_required")
+        .is("deleted_at", null),
       supabase
         .from("reconciliations")
         .select("*", { count: "exact", head: true })
@@ -50,6 +53,17 @@ async function getDashboardStats(tenantId: string) {
         .eq("tenant_id", tenantId)
         .eq("status", "exception"),
       supabase
+        .from("clients")
+        .select("*", { count: "exact", head: true })
+        .eq("tenant_id", tenantId),
+      // Per-client doc status for completion %
+      supabase
+        .from("documents")
+        .select("client_id, status")
+        .eq("tenant_id", tenantId)
+        .is("deleted_at", null)
+        .not("status", "in", '("extracting","queued","failed","error")'),
+      supabase
         .from("audit_log")
         .select("action, entity_type, timestamp, user_id")
         .eq("tenant_id", tenantId)
@@ -57,16 +71,32 @@ async function getDashboardStats(tenantId: string) {
         .limit(10),
     ]);
 
+    // Compute % of docs that are reviewed/reconciled/posted per client
+    const clientDocStats: Record<string, { total: number; done: number }> = {};
+    for (const row of clientRows ?? []) {
+      if (!clientDocStats[row.client_id]) clientDocStats[row.client_id] = { total: 0, done: 0 };
+      clientDocStats[row.client_id].total++;
+      if (["reviewed", "reconciled", "posted"].includes(row.status)) clientDocStats[row.client_id].done++;
+    }
+    const clientsWithDocs  = Object.values(clientDocStats).length;
+    const avgCompletion = clientsWithDocs === 0 ? 0
+      : Math.round(
+          Object.values(clientDocStats).reduce((s, c) => s + (c.total > 0 ? c.done / c.total : 0), 0)
+          / clientsWithDocs * 100
+        );
+
     return {
       todayDocs: todayDocs ?? 0,
       pendingReview: pendingReview ?? 0,
       matchedThisWeek: matchedThisWeek ?? 0,
       exceptions: exceptions ?? 0,
+      totalClients: totalClients ?? 0,
+      avgCompletion,
       recentActivity: recentActivity ?? [],
     };
   } catch (e) {
     console.error("[dashboard] getDashboardStats error:", e);
-    return { todayDocs: 0, pendingReview: 0, matchedThisWeek: 0, exceptions: 0, recentActivity: [] };
+    return { todayDocs: 0, pendingReview: 0, matchedThisWeek: 0, exceptions: 0, totalClients: 0, avgCompletion: 0, recentActivity: [] };
   }
 }
 
@@ -115,9 +145,13 @@ export default async function DashboardPage() {
         <DemoTour />
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard title="Uploaded Today" value={stats?.todayDocs ?? 0} icon={<FileText size={18} className="text-blue-500" />} href="/clients" emptyHint="Go to Clients to upload" />
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <StatCard title="Active Clients" value={stats?.totalClients ?? 0} icon={<Building2 size={18} className="text-blue-500" />} href="/clients" emptyHint="Add your first client" />
         <StatCard title="Pending Review" value={stats?.pendingReview ?? 0} icon={<ClipboardCheck size={18} className="text-amber-500" />} href="/review" badge={stats?.pendingReview ? { label: "Action needed", variant: "destructive" } : undefined} />
+        <StatCard title="Avg. Completion" value={`${stats?.avgCompletion ?? 0}%`} icon={<CheckCircle2 size={18} className="text-green-500" />} href="/clients" />
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <StatCard title="Uploaded Today" value={stats?.todayDocs ?? 0} icon={<FileText size={18} className="text-blue-500" />} href="/clients" emptyHint="Go to Clients to upload" />
         <StatCard title="Matched This Week" value={stats?.matchedThisWeek ?? 0} icon={<CheckCircle2 size={18} className="text-green-500" />} href="/reconciliation" />
         <StatCard title="Exceptions" value={stats?.exceptions ?? 0} icon={<AlertTriangle size={18} className="text-red-500" />} href="/reconciliation" badge={stats?.exceptions ? { label: "Review needed", variant: "destructive" } : undefined} />
       </div>

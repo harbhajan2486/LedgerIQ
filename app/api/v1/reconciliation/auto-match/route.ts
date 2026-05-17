@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { scoreMatch } from "@/lib/bank-statement-parser";
+import { scoreMatch, BLOCKED_NARRATION_PATTERNS } from "@/lib/bank-statement-parser";
 
 const MATCH_THRESHOLD = 70;   // auto-match if score >= 70
 const POSSIBLE_THRESHOLD = 40; // flag as possible match if 40-69 (raised from 15 — reduces noise)
@@ -89,6 +89,24 @@ export async function POST(request: NextRequest) {
       payment_reference: fields.payment_reference ?? null,
       suggested_ledger: fields.suggested_ledger ?? null,
     }));
+
+  // ── 2b. Clean up stale matches for blocked narrations (salary, GST payment, etc.) ─
+  const blockedTxnIds = transactions
+    .filter((t) => BLOCKED_NARRATION_PATTERNS.some((p) => p.test(t.narration ?? "")))
+    .map((t) => t.id);
+  if (blockedTxnIds.length > 0) {
+    // Only remove auto-generated rows; manual matches (score=100) are preserved
+    await supabase.from("reconciliations")
+      .delete()
+      .eq("tenant_id", tenantId)
+      .in("bank_transaction_id", blockedTxnIds)
+      .neq("match_score", 100); // keep manual matches (score=100 set by match/match-approve routes)
+    await supabase.from("bank_transactions")
+      .update({ status: "unmatched" })
+      .eq("tenant_id", tenantId)
+      .in("id", blockedTxnIds)
+      .neq("status", "unmatched");
+  }
 
   // ── 3. Score all pairs, then assign highest-confidence matches first ────────
   //
