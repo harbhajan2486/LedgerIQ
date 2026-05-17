@@ -54,6 +54,25 @@ export async function POST(request: NextRequest) {
   await supabase.from("bank_transactions").update({ status: "matched" }).eq("id", transactionId);
   await supabase.from("documents").update({ status: "reconciled" }).eq("id", documentId);
 
+  // Remove this invoice from other possible_match suggestions — it's now fully claimed
+  const { data: stalePossible } = await supabase
+    .from("reconciliations")
+    .select("bank_transaction_id")
+    .eq("tenant_id", tenantId)
+    .eq("document_id", documentId)
+    .eq("status", "possible_match");
+
+  if (stalePossible && stalePossible.length > 0) {
+    const staleTxnIds = stalePossible.map((r) => r.bank_transaction_id);
+    await supabase.from("reconciliations").delete()
+      .eq("tenant_id", tenantId)
+      .eq("document_id", documentId)
+      .eq("status", "possible_match");
+    await supabase.from("bank_transactions").update({ status: "unmatched" })
+      .eq("tenant_id", tenantId)
+      .in("id", staleTxnIds);
+  }
+
   await supabase.from("audit_log").insert({
     tenant_id: tenantId,
     user_id: user.id,

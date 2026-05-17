@@ -56,7 +56,17 @@ export async function GET(
     const docIds = (documents ?? []).map((d) => d.id);
     const confMap: Record<string, { high: number; medium: number; low: number }> = {};
     const invoiceNumMap: Record<string, string> = {};
+    const invoiceDateMap: Record<string, string> = {};
     const totalAmountMap: Record<string, string> = {};
+    const tdsAmountMap: Record<string, string> = {};
+    const tdsSectionMap: Record<string, string> = {};
+    // Priority: corrected (3) > accepted (2) > pending (1)
+    const statusPriority: Record<string, number> = { corrected: 3, accepted: 2, pending: 1 };
+    const invoiceNumPriority: Record<string, number> = {};
+    const invoiceDatePriority: Record<string, number> = {};
+    const totalAmountPriority: Record<string, number> = {};
+    const tdsAmountPriority: Record<string, number> = {};
+    const tdsSectionPriority: Record<string, number> = {};
     if (docIds.length > 0) {
       const [{ data: confRows }, { data: keyExts }] = await Promise.all([
         supabase
@@ -69,9 +79,8 @@ export async function GET(
           .from("extractions")
           .select("document_id, field_name, extracted_value, status")
           .in("document_id", docIds)
-          .in("field_name", ["invoice_number", "total_amount"])
-          .in("status", ["accepted", "corrected", "pending"])
-          .order("status", { ascending: true }), // corrected sorts last → wins
+          .in("field_name", ["invoice_number", "invoice_date", "total_amount", "tds_amount", "tds_section"])
+          .in("status", ["accepted", "corrected", "pending"]),
       ]);
       for (const row of confRows ?? []) {
         if (!confMap[row.document_id]) confMap[row.document_id] = { high: 0, medium: 0, low: 0 };
@@ -81,8 +90,27 @@ export async function GET(
         else confMap[row.document_id].low++;
       }
       for (const ext of keyExts ?? []) {
-        if (ext.field_name === "invoice_number") invoiceNumMap[ext.document_id] = ext.extracted_value ?? "";
-        if (ext.field_name === "total_amount")   totalAmountMap[ext.document_id] = ext.extracted_value ?? "";
+        const prio = statusPriority[ext.status] ?? 0;
+        if (ext.field_name === "invoice_number" && prio > (invoiceNumPriority[ext.document_id] ?? 0)) {
+          invoiceNumMap[ext.document_id] = ext.extracted_value ?? "";
+          invoiceNumPriority[ext.document_id] = prio;
+        }
+        if (ext.field_name === "invoice_date" && prio > (invoiceDatePriority[ext.document_id] ?? 0)) {
+          invoiceDateMap[ext.document_id] = ext.extracted_value ?? "";
+          invoiceDatePriority[ext.document_id] = prio;
+        }
+        if (ext.field_name === "total_amount" && prio > (totalAmountPriority[ext.document_id] ?? 0)) {
+          totalAmountMap[ext.document_id] = ext.extracted_value ?? "";
+          totalAmountPriority[ext.document_id] = prio;
+        }
+        if (ext.field_name === "tds_amount" && prio > (tdsAmountPriority[ext.document_id] ?? 0)) {
+          tdsAmountMap[ext.document_id] = ext.extracted_value ?? "";
+          tdsAmountPriority[ext.document_id] = prio;
+        }
+        if (ext.field_name === "tds_section" && prio > (tdsSectionPriority[ext.document_id] ?? 0)) {
+          tdsSectionMap[ext.document_id] = ext.extracted_value ?? "";
+          tdsSectionPriority[ext.document_id] = prio;
+        }
       }
     }
 
@@ -109,7 +137,10 @@ export async function GET(
       conf: confMap[d.id] ?? null,
       possible_misclassification: mismatchSet.has(d.id),
       invoice_number: invoiceNumMap[d.id] ?? null,
+      invoice_date: invoiceDateMap[d.id] ?? null,
       total_amount: totalAmountMap[d.id] ?? null,
+      tds_amount: tdsAmountMap[d.id] ?? null,
+      tds_section: tdsSectionMap[d.id] ?? null,
     }));
 
     return NextResponse.json({ client, documents: docsWithConf });

@@ -137,6 +137,33 @@ export async function GET(request: NextRequest) {
   // explained = invoice-matched + categorized (both are "done" — no action needed)
   const explained = matched + categorized_no_invoice;
 
+  // Per-document-type breakdown: total vs matched
+  let docsCountQuery = supabase
+    .from("documents")
+    .select("document_type, status")
+    .eq("tenant_id", tenantId)
+    .is("deleted_at", null)
+    .not("status", "in", '("extracting","queued","failed","error")');
+  if (clientId) docsCountQuery = docsCountQuery.eq("client_id", clientId);
+  const { data: allDocsByType } = await docsCountQuery;
+
+  const typeTotal: Record<string, number> = {};
+  for (const d of allDocsByType ?? []) {
+    typeTotal[d.document_type] = (typeTotal[d.document_type] ?? 0) + 1;
+  }
+
+  const typeMatched: Record<string, number> = {};
+  for (const r of enrichedRecons.filter((r) => r.status === "matched")) {
+    const doc = Array.isArray(r.documents) ? r.documents[0] : r.documents;
+    const dtype = (doc as { document_type?: string } | null)?.document_type;
+    if (dtype) typeMatched[dtype] = (typeMatched[dtype] ?? 0) + 1;
+  }
+
+  const doc_type_breakdown: Record<string, { total: number; matched: number }> = {};
+  for (const type of new Set([...Object.keys(typeTotal), ...Object.keys(typeMatched)])) {
+    doc_type_breakdown[type] = { total: typeTotal[type] ?? 0, matched: typeMatched[type] ?? 0 };
+  }
+
   return NextResponse.json({
     summary: {
       matched, possible, exceptions,
@@ -146,6 +173,7 @@ export async function GET(request: NextRequest) {
       unmatched_invoices: (unmatchedDocs ?? []).length,
       total_bank_transactions: totalBankTxns ?? 0,
       explained,
+      doc_type_breakdown,
     },
     reconciliations: enrichedRecons,
     unmatched_transactions: allTxns ?? [],

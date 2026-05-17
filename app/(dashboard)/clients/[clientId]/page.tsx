@@ -38,7 +38,10 @@ interface Document {
   conf: { high: number; medium: number; low: number } | null;
   possible_misclassification: boolean;
   invoice_number: string | null;
+  invoice_date: string | null;
   total_amount: string | null;
+  tds_amount: string | null;
+  tds_section: string | null;
 }
 
 interface BankTxn {
@@ -96,7 +99,7 @@ interface Reconciliation {
 }
 
 interface ReconData {
-  summary: { matched: number; possible: number; exceptions: number; unmatched_transactions: number; unresolved: number; categorized_no_invoice: number; unmatched_invoices: number; total_bank_transactions: number; explained: number };
+  summary: { matched: number; possible: number; exceptions: number; unmatched_transactions: number; unresolved: number; categorized_no_invoice: number; unmatched_invoices: number; total_bank_transactions: number; explained: number; doc_type_breakdown: Record<string, { total: number; matched: number }> };
   reconciliations: Reconciliation[];
   unmatched_transactions: BankTxn[];
   unmatched_invoices: ReconDoc[];
@@ -1250,12 +1253,16 @@ export default function ClientDetailPage() {
             <div className="grid grid-cols-5 gap-3">
               {FOLDERS.map((f) => {
                 const count = documents.filter((d) => d.document_type === f.type).length;
+                const pendingInFolder = documents.filter((d) => d.document_type === f.type && d.status === "review_required").length;
                 const isActive = docFolder === f.type;
                 return (
                   <button key={f.type} onClick={() => setDocFolder(isActive ? null : f.type)}
                     className={`relative flex flex-col items-center gap-2 p-4 rounded-xl border-2 transition-all ${
                       isActive ? folderColors[f.color] + " border-2 shadow-sm" : "border-gray-200 hover:border-gray-300 bg-white"
                     }`}>
+                    {pendingInFolder > 0 && (
+                      <span className="absolute top-2 left-2 inline-flex items-center justify-center w-4 h-4 bg-amber-500 text-white text-[9px] font-bold rounded-full leading-none">{pendingInFolder}</span>
+                    )}
                     <div className={`${isActive ? "" : "text-gray-400"}`}>{f.icon}</div>
                     <span className="text-xs font-medium text-center leading-tight">{f.label}</span>
                     <span className={`text-lg font-bold ${isActive ? "" : "text-gray-700"}`}>{count}</span>
@@ -1312,7 +1319,8 @@ export default function ClientDetailPage() {
                         <th className="text-left text-xs font-medium text-gray-500 px-5 py-3">File</th>
                         <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Type</th>
                         <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Invoice #</th>
-                        <th className="text-right text-xs font-medium text-gray-500 px-4 py-3">Amount</th>
+                        <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Invoice Date</th>
+                        <th className="text-right text-xs font-medium text-gray-500 px-4 py-3">Amount (Gross / Net)</th>
                         <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Status</th>
                         <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Confidence</th>
                         <th className="text-left text-xs font-medium text-gray-500 px-4 py-3">Uploaded / Last run</th>
@@ -1349,10 +1357,28 @@ export default function ClientDetailPage() {
                                 ? doc.invoice_number
                                 : <span className="text-gray-300">—</span>}
                             </td>
-                            <td className="px-4 py-3 text-xs text-right font-medium">
-                              {["reviewed", "reconciled", "posted"].includes(doc.status) && doc.total_amount
-                                ? <span className="text-gray-800">₹{Number(doc.total_amount).toLocaleString("en-IN")}</span>
+                            <td className="px-4 py-3 text-xs text-gray-600 whitespace-nowrap">
+                              {["reviewed", "reconciled", "posted"].includes(doc.status) && doc.invoice_date
+                                ? doc.invoice_date
                                 : <span className="text-gray-300">—</span>}
+                            </td>
+                            <td className="px-4 py-3 text-xs text-right font-medium">
+                              {["reviewed", "reconciled", "posted"].includes(doc.status) && doc.total_amount ? (() => {
+                                const gross = Number(doc.total_amount);
+                                const tds = Number(doc.tds_amount ?? 0);
+                                const net = gross - tds;
+                                return (
+                                  <div className="space-y-0.5">
+                                    <div className="text-gray-800">₹{gross.toLocaleString("en-IN")}</div>
+                                    {tds > 0 && (
+                                      <div className="text-gray-400 text-[10px]">
+                                        Net: ₹{net.toLocaleString("en-IN")}
+                                        <span className="ml-1 text-orange-500">−TDS</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })() : <span className="text-gray-300">—</span>}
                             </td>
                             <td className="px-4 py-3">
                               <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium ${cfg.cls}`}>
@@ -1467,21 +1493,55 @@ export default function ClientDetailPage() {
           )}
 
           {/* Invoice matching summary */}
-          {reconData && (
-            <div className="grid grid-cols-4 gap-3">
-              {[
-                { label: "Invoices matched",    value: reconData.summary.matched,           cls: "text-green-600" },
-                { label: "Possible matches",    value: reconData.summary.possible,          cls: "text-amber-600" },
-                { label: "Awaiting payment",    value: reconData.summary.unmatched_invoices, cls: "text-blue-600" },
-                { label: "Unexplained txns",    value: reconData.summary.unresolved,        cls: reconData.summary.unresolved > 0 ? "text-red-600" : "text-gray-500" },
-              ].map(({ label, value, cls }) => (
-                <Card key={label}><CardContent className="py-3 px-4">
-                  <p className="text-xs text-gray-500">{label}</p>
-                  <p className={`text-xl font-bold mt-0.5 ${cls}`}>{value}</p>
-                </CardContent></Card>
-              ))}
-            </div>
-          )}
+          {reconData && (() => {
+            const TYPE_LABELS: Record<string, string> = {
+              sales_invoice:    "Sales Invoices",
+              purchase_invoice: "Purchase Invoices",
+              expense:          "Expenses",
+              credit_note:      "Credit Notes",
+              debit_note:       "Debit Notes",
+            };
+            const breakdown = reconData.summary.doc_type_breakdown ?? {};
+            const typeEntries = Object.entries(breakdown)
+              .filter(([, v]) => v.total > 0)
+              .sort(([a], [b]) => (TYPE_LABELS[a] ?? a).localeCompare(TYPE_LABELS[b] ?? b));
+            return (
+              <div className="space-y-3">
+                <div className="grid grid-cols-4 gap-3">
+                  {[
+                    { label: "Invoices matched",    value: reconData.summary.matched,            cls: "text-green-600" },
+                    { label: "Possible matches",    value: reconData.summary.possible,           cls: "text-amber-600" },
+                    { label: "Awaiting payment",    value: reconData.summary.unmatched_invoices, cls: "text-blue-600" },
+                    { label: "Unexplained txns",    value: reconData.summary.unresolved,         cls: reconData.summary.unresolved > 0 ? "text-red-600" : "text-gray-500" },
+                  ].map(({ label, value, cls }) => (
+                    <Card key={label}><CardContent className="py-3 px-4">
+                      <p className="text-xs text-gray-500">{label}</p>
+                      <p className={`text-xl font-bold mt-0.5 ${cls}`}>{value}</p>
+                    </CardContent></Card>
+                  ))}
+                </div>
+                {typeEntries.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {typeEntries.map(([type, { total, matched }]) => {
+                      const allDone = matched === total;
+                      const partial = matched > 0 && matched < total;
+                      const cls = allDone
+                        ? "bg-green-50 border-green-200 text-green-700"
+                        : partial
+                        ? "bg-amber-50 border-amber-200 text-amber-700"
+                        : "bg-gray-50 border-gray-200 text-gray-500";
+                      return (
+                        <span key={type} className={`inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border font-medium ${cls}`}>
+                          <span className="font-bold">{matched}/{total}</span>
+                          <span>{TYPE_LABELS[type] ?? type} matched</span>
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Summary + progress */}
           {reconData && (() => {
@@ -1538,6 +1598,28 @@ export default function ClientDetailPage() {
               </div>
             );
           })()}
+
+          {/* Confidence scoring legend */}
+          <div className="flex items-start gap-2 text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-4 py-3">
+            <Info size={13} className="text-gray-400 mt-0.5 flex-shrink-0" />
+            <div className="space-y-1">
+              <p className="font-medium text-gray-700">How match confidence is scored</p>
+              <div className="flex flex-wrap gap-x-4 gap-y-1">
+                <span><span className="font-semibold text-green-700">≥ 70%</span> — Auto-matched by LedgerIQ</span>
+                <span><span className="font-semibold text-amber-600">40–69%</span> — Possible match, needs your review</span>
+                <span><span className="font-semibold text-gray-600">&lt; 40%</span> — Not suggested</span>
+              </div>
+              <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-gray-400 pt-0.5">
+                <span>Exact amount <span className="text-gray-600">+50</span></span>
+                <span>Invoice # in narration <span className="text-gray-600">+45–55</span></span>
+                <span>UTR/ref match <span className="text-gray-600">+55</span></span>
+                <span>Amount = invoice − TDS <span className="text-gray-600">+35</span></span>
+                <span>Date within 3 days <span className="text-gray-600">+20–30</span></span>
+                <span>Vendor GSTIN in narration <span className="text-gray-600">+40</span></span>
+                <span>Vendor name match <span className="text-gray-600">+10–15</span></span>
+              </div>
+            </div>
+          </div>
 
           {/* Sub-tabs */}
           <div className="flex gap-1 border-b border-gray-200">
