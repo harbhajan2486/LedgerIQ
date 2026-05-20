@@ -1,31 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/server";
-import { parseTallyBankBook, groupByParticulars, type ColumnMapping, type BankBookRow } from "@/lib/bank-book-parser";
-import { extractPattern } from "@/lib/ledger-rules";
-import { fuzzyMatchLedgers } from "@/lib/party-match";
+import {
+  parseTallyBankBook,
+  type ColumnMapping,
+  type BankBookRow,
+} from "@/lib/bank-book-parser";
+import { parseStatementCsv, type StatementColumnMapping } from "@/lib/bank-statement-parser";
+import { matchBankBookToStatement, buildRuleCandidates } from "@/lib/bank-book-matcher";
 
 // POST /api/v1/clients/[id]/import-bank-book
 //
-// Mode A — multipart/form-data: parse a Tally bank book export, fuzzy-match
-//   Particulars against client ledger_masters, and return 3 confidence buckets.
+// Mode A — multipart/form-data: parse both bank book (Tally export) and bank
+//   statement (bank portal CSV/XLSX), match rows, return rule candidates.
 //
 // Mode B — application/json { confirm: true, rules: [...] }: upsert confirmed
 //   ledger_mapping_rules for the client.
 
-type Candidate = {
-  particulars: string;
-  pattern: string;
-  ledger_name: string;
-  ledger_type: string | null;
-  confidence: "high" | "medium" | "none";
-  score: number;
-  debit_total: number;
-  credit_total: number;
-  count: number;
-};
-
-// ─── Inline helpers for the override re-parse path ───────────────────────────
+// ─── Inline date/amount helpers (copied from bank-book-parser, server-only) ────
 
 const MONTH_MAP_INLINE: Record<string, string> = {
   jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
@@ -36,15 +28,12 @@ function parseDateInline(val: unknown): string | null {
   if (val === null || val === undefined || val === "") return null;
 
   if (typeof val === "number") {
-    // Excel serial number — convert via XLSX SSF
     try {
       const parsed = XLSX.SSF.parse_date_code(val);
       if (parsed && parsed.y && parsed.m && parsed.d) {
         return `${String(parsed.y).padStart(4, "0")}-${String(parsed.m).padStart(2, "0")}-${String(parsed.d).padStart(2, "0")}`;
       }
-    } catch {
-      // fall through
-    }
+    } catch { /* fall through */ }
     return null;
   }
 
@@ -89,15 +78,13 @@ function parseAmountInline(val: unknown): number | null {
   return (isNaN(n) || n === 0) ? null : n;
 }
 
-/**
- * Re-parse the raw XLSX buffer using an explicit ColumnMapping.
- * Called when the user provides column name overrides via form fields.
- */
+// ─── reparseWithOverrides: re-parse bank book with explicit column mapping ─────
+
 function reparseWithOverrides(
   buffer: ArrayBuffer,
   fileName: string,
   overrideMapping: ColumnMapping,
-  originalResult: Awaited<ReturnType<typeof parseTallyBankBook>>
+  originalResult: ReturnType<typeof parseTallyBankBook>
 ): BankBookRow[] {
   const nameLower = fileName.toLowerCase();
   let wb: XLSX.WorkBook;
@@ -112,9 +99,7 @@ function reparseWithOverrides(
   const rawRows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: "" });
 
   const { rawHeaders } = originalResult;
-
-  const idxOf = (name: string | null): number =>
-    name ? rawHeaders.indexOf(name) : -1;
+  const idxOf = (name: string | null): number => (name ? rawHeaders.indexOf(name) : -1);
 
   const dateIdx = idxOf(overrideMapping.date);
   const particIdx = idxOf(overrideMapping.particulars);
@@ -124,27 +109,24 @@ function reparseWithOverrides(
 
   if (dateIdx < 0 || particIdx < 0) return [];
 
-  // Find data start: first row where the date column parses successfully
   let dataStartIndex = 0;
   for (let i = 0; i < Math.min(20, rawRows.length); i++) {
-    const row = rawRows[i] as unknown[];
-    if (parseDateInline(row[dateIdx]) !== null) {
+    if (parseDateInline((rawRows[i] as unknown[])[dateIdx]) !== null) {
       dataStartIndex = i;
       break;
     }
   }
 
-  const SKIP_PARTICULARS = /^(total|opening|closing|balance|grand\s*total|by\s*balance|to\s*balance)/i;
+  const SKIP = /^(total|opening|closing|balance|grand\s*total|by\s*balance|to\s*balance)/i;
   const rows: BankBookRow[] = [];
 
   for (let i = dataStartIndex; i < rawRows.length; i++) {
     const row = rawRows[i] as unknown[];
-
     const parsedDate = parseDateInline(row[dateIdx]);
     if (!parsedDate) continue;
 
     const particulars = String(row[particIdx] ?? "").trim();
-    if (!particulars || SKIP_PARTICULARS.test(particulars)) continue;
+    if (!particulars || SKIP.test(particulars)) continue;
 
     const debit = debitIdx >= 0 ? parseAmountInline(row[debitIdx]) : null;
     const credit = creditIdx >= 0 ? parseAmountInline(row[creditIdx]) : null;
@@ -159,7 +141,65 @@ function reparseWithOverrides(
   return rows;
 }
 
-// ─── Route handler ───────────────────────────────────────────────────────────
+// ─── reparseStatementWithOverrides ───────────────────────────────────────────
+
+function reparseStatementWithOverrides(
+  buffer: ArrayBuffer,
+  fileName: string,
+  overrideMapping: StatementColumnMapping,
+  originalRawHeaders: string[]
+): ReturnType<typeof parseStatementCsv>["rows"] {
+  const nameLower = fileName.toLowerCase();
+  let wb: XLSX.WorkBook;
+  if (nameLower.endsWith(".csv")) {
+    const text = new TextDecoder().decode(buffer);
+    wb = XLSX.read(text, { type: "string" });
+  } else {
+    wb = XLSX.read(buffer, { type: "array", cellDates: false });
+  }
+
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rawRows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: "" });
+
+  const idxOf = (name: string | null): number => (name ? originalRawHeaders.indexOf(name) : -1);
+
+  const dateIdx = idxOf(overrideMapping.date);
+  const narrIdx = idxOf(overrideMapping.narration);
+  const debitIdx = idxOf(overrideMapping.debit);
+  const creditIdx = idxOf(overrideMapping.credit);
+
+  if (dateIdx < 0 || narrIdx < 0) return [];
+
+  let dataStartIndex = 0;
+  for (let i = 0; i < Math.min(20, rawRows.length); i++) {
+    if (parseDateInline((rawRows[i] as unknown[])[dateIdx]) !== null) {
+      dataStartIndex = i;
+      break;
+    }
+  }
+
+  const SKIP = /^(opening|closing|total|balance|by balance|to balance)/i;
+  const rows: ReturnType<typeof parseStatementCsv>["rows"] = [];
+
+  for (let i = dataStartIndex; i < rawRows.length; i++) {
+    const row = rawRows[i] as unknown[];
+    const parsedDate = parseDateInline(row[dateIdx]);
+    if (!parsedDate) continue;
+
+    const narration = String(row[narrIdx] ?? "").trim();
+    if (!narration || SKIP.test(narration)) continue;
+
+    const debit = debitIdx >= 0 ? parseAmountInline(row[debitIdx]) : null;
+    const credit = creditIdx >= 0 ? parseAmountInline(row[creditIdx]) : null;
+    if (debit === null && credit === null) continue;
+
+    rows.push({ date: parsedDate, narration, debit, credit });
+  }
+
+  return rows;
+}
+
+// ─── Route handler ────────────────────────────────────────────────────────────
 
 export async function POST(
   request: NextRequest,
@@ -183,11 +223,14 @@ export async function POST(
     if (contentType.includes("application/json")) {
       const body = await request.json() as {
         confirm?: boolean;
-        rules?: Array<{ pattern: string; ledger_name: string; confidence?: string }>;
+        rules?: Array<{ pattern: string; ledger_name: string }>;
       };
 
       if (!body.confirm || !Array.isArray(body.rules) || body.rules.length === 0) {
-        return NextResponse.json({ error: "confirm:true and rules[] are required" }, { status: 400 });
+        return NextResponse.json(
+          { error: "confirm:true and rules[] are required" },
+          { status: 400 }
+        );
       }
 
       const ruleRows = body.rules.map((r) => ({
@@ -220,104 +263,100 @@ export async function POST(
 
     // ── Mode A: file upload (multipart/form-data) ──────────────────────────
     const formData = await request.formData();
-    const file = formData.get("file") as File | null;
-    if (!file) return NextResponse.json({ error: "No file provided" }, { status: 400 });
 
-    const buffer = await file.arrayBuffer();
-    let result = parseTallyBankBook(buffer, file.name);
+    const bbFile = formData.get("bankbook_file") as File | null;
+    const stmtFile = formData.get("statement_file") as File | null;
 
-    // Apply column overrides if provided
-    const colDate = (formData.get("column_date") as string | null)?.trim() || null;
-    const colParticulars = (formData.get("column_particulars") as string | null)?.trim() || null;
-    const colDebit = (formData.get("column_debit") as string | null)?.trim() || null;
-    const colCredit = (formData.get("column_credit") as string | null)?.trim() || null;
+    if (!bbFile) return NextResponse.json({ error: "bankbook_file is required" }, { status: 400 });
+    if (!stmtFile) return NextResponse.json({ error: "statement_file is required" }, { status: 400 });
 
-    if (colDate || colParticulars || colDebit || colCredit) {
+    const bbBuffer = await bbFile.arrayBuffer();
+    const stmtBuffer = await stmtFile.arrayBuffer();
+
+    // ── Parse bank book ──────────────────────────────────────────────────
+    let bbResult = parseTallyBankBook(bbBuffer, bbFile.name);
+
+    const bbColDate = (formData.get("bb_column_date") as string | null)?.trim() || null;
+    const bbColParticulars = (formData.get("bb_column_particulars") as string | null)?.trim() || null;
+    const bbColDebit = (formData.get("bb_column_debit") as string | null)?.trim() || null;
+    const bbColCredit = (formData.get("bb_column_credit") as string | null)?.trim() || null;
+
+    if (bbColDate || bbColParticulars || bbColDebit || bbColCredit) {
       const overrideMapping: ColumnMapping = {
-        date: colDate ?? result.columnMapping.date,
-        particulars: colParticulars ?? result.columnMapping.particulars,
-        debit: colDebit ?? result.columnMapping.debit,
-        credit: colCredit ?? result.columnMapping.credit,
-        voucher_type: result.columnMapping.voucher_type,
+        date: bbColDate ?? bbResult.columnMapping.date,
+        particulars: bbColParticulars ?? bbResult.columnMapping.particulars,
+        debit: bbColDebit ?? bbResult.columnMapping.debit,
+        credit: bbColCredit ?? bbResult.columnMapping.credit,
+        voucher_type: bbResult.columnMapping.voucher_type,
       };
-
-      const reRows = reparseWithOverrides(buffer, file.name, overrideMapping, result);
-
-      result = {
+      const reRows = reparseWithOverrides(bbBuffer, bbFile.name, overrideMapping, bbResult);
+      bbResult = {
         rows: reRows,
         columnMapping: overrideMapping,
-        preview: result.preview,
+        preview: bbResult.preview,
         detectionConfident: true,
-        rawHeaders: result.rawHeaders,
+        rawHeaders: bbResult.rawHeaders,
       };
     }
 
-    // If columns still not confidently detected, ask caller to map them
-    if (!result.detectionConfident) {
+    // ── Parse bank statement ─────────────────────────────────────────────
+    let stmtResult = parseStatementCsv(stmtBuffer, stmtFile.name);
+
+    const stmtColDate = (formData.get("stmt_column_date") as string | null)?.trim() || null;
+    const stmtColNarration = (formData.get("stmt_column_narration") as string | null)?.trim() || null;
+    const stmtColDebit = (formData.get("stmt_column_debit") as string | null)?.trim() || null;
+    const stmtColCredit = (formData.get("stmt_column_credit") as string | null)?.trim() || null;
+
+    if (stmtColDate || stmtColNarration || stmtColDebit || stmtColCredit) {
+      const stmtOverride: StatementColumnMapping = {
+        date: stmtColDate ?? stmtResult.columnMapping.date,
+        narration: stmtColNarration ?? stmtResult.columnMapping.narration,
+        debit: stmtColDebit ?? stmtResult.columnMapping.debit,
+        credit: stmtColCredit ?? stmtResult.columnMapping.credit,
+      };
+      const reRows = reparseStatementWithOverrides(
+        stmtBuffer, stmtFile.name, stmtOverride, stmtResult.rawHeaders
+      );
+      stmtResult = {
+        rows: reRows,
+        columnMapping: stmtOverride,
+        preview: stmtResult.preview,
+        detectionConfident: true,
+        rawHeaders: stmtResult.rawHeaders,
+      };
+    }
+
+    // ── If either file needs column mapping, ask the caller ───────────────
+    if (!bbResult.detectionConfident || !stmtResult.detectionConfident) {
       return NextResponse.json({
         needs_column_mapping: true,
-        raw_headers: result.rawHeaders,
-        preview: result.preview,
+        bankbook: {
+          raw_headers: bbResult.rawHeaders,
+          preview: bbResult.preview,
+          detection_confident: bbResult.detectionConfident,
+        },
+        statement: {
+          raw_headers: stmtResult.rawHeaders,
+          preview: stmtResult.preview,
+          detection_confident: stmtResult.detectionConfident,
+        },
       });
     }
 
-    // ── Fetch ledger_masters for this client ──────────────────────────────
-    const { data: ledgerMasters } = await supabase
-      .from("ledger_masters")
-      .select("ledger_name, ledger_type")
-      .eq("tenant_id", tenantId)
-      .eq("client_id", clientId);
-
-    const ledgers = (ledgerMasters ?? []) as Array<{ ledger_name: string; ledger_type: string }>;
-
-    // ── Group rows by particulars ─────────────────────────────────────────
-    const grouped = groupByParticulars(result.rows);
-
-    // ── Build confidence buckets ──────────────────────────────────────────
-    const buckets: { high: Candidate[]; medium: Candidate[]; none: Candidate[] } = {
-      high: [],
-      medium: [],
-      none: [],
-    };
-
-    for (const [particulars, stats] of grouped.entries()) {
-      const pattern = extractPattern(particulars);
-      if (!pattern || pattern === "__unknown__" || pattern.length < 3) continue;
-
-      const matches = fuzzyMatchLedgers(particulars, ledgers, 3);
-      const best = matches[0] ?? null;
-
-      let confidence: "high" | "medium" | "none";
-      if (best && (best.score >= 12 || particulars.toLowerCase() === best.ledger_name.toLowerCase())) {
-        confidence = "high";
-      } else if (best && best.score >= 4) {
-        confidence = "medium";
-      } else {
-        confidence = "none";
-      }
-
-      const candidate: Candidate = {
-        particulars,
-        pattern,
-        ledger_name: best?.ledger_name ?? particulars,
-        ledger_type: best?.ledger_type ?? null,
-        confidence,
-        score: best?.score ?? 0,
-        debit_total: stats.debit_total,
-        credit_total: stats.credit_total,
-        count: stats.count,
-      };
-
-      buckets[confidence].push(candidate);
-    }
+    // ── Match and build rule candidates ───────────────────────────────────
+    const matchResult = matchBankBookToStatement(bbResult.rows, stmtResult.rows);
+    const ruleCandidates = buildRuleCandidates(matchResult.matched);
 
     return NextResponse.json({
       needs_column_mapping: false,
-      column_mapping: result.columnMapping,
-      raw_headers: result.rawHeaders,
-      total_rows: result.rows.length,
-      buckets,
-      ledger_master_count: ledgers.length,
+      total_bb_rows: bbResult.rows.length,
+      total_stmt_rows: stmtResult.rows.length,
+      matched_count: matchResult.matched.length,
+      ambiguous_count: matchResult.ambiguous.length,
+      unmatched_count: matchResult.unmatchedBb.length,
+      rule_candidates: ruleCandidates,
+      ambiguous: matchResult.ambiguous,
+      unmatched_bb: matchResult.unmatchedBb.slice(0, 20),
     });
   } catch (err) {
     console.error("[import-bank-book POST]", err);

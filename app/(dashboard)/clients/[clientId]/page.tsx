@@ -251,46 +251,68 @@ export default function ClientDetailPage() {
   const [claimLoading, setClaimLoading] = useState(false);
   const [claimSaving, setClaimSaving] = useState(false);
 
-  // Bank book import state
-  type BbCandidate = { particulars: string; pattern: string; ledger_name: string; ledger_type: string | null; confidence: "high" | "medium" | "none"; score: number; debit_total: number; credit_total: number; count: number };
-  type BbBuckets = { high: BbCandidate[]; medium: BbCandidate[]; none: BbCandidate[] };
+  // Bank book import state — two-file flow: bank statement + bank book → match → rules
+  type BbRuleCandidate = { pattern: string; ledger_name: string; occurrences: number; sample_narration: string; sample_date: string; amount: number; direction: "debit"|"credit"; status: "auto"|"conflicted"; conflict_ledgers?: string[] };
+  type BbAmbiguous = { bb_row: { date: string; particulars: string; debit: number|null; credit: number|null }; candidates: { date: string; narration: string; debit: number|null; credit: number|null }[] };
+  type BbMatchResult = { total_bb_rows: number; total_stmt_rows: number; matched_count: number; ambiguous_count: number; unmatched_count: number; rule_candidates: BbRuleCandidate[]; ambiguous: BbAmbiguous[]; unmatched_bb: { date: string; particulars: string; debit: number|null; credit: number|null }[] };
+  type BbColsNeeded = { needs_column_mapping: true; bb_raw_headers: string[]; bb_preview: Record<string,string>[]; stmt_raw_headers: string[]; stmt_preview: Record<string,string>[]; bb_confident: boolean; stmt_confident: boolean };
+
   const [bbImportOpen, setBbImportOpen] = useState(false);
-  const [bbStep, setBbStep] = useState<"upload" | "columns" | "review">("upload");
+  const [bbStep, setBbStep] = useState<"upload"|"columns"|"review">("upload");
   const [bbUploading, setBbUploading] = useState(false);
   const [bbConfirming, setBbConfirming] = useState(false);
-  const [bbBuckets, setBbBuckets] = useState<BbBuckets | null>(null);
-  const [bbTotalRows, setBbTotalRows] = useState(0);
-  const [bbNeedsColumns, setBbNeedsColumns] = useState(false);
-  const [bbRawHeaders, setBbRawHeaders] = useState<string[]>([]);
-  const [bbPreview, setBbPreview] = useState<Record<string, string>[]>([]);
+  const [bbResult, setBbResult] = useState<BbMatchResult | null>(null);
+  const [bbColsNeeded, setBbColsNeeded] = useState<BbColsNeeded | null>(null);
   const [bbColDate, setBbColDate] = useState("");
   const [bbColParticulars, setBbColParticulars] = useState("");
   const [bbColDebit, setBbColDebit] = useState("");
   const [bbColCredit, setBbColCredit] = useState("");
-  const [bbMediumOverrides, setBbMediumOverrides] = useState<Record<string, string>>({});
+  const [stmtColDate, setStmtColDate] = useState("");
+  const [stmtColNarration, setStmtColNarration] = useState("");
+  const [stmtColDebit, setStmtColDebit] = useState("");
+  const [stmtColCredit, setStmtColCredit] = useState("");
+  // Key: particulars+date → chosen statement narration
+  const [bbAmbiguousSelections, setBbAmbiguousSelections] = useState<Record<string, string>>({});
+  // Key: pattern → chosen ledger_name (for conflicted rules)
+  const [bbConflictOverrides, setBbConflictOverrides] = useState<Record<string, string>>({});
   const bbFileRef = useRef<HTMLInputElement>(null);
+  const stmtFileRef = useRef<HTMLInputElement>(null);
   const [bbFileObj, setBbFileObj] = useState<File | null>(null);
+  const [stmtFileObj, setStmtFileObj] = useState<File | null>(null);
 
-  async function submitBbFile(file: File, colOverrides?: { date?: string; particulars?: string; debit?: string; credit?: string }) {
+  function bbReset() {
+    setBbStep("upload"); setBbResult(null); setBbColsNeeded(null);
+    setBbAmbiguousSelections({}); setBbConflictOverrides({});
+    setBbColDate(""); setBbColParticulars(""); setBbColDebit(""); setBbColCredit("");
+    setStmtColDate(""); setStmtColNarration(""); setStmtColDebit(""); setStmtColCredit("");
+  }
+
+  async function submitBbFiles(colOverrides?: {
+    bb_date?: string; bb_particulars?: string; bb_debit?: string; bb_credit?: string;
+    stmt_date?: string; stmt_narration?: string; stmt_debit?: string; stmt_credit?: string;
+  }) {
+    if (!bbFileObj || !stmtFileObj) return;
     setBbUploading(true);
     const fd = new FormData();
-    fd.append("file", file);
-    if (colOverrides?.date)        fd.append("column_date", colOverrides.date);
-    if (colOverrides?.particulars) fd.append("column_particulars", colOverrides.particulars);
-    if (colOverrides?.debit)       fd.append("column_debit", colOverrides.debit);
-    if (colOverrides?.credit)      fd.append("column_credit", colOverrides.credit);
+    fd.append("bankbook_file", bbFileObj);
+    fd.append("statement_file", stmtFileObj);
+    if (colOverrides?.bb_date)        fd.append("bb_column_date", colOverrides.bb_date);
+    if (colOverrides?.bb_particulars) fd.append("bb_column_particulars", colOverrides.bb_particulars);
+    if (colOverrides?.bb_debit)       fd.append("bb_column_debit", colOverrides.bb_debit);
+    if (colOverrides?.bb_credit)      fd.append("bb_column_credit", colOverrides.bb_credit);
+    if (colOverrides?.stmt_date)      fd.append("stmt_column_date", colOverrides.stmt_date);
+    if (colOverrides?.stmt_narration) fd.append("stmt_column_narration", colOverrides.stmt_narration);
+    if (colOverrides?.stmt_debit)     fd.append("stmt_column_debit", colOverrides.stmt_debit);
+    if (colOverrides?.stmt_credit)    fd.append("stmt_column_credit", colOverrides.stmt_credit);
     try {
       const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: fd });
       const d = await res.json();
       if (!res.ok) { toast.error(d.error ?? "Import failed"); return; }
       if (d.needs_column_mapping) {
-        setBbNeedsColumns(true);
-        setBbRawHeaders(d.raw_headers ?? []);
-        setBbPreview(d.preview ?? []);
+        setBbColsNeeded(d as BbColsNeeded);
         setBbStep("columns");
       } else {
-        setBbBuckets(d.buckets);
-        setBbTotalRows(d.total_rows ?? 0);
+        setBbResult(d as BbMatchResult);
         setBbStep("review");
       }
     } finally {
@@ -299,13 +321,24 @@ export default function ClientDetailPage() {
   }
 
   async function confirmBbRules() {
-    if (!bbBuckets) return;
+    if (!bbResult) return;
     setBbConfirming(true);
-    const highRules = bbBuckets.high.map(c => ({ pattern: c.pattern, ledger_name: c.ledger_name }));
-    const medRules = bbBuckets.medium
-      .filter(c => bbMediumOverrides[c.pattern] !== "__skip__")
-      .map(c => ({ pattern: c.pattern, ledger_name: bbMediumOverrides[c.pattern] ?? c.ledger_name }));
-    const rules = [...highRules, ...medRules];
+    const autoRules = bbResult.rule_candidates
+      .filter(c => c.status === "auto")
+      .map(c => ({ pattern: c.pattern, ledger_name: c.ledger_name }));
+    const conflictRules = bbResult.rule_candidates
+      .filter(c => c.status === "conflicted" && bbConflictOverrides[c.pattern])
+      .map(c => ({ pattern: c.pattern, ledger_name: bbConflictOverrides[c.pattern] }));
+    // Ambiguous: CA picked a specific statement row → its narration is stored
+    const ambigRules = bbResult.ambiguous
+      .filter(amb => bbAmbiguousSelections[amb.bb_row.particulars + amb.bb_row.date])
+      .map(amb => ({ pattern: bbAmbiguousSelections[amb.bb_row.particulars + amb.bb_row.date], ledger_name: amb.bb_row.particulars, _isNarration: true }));
+    const rules = [
+      ...autoRules,
+      ...conflictRules,
+      // For ambiguous, pattern is already computed server-side in candidates; we send narration and let server extract
+      ...ambigRules.map(r => ({ pattern: r.pattern, ledger_name: r.ledger_name })),
+    ];
     if (rules.length === 0) { toast.info("No rules to create"); setBbConfirming(false); return; }
     try {
       const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, {
@@ -315,11 +348,9 @@ export default function ClientDetailPage() {
       });
       const d = await res.json();
       if (res.ok) {
-        toast.success(`${d.created} ledger rule${d.created !== 1 ? "s" : ""} created from bank book`);
+        toast.success(`${d.created} ledger rule${d.created !== 1 ? "s" : ""} created from historical bank data`);
         setBbImportOpen(false);
-        setBbStep("upload");
-        setBbBuckets(null);
-        setBbMediumOverrides({});
+        bbReset();
         loadBankTxns();
       } else {
         toast.error(d.error ?? "Failed to save rules");
@@ -2394,7 +2425,7 @@ export default function ClientDetailPage() {
                   <Upload size={11} /> Upload statement
                 </button>
                 <button
-                  onClick={() => { setBbImportOpen(true); setBbStep("upload"); setBbBuckets(null); setBbMediumOverrides({}); }}
+                  onClick={() => { setBbImportOpen(true); bbReset(); }}
                   className="text-xs text-purple-600 hover:text-purple-800 inline-flex items-center gap-1"
                   title="Import historical bank book to create ledger mapping rules"
                 >
@@ -4025,209 +4056,275 @@ export default function ClientDetailPage() {
         variant="warning"
       />
 
-      {/* Bank book import modal */}
+      {/* Bank book import modal — two-file matching flow */}
       {bbImportOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 flex flex-col max-h-[90vh]">
-            <div className="flex items-center justify-between px-6 py-4 border-b">
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b flex-shrink-0">
               <div>
-                <h2 className="text-base font-semibold text-gray-900">Import Historical Bank Book</h2>
+                <h2 className="text-base font-semibold text-gray-900">Import Historical Bank Data</h2>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  Upload a Tally bank ledger export to auto-create ledger mapping rules for this client
+                  Match previous year bank statement against bank book to auto-learn ledger mapping rules
                 </p>
               </div>
               <button onClick={() => setBbImportOpen(false)} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-6 py-4">
-              {/* Step: upload */}
+            {/* Step indicator */}
+            <div className="flex border-b px-6 flex-shrink-0">
+              {(["upload","columns","review"] as const).map((s, i) => (
+                <div key={s} className={`flex items-center gap-1.5 text-xs py-2.5 mr-6 border-b-2 -mb-px font-medium ${bbStep === s ? "border-purple-600 text-purple-700" : "border-transparent text-gray-400"}`}>
+                  <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] ${bbStep === s ? "bg-purple-600 text-white" : "bg-gray-200 text-gray-500"}`}>{i+1}</span>
+                  {s === "upload" ? "Upload files" : s === "columns" ? "Map columns" : "Review & confirm"}
+                </div>
+              ))}
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-6 py-5">
+
+              {/* ── Step 1: upload ── */}
               {bbStep === "upload" && (
-                <div className="space-y-4">
-                  <div className="p-4 bg-purple-50 rounded-lg border border-purple-200 text-sm text-purple-800">
-                    <p className="font-medium mb-1">What this does</p>
-                    <ul className="list-disc pl-4 space-y-0.5 text-xs text-purple-700">
-                      <li>Reads the Particulars column — these are ledger names your CA already assigned</li>
-                      <li>Matches them against this client&apos;s Ledger List using fuzzy search</li>
-                      <li>Creates mapping rules so future bank statements auto-fill ledger names</li>
-                    </ul>
+                <div className="space-y-5">
+                  <div className="p-4 bg-purple-50 rounded-lg border border-purple-100 text-xs text-purple-800 space-y-1">
+                    <p className="font-semibold text-sm text-purple-900">How this works</p>
+                    <p>Upload last year&apos;s bank statement (from your bank) <strong>and</strong> the bank book (from Tally). The system matches each transaction by date &amp; amount, learns: <em>bank narration → ledger name</em>, and creates rules for this year automatically.</p>
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Upload Tally bank ledger export (Excel or CSV)
-                    </label>
-                    <input
-                      ref={bbFileRef}
-                      type="file"
-                      accept=".xlsx,.xls,.csv"
-                      className="block w-full text-sm text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border file:border-gray-300 file:text-xs file:font-medium file:bg-white hover:file:bg-gray-50"
-                      onChange={e => setBbFileObj(e.target.files?.[0] ?? null)}
-                    />
-                    {bbFileObj && <p className="text-xs text-gray-400 mt-1">{bbFileObj.name} · {(bbFileObj.size / 1024).toFixed(0)} KB</p>}
+
+                  <div className="grid grid-cols-2 gap-4">
+                    {/* Bank statement */}
+                    <div className="border rounded-lg p-4 space-y-2">
+                      <p className="text-xs font-semibold text-gray-700">1. Bank Statement <span className="text-gray-400 font-normal">(from bank portal)</span></p>
+                      <p className="text-[11px] text-gray-400">Has: Date, Narration (bank text), Debit, Credit</p>
+                      <input ref={stmtFileRef} type="file" accept=".xlsx,.xls,.csv"
+                        className="block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border file:border-gray-200 file:text-xs file:bg-white hover:file:bg-gray-50"
+                        onChange={e => setStmtFileObj(e.target.files?.[0] ?? null)} />
+                      {stmtFileObj && <p className="text-[11px] text-purple-600">{stmtFileObj.name}</p>}
+                    </div>
+                    {/* Bank book */}
+                    <div className="border rounded-lg p-4 space-y-2">
+                      <p className="text-xs font-semibold text-gray-700">2. Bank Book <span className="text-gray-400 font-normal">(Tally export)</span></p>
+                      <p className="text-[11px] text-gray-400">Has: Date, Particulars (CA ledger name), Debit, Credit</p>
+                      <input ref={bbFileRef} type="file" accept=".xlsx,.xls,.csv"
+                        className="block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border file:border-gray-200 file:text-xs file:bg-white hover:file:bg-gray-50"
+                        onChange={e => setBbFileObj(e.target.files?.[0] ?? null)} />
+                      {bbFileObj && <p className="text-[11px] text-purple-600">{bbFileObj.name}</p>}
+                    </div>
                   </div>
-                  <button
-                    disabled={!bbFileObj || bbUploading}
-                    onClick={() => bbFileObj && submitBbFile(bbFileObj)}
-                    className="px-4 py-2 rounded-md bg-purple-600 text-white text-sm font-medium hover:bg-purple-700 disabled:opacity-50 inline-flex items-center gap-2"
-                  >
-                    {bbUploading ? <><Loader2 size={14} className="animate-spin" /> Analysing…</> : "Analyse Bank Book"}
+
+                  <button disabled={!bbFileObj || !stmtFileObj || bbUploading} onClick={() => submitBbFiles()}
+                    className="px-5 py-2 rounded-md bg-purple-600 text-white text-sm font-medium hover:bg-purple-700 disabled:opacity-50 inline-flex items-center gap-2">
+                    {bbUploading ? <><Loader2 size={14} className="animate-spin" /> Matching transactions…</> : "Analyse & Match"}
                   </button>
                 </div>
               )}
 
-              {/* Step: column mapping */}
-              {bbStep === "columns" && (
-                <div className="space-y-4">
+              {/* ── Step 2: column mapping ── */}
+              {bbStep === "columns" && bbColsNeeded && (
+                <div className="space-y-5">
                   <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
                     <AlertTriangle size={12} className="inline mr-1" />
-                    Column headers not recognised automatically. Please map them manually.
+                    Some column headers weren&apos;t recognised automatically. Map them below.
                   </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-xs border border-gray-200 rounded">
-                      <thead className="bg-gray-50">
-                        <tr>
-                          {bbRawHeaders.map(h => (
-                            <th key={h} className="px-2 py-2 text-left font-medium text-gray-500 border-b">{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {bbPreview.slice(0, 3).map((row, i) => (
-                          <tr key={i} className="border-b border-gray-100">
-                            {bbRawHeaders.map(h => (
-                              <td key={h} className="px-2 py-1.5 text-gray-700 truncate max-w-[120px]">{row[h]}</td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    {([
-                      { label: "Date column", value: bbColDate, set: setBbColDate },
-                      { label: "Particulars column", value: bbColParticulars, set: setBbColParticulars },
-                      { label: "Debit column", value: bbColDebit, set: setBbColDebit },
-                      { label: "Credit column", value: bbColCredit, set: setBbColCredit },
-                    ] as { label: string; value: string; set: (v: string) => void }[]).map(({ label, value, set }) => (
-                      <div key={label}>
-                        <label className="block text-xs font-medium text-gray-600 mb-1">{label}</label>
-                        <select
-                          value={value}
-                          onChange={e => set(e.target.value)}
-                          className="w-full text-xs border border-gray-300 rounded px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                        >
-                          <option value="">— select —</option>
-                          {bbRawHeaders.map(h => <option key={h} value={h}>{h}</option>)}
-                        </select>
+
+                  {/* Bank statement columns */}
+                  {!bbColsNeeded.stmt_confident && (
+                    <div>
+                      <p className="text-xs font-semibold text-gray-700 mb-2">Bank Statement columns</p>
+                      <div className="overflow-x-auto mb-3">
+                        <table className="w-full text-xs border border-gray-200 rounded">
+                          <thead className="bg-gray-50"><tr>{bbColsNeeded.stmt_raw_headers.map(h => <th key={h} className="px-2 py-1.5 text-left font-medium text-gray-500 border-b whitespace-nowrap">{h}</th>)}</tr></thead>
+                          <tbody>{bbColsNeeded.stmt_preview.slice(0,2).map((row,i)=><tr key={i} className="border-b">{bbColsNeeded.stmt_raw_headers.map(h=><td key={h} className="px-2 py-1 text-gray-600 truncate max-w-[100px]">{row[h]}</td>)}</tr>)}</tbody>
+                        </table>
                       </div>
-                    ))}
-                  </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {([["Date", stmtColDate, setStmtColDate],["Narration", stmtColNarration, setStmtColNarration],["Debit", stmtColDebit, setStmtColDebit],["Credit", stmtColCredit, setStmtColCredit]] as [string,string,(v:string)=>void][]).map(([label,val,set])=>(
+                          <div key={label}><label className="text-[11px] font-medium text-gray-500 mb-0.5 block">{label}</label>
+                            <select value={val} onChange={e=>set(e.target.value)} className="w-full text-xs border border-gray-300 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-purple-400">
+                              <option value="">— select —</option>
+                              {bbColsNeeded.stmt_raw_headers.map(h=><option key={h} value={h}>{h}</option>)}
+                            </select>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Bank book columns */}
+                  {!bbColsNeeded.bb_confident && (
+                    <div>
+                      <p className="text-xs font-semibold text-gray-700 mb-2">Bank Book columns</p>
+                      <div className="overflow-x-auto mb-3">
+                        <table className="w-full text-xs border border-gray-200 rounded">
+                          <thead className="bg-gray-50"><tr>{bbColsNeeded.bb_raw_headers.map(h => <th key={h} className="px-2 py-1.5 text-left font-medium text-gray-500 border-b whitespace-nowrap">{h}</th>)}</tr></thead>
+                          <tbody>{bbColsNeeded.bb_preview.slice(0,2).map((row,i)=><tr key={i} className="border-b">{bbColsNeeded.bb_raw_headers.map(h=><td key={h} className="px-2 py-1 text-gray-600 truncate max-w-[100px]">{row[h]}</td>)}</tr>)}</tbody>
+                        </table>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {([["Date", bbColDate, setBbColDate],["Particulars", bbColParticulars, setBbColParticulars],["Debit", bbColDebit, setBbColDebit],["Credit", bbColCredit, setBbColCredit]] as [string,string,(v:string)=>void][]).map(([label,val,set])=>(
+                          <div key={label}><label className="text-[11px] font-medium text-gray-500 mb-0.5 block">{label}</label>
+                            <select value={val} onChange={e=>set(e.target.value)} className="w-full text-xs border border-gray-300 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-purple-400">
+                              <option value="">— select —</option>
+                              {bbColsNeeded.bb_raw_headers.map(h=><option key={h} value={h}>{h}</option>)}
+                            </select>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   <button
-                    disabled={!bbColDate || !bbColParticulars || (!bbColDebit && !bbColCredit) || bbUploading}
-                    onClick={() => bbFileObj && submitBbFile(bbFileObj, { date: bbColDate, particulars: bbColParticulars, debit: bbColDebit, credit: bbColCredit })}
-                    className="px-4 py-2 rounded-md bg-purple-600 text-white text-sm font-medium hover:bg-purple-700 disabled:opacity-50 inline-flex items-center gap-2"
-                  >
+                    disabled={bbUploading}
+                    onClick={() => submitBbFiles({ bb_date: bbColDate||undefined, bb_particulars: bbColParticulars||undefined, bb_debit: bbColDebit||undefined, bb_credit: bbColCredit||undefined, stmt_date: stmtColDate||undefined, stmt_narration: stmtColNarration||undefined, stmt_debit: stmtColDebit||undefined, stmt_credit: stmtColCredit||undefined })}
+                    className="px-4 py-2 rounded-md bg-purple-600 text-white text-sm font-medium hover:bg-purple-700 disabled:opacity-50 inline-flex items-center gap-2">
                     {bbUploading ? <><Loader2 size={14} className="animate-spin" /> Re-analysing…</> : "Analyse with these columns"}
                   </button>
                 </div>
               )}
 
-              {/* Step: review buckets */}
-              {bbStep === "review" && bbBuckets && (
+              {/* ── Step 3: review ── */}
+              {bbStep === "review" && bbResult && (
                 <div className="space-y-5">
-                  <p className="text-xs text-gray-500">{bbTotalRows.toLocaleString()} transactions analysed · {bbBuckets.high.length + bbBuckets.medium.length + bbBuckets.none.length} unique Particulars found</p>
+                  {/* Stats bar */}
+                  <div className="grid grid-cols-4 gap-3">
+                    {[
+                      { label: "Bank book rows", value: bbResult.total_bb_rows, cls: "text-gray-700" },
+                      { label: "Matched (rules)", value: bbResult.matched_count, cls: "text-green-700" },
+                      { label: "Needs attention", value: bbResult.ambiguous_count, cls: "text-amber-700" },
+                      { label: "No match", value: bbResult.unmatched_count, cls: "text-gray-400" },
+                    ].map(({ label, value, cls }) => (
+                      <div key={label} className="bg-gray-50 rounded-lg px-3 py-2 text-center">
+                        <p className={`text-lg font-bold ${cls}`}>{value}</p>
+                        <p className="text-[11px] text-gray-400 mt-0.5">{label}</p>
+                      </div>
+                    ))}
+                  </div>
 
-                  {/* High confidence */}
-                  {bbBuckets.high.length > 0 && (
+                  {/* Auto rules — green */}
+                  {bbResult.rule_candidates.filter(c=>c.status==="auto").length > 0 && (
                     <div>
                       <div className="flex items-center gap-2 mb-2">
-                        <span className="text-xs font-semibold text-green-700 bg-green-100 px-2 py-0.5 rounded-full">
-                          ✓ High confidence — {bbBuckets.high.length} rules
-                        </span>
-                        <span className="text-xs text-gray-400">Will be created automatically</span>
+                        <span className="text-xs font-semibold text-green-700 bg-green-100 px-2 py-0.5 rounded-full">✓ Auto rules — {bbResult.rule_candidates.filter(c=>c.status==="auto").length}</span>
+                        <span className="text-xs text-gray-400">Created automatically — no action needed</span>
                       </div>
-                      <div className="space-y-1">
-                        {bbBuckets.high.map(c => (
-                          <div key={c.pattern} className="flex items-center justify-between text-xs px-3 py-2 bg-green-50 rounded border border-green-100">
-                            <span className="font-medium text-gray-800 truncate max-w-[200px]" title={c.particulars}>{c.particulars}</span>
-                            <span className="text-gray-400 mx-2">→</span>
-                            <span className="text-green-700 font-medium truncate max-w-[180px]">{c.ledger_name}</span>
-                            <span className="ml-2 text-gray-400 flex-shrink-0">{c.count}×</span>
+                      <div className="space-y-1 max-h-40 overflow-y-auto">
+                        {bbResult.rule_candidates.filter(c=>c.status==="auto").map(c => (
+                          <div key={c.pattern} className="flex items-center gap-2 text-xs px-3 py-1.5 bg-green-50 rounded border border-green-100">
+                            <span className="text-gray-500 truncate flex-1" title={c.sample_narration}>{c.sample_narration}</span>
+                            <span className="text-gray-300 flex-shrink-0">→</span>
+                            <span className="text-green-700 font-medium flex-shrink-0">{c.ledger_name}</span>
+                            <span className="text-gray-400 flex-shrink-0 ml-1">{c.occurrences}×</span>
                           </div>
                         ))}
                       </div>
                     </div>
                   )}
 
-                  {/* Medium confidence — CA confirms each */}
-                  {bbBuckets.medium.length > 0 && (
+                  {/* Ambiguous — CA picks the correct statement row */}
+                  {bbResult.ambiguous.length > 0 && (
                     <div>
                       <div className="flex items-center gap-2 mb-2">
-                        <span className="text-xs font-semibold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">
-                          ⚠ Review needed — {bbBuckets.medium.length}
-                        </span>
-                        <span className="text-xs text-gray-400">Confirm or change each mapping below</span>
+                        <span className="text-xs font-semibold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">⚠ Multiple matches — pick one for each</span>
                       </div>
-                      <div className="space-y-1">
-                        {bbBuckets.medium.map(c => (
-                          <div key={c.pattern} className="flex items-center gap-2 text-xs px-3 py-2 bg-amber-50 rounded border border-amber-100">
-                            <span className="font-medium text-gray-800 truncate w-[180px] flex-shrink-0" title={c.particulars}>{c.particulars}</span>
-                            <span className="text-gray-400">→</span>
-                            <select
-                              value={bbMediumOverrides[c.pattern] ?? c.ledger_name}
-                              onChange={e => setBbMediumOverrides(prev => ({ ...prev, [c.pattern]: e.target.value }))}
-                              className="flex-1 text-xs border border-amber-300 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-amber-400"
-                            >
-                              <option value="__skip__">— skip this one —</option>
-                              {ledgers.map(l => <option key={l.id} value={l.ledger_name}>{l.ledger_name}</option>)}
-                            </select>
-                            <span className="text-gray-400 flex-shrink-0">{c.count}×</span>
+                      <div className="space-y-3">
+                        {bbResult.ambiguous.map(amb => {
+                          const key = amb.bb_row.particulars + amb.bb_row.date;
+                          return (
+                            <div key={key} className="border border-amber-200 rounded-lg p-3 bg-amber-50/50">
+                              <div className="flex items-center gap-2 mb-2">
+                                <span className="text-xs font-medium text-gray-700">Bank book:</span>
+                                <span className="text-xs text-gray-800 font-semibold">{amb.bb_row.particulars}</span>
+                                <span className="text-xs text-gray-400">{amb.bb_row.date} · ₹{((amb.bb_row.debit ?? amb.bb_row.credit) ?? 0).toLocaleString("en-IN")}</span>
+                              </div>
+                              <p className="text-[11px] text-amber-700 mb-2">{amb.candidates.length} bank statement rows match by date &amp; amount — which one is this?</p>
+                              <div className="space-y-1">
+                                {amb.candidates.map((cand, ci) => (
+                                  <label key={ci} className="flex items-center gap-2 cursor-pointer text-xs px-2 py-1.5 rounded border border-transparent hover:border-amber-300 hover:bg-white">
+                                    <input type="radio" name={key} value={cand.narration}
+                                      checked={bbAmbiguousSelections[key] === cand.narration}
+                                      onChange={() => setBbAmbiguousSelections(prev => ({ ...prev, [key]: cand.narration }))}
+                                      className="flex-shrink-0" />
+                                    <span className="text-gray-700 truncate">{cand.narration}</span>
+                                    <span className="text-gray-400 flex-shrink-0 ml-auto">{cand.date}</span>
+                                  </label>
+                                ))}
+                                <label className="flex items-center gap-2 cursor-pointer text-xs px-2 py-1 rounded text-gray-400 hover:text-gray-600">
+                                  <input type="radio" name={key} value="__skip__"
+                                    checked={bbAmbiguousSelections[key] === "__skip__" || !bbAmbiguousSelections[key]}
+                                    onChange={() => setBbAmbiguousSelections(prev => ({ ...prev, [key]: "__skip__" }))}
+                                    className="flex-shrink-0" />
+                                  Skip this one
+                                </label>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Conflicted — same narration pattern mapped to 2 different ledgers */}
+                  {bbResult.rule_candidates.filter(c=>c.status==="conflicted").length > 0 && (
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-xs font-semibold text-red-700 bg-red-100 px-2 py-0.5 rounded-full">⚑ Conflicted — pick one ledger</span>
+                        <span className="text-xs text-gray-400">Same narration pattern mapped to different ledgers in your bank book</span>
+                      </div>
+                      <div className="space-y-2">
+                        {bbResult.rule_candidates.filter(c=>c.status==="conflicted").map(c => (
+                          <div key={c.pattern} className="border border-red-200 rounded-lg px-3 py-2 bg-red-50/30">
+                            <p className="text-xs text-gray-600 mb-1.5 truncate" title={c.sample_narration}>{c.sample_narration}</p>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-gray-500">Use ledger:</span>
+                              <select value={bbConflictOverrides[c.pattern] ?? ""}
+                                onChange={e => setBbConflictOverrides(prev => ({ ...prev, [c.pattern]: e.target.value }))}
+                                className="text-xs border border-red-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-red-400 flex-1">
+                                <option value="">— skip —</option>
+                                {(c.conflict_ledgers ?? []).map(l => <option key={l} value={l}>{l}</option>)}
+                              </select>
+                            </div>
                           </div>
                         ))}
                       </div>
                     </div>
                   )}
 
-                  {/* None — no match found */}
-                  {bbBuckets.none.length > 0 && (
-                    <div>
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className="text-xs font-semibold text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full">
-                          — No match — {bbBuckets.none.length}
-                        </span>
-                        <span className="text-xs text-gray-400">These will be skipped</span>
-                      </div>
-                      <div className="space-y-0.5">
-                        {bbBuckets.none.slice(0, 8).map(c => (
-                          <p key={c.pattern} className="text-xs text-gray-400 px-3 py-1 truncate">{c.particulars} ({c.count}×)</p>
+                  {/* Unmatched — informational only */}
+                  {bbResult.unmatched_bb.length > 0 && (
+                    <details className="group">
+                      <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-600 flex items-center gap-1">
+                        <ChevronRight size={12} className="group-open:rotate-90 transition-transform" />
+                        {bbResult.unmatched_count} bank book rows had no matching statement row — skipped
+                      </summary>
+                      <div className="mt-2 space-y-0.5 pl-4">
+                        {bbResult.unmatched_bb.slice(0,10).map((row,i) => (
+                          <p key={i} className="text-[11px] text-gray-400">{row.date} · {row.particulars} · ₹{((row.debit ?? row.credit) ?? 0).toLocaleString("en-IN")}</p>
                         ))}
-                        {bbBuckets.none.length > 8 && <p className="text-xs text-gray-400 px-3">…and {bbBuckets.none.length - 8} more</p>}
+                        {bbResult.unmatched_count > 10 && <p className="text-[11px] text-gray-400">…and {bbResult.unmatched_count - 10} more</p>}
                       </div>
-                    </div>
+                    </details>
                   )}
 
-                  {bbBuckets.high.length === 0 && bbBuckets.medium.length === 0 && (
+                  {bbResult.matched_count === 0 && bbResult.ambiguous_count === 0 && (
                     <div className="text-center py-6 text-sm text-gray-400">
-                      No ledger matches found. Make sure this client has ledgers in their Ledger List tab first.
+                      No matches found. Check that both files are for the same account and period.
                     </div>
                   )}
                 </div>
               )}
             </div>
 
-            {bbStep === "review" && (
-              <div className="px-6 py-4 border-t flex items-center justify-between">
+            {/* Footer */}
+            {bbStep === "review" && bbResult && (
+              <div className="px-6 py-4 border-t flex-shrink-0 flex items-center justify-between">
                 <p className="text-xs text-gray-400">
-                  {bbBuckets ? `${bbBuckets.high.length} auto + ${bbBuckets.medium.filter(c => (bbMediumOverrides[c.pattern] ?? c.ledger_name) !== "__skip__").length} confirmed rules` : ""}
+                  {bbResult.rule_candidates.filter(c=>c.status==="auto").length} auto rules
+                  {bbResult.ambiguous.filter(a=>bbAmbiguousSelections[a.bb_row.particulars+a.bb_row.date] && bbAmbiguousSelections[a.bb_row.particulars+a.bb_row.date]!=="__skip__").length > 0 && ` + ${bbResult.ambiguous.filter(a=>bbAmbiguousSelections[a.bb_row.particulars+a.bb_row.date] && bbAmbiguousSelections[a.bb_row.particulars+a.bb_row.date]!=="__skip__").length} confirmed`}
                 </p>
                 <div className="flex gap-3">
-                  <button onClick={() => setBbImportOpen(false)} className="text-sm px-4 py-2 rounded border border-gray-200 text-gray-600 hover:bg-gray-50">
-                    Cancel
-                  </button>
-                  <button
-                    onClick={confirmBbRules}
-                    disabled={bbConfirming || (!bbBuckets?.high.length && !bbBuckets?.medium.length)}
-                    className="text-sm px-4 py-2 rounded bg-purple-600 text-white font-medium hover:bg-purple-700 disabled:opacity-50 inline-flex items-center gap-2"
-                  >
+                  <button onClick={() => { setBbImportOpen(false); bbReset(); }} className="text-sm px-4 py-2 rounded border border-gray-200 text-gray-600 hover:bg-gray-50">Cancel</button>
+                  <button onClick={confirmBbRules} disabled={bbConfirming || bbResult.matched_count === 0}
+                    className="text-sm px-4 py-2 rounded bg-purple-600 text-white font-medium hover:bg-purple-700 disabled:opacity-50 inline-flex items-center gap-2">
                     {bbConfirming ? <><Loader2 size={14} className="animate-spin" /> Creating rules…</> : "Create rules"}
                   </button>
                 </div>
