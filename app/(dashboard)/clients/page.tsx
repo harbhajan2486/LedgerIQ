@@ -94,22 +94,14 @@ export default function ClientsPage() {
         </button>
       </div>
 
-      {/* Summary banner — only show if there's work to do */}
-      {!loading && (totalPending > 0 || totalUnreconciled > 0) && (
+      {/* Summary banner — only show if there are documents pending review */}
+      {!loading && totalPending > 0 && (
         <div className="flex gap-3">
-          {totalPending > 0 && (
-            <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-700">
-              <AlertTriangle size={13} />
-              <span><strong>{totalPending}</strong> document{totalPending !== 1 ? "s" : ""} pending review</span>
-              <Link href="/review" className="underline font-medium hover:text-amber-900">Open Inbox →</Link>
-            </div>
-          )}
-          {totalUnreconciled > 0 && (
-            <div className="flex items-center gap-2 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 text-xs text-blue-700">
-              <GitMerge size={13} />
-              <span><strong>{totalUnreconciled}</strong> unreconciled transaction{totalUnreconciled !== 1 ? "s" : ""} across clients</span>
-            </div>
-          )}
+          <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-700">
+            <AlertTriangle size={13} />
+            <span><strong>{totalPending}</strong> document{totalPending !== 1 ? "s" : ""} pending review</span>
+            <Link href="/review" className="underline font-medium hover:text-amber-900">Open Inbox →</Link>
+          </div>
         </div>
       )}
 
