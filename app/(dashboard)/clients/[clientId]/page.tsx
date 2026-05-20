@@ -664,7 +664,7 @@ export default function ClientDetailPage() {
     fetch(`/api/v1/review/queue?client=${clientId}`)
       .then(r => r.json())
       .then(d => setLivePendingCount(d.queue?.length ?? 0))
-      .catch(() => {});
+      .catch(() => setLivePendingCount(0));
   }
 
   function loadBankTxns() {
@@ -1283,10 +1283,10 @@ export default function ClientDetailPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {(livePendingCount ?? pendingCount) > 0 && (
+          {!!livePendingCount && (
             <Link href={`/review?client=${clientId}`} className={buttonVariants({ variant: "outline" })}>
               <AlertTriangle size={14} className="mr-1.5 text-amber-500" />
-              Review {livePendingCount ?? pendingCount} pending
+              Review {livePendingCount} pending
             </Link>
           )}
         </div>
