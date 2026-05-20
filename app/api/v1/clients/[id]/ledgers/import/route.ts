@@ -123,19 +123,17 @@ function parseTallyRawArrays(
   const avgNumericCols = sample.reduce((s, r) => s + r.slice(1).filter(isNumericCell).length, 0) / Math.max(sample.length, 1);
   const isLayoutC = !isLayoutB && avgNumericCols >= 3;
 
-  // Layout A: check if any row has leading whitespace (Tally indentation)
-  const hasIndentedRows = rawRows.slice(dataStart).some(r => {
+  // Layout A with indentation: any row in col[0] has leading whitespace
+  const hasIndentedRows = !isLayoutB && !isLayoutC && rawRows.slice(dataStart).some(r => {
     const raw = String(r[0] ?? "");
     return raw !== raw.trimStart() && raw.trim().length > 0;
   });
 
-  let currentGroup = "";
-
-  for (let i = dataStart; i < rawRows.length; i++) {
-    const row = rawRows[i];
-
-    // ── Layout B: Group | LedgerName | Dr | Cr ──────────────────────────────
-    if (isLayoutB) {
+  // ── Layout B: Group | LedgerName | Dr | Cr ──────────────────────────────
+  if (isLayoutB) {
+    let currentGroup = "";
+    for (let i = dataStart; i < rawRows.length; i++) {
+      const row = rawRows[i];
       const groupRaw = String(row[0] ?? "").trim();
       const ledgerRaw = String(row[1] ?? "").trim();
       if (!ledgerRaw) continue;
@@ -146,7 +144,6 @@ function parseTallyRawArrays(
       const crAmt = parseAmt(row[3] as string | number | null);
       const hasDr = drAmt !== null && drAmt > 0;
       const hasCr = crAmt !== null && crAmt > 0;
-
       if (groupRaw) currentGroup = groupRaw;
 
       let closingBalance: number | null = null;
@@ -165,71 +162,107 @@ function parseTallyRawArrays(
         opening_balance: null,
         source: "trial_balance",
       });
-      continue;
+    }
+  }
+
+  // ── Layout A with indentation: two-pass to correctly skip group/sub-group rows ──
+  // A row is a group/sub-group header (not a ledger) when the NEXT non-empty row
+  // has strictly deeper indentation. This handles any number of nesting levels.
+  else if (hasIndentedRows) {
+    type DataRow = { name: string; indent: number; dr: number | null; cr: number | null };
+    const dataRows: DataRow[] = [];
+
+    for (let i = dataStart; i < rawRows.length; i++) {
+      const row = rawRows[i];
+      const rawStr = String(row[0] ?? "");
+      const name = rawStr.trim();
+      if (!name) continue;
+      if (/^(particulars|ledger|name|debit|credit|dr|cr|closing|opening)$/i.test(name)) continue;
+      if (name.length > 150) { skipped.push(name.slice(0, 30) + "…"); continue; }
+      dataRows.push({
+        name,
+        indent: rawStr.length - rawStr.trimStart().length,
+        dr: parseAmt(row[1] as string | number | null),
+        cr: parseAmt(row[2] as string | number | null),
+      });
     }
 
-    // ── Layout A / C: Name in col[0] ──────────────────────────────────────
-    const rawNameStr = String(row[0] ?? "");
-    const isIndented = rawNameStr !== rawNameStr.trimStart();
-    const name = rawNameStr.trim();
-    if (!name) continue;
-    if (/^(particulars|ledger|name|debit|credit|dr|cr|closing|opening)$/i.test(name)) continue;
-    if (name.length > 150) { skipped.push(name.slice(0, 30) + "…"); continue; }
+    let curGroup = "";
+    for (let j = 0; j < dataRows.length; j++) {
+      const { name, indent, dr, cr } = dataRows[j];
+      const nextIndent = j + 1 < dataRows.length ? dataRows[j + 1].indent : -1;
 
-    // Determine Dr/Cr amounts based on layout
-    let drAmt: number | null;
-    let crAmt: number | null;
-
-    if (isLayoutC) {
-      // 5-col: Name | OpDr | OpCr | ClDr | ClCr → use closing balance (col[3]/col[4])
-      drAmt = parseAmt(row[3] as string | number | null);
-      crAmt = parseAmt(row[4] as string | number | null);
-    } else {
-      // Layout A standard: Name | Dr | Cr
-      drAmt = parseAmt(row[1] as string | number | null);
-      crAmt = parseAmt(row[2] as string | number | null);
-    }
-
-    const hasDr = drAmt !== null && drAmt > 0;
-    const hasCr = crAmt !== null && crAmt > 0;
-
-    // Group row detection:
-    // 1. If file has indentation: non-indented row = group, indented = ledger
-    // 2. If no indentation: use TALLY_GROUP_MAP or hasDr&&hasCr heuristic
-    const nameKey = name.toLowerCase();
-    const isKnownGroup = TALLY_GROUP_MAP[nameKey] !== undefined;
-
-    if (hasIndentedRows) {
-      if (!isIndented) {
-        // Non-indented → group header, update context and skip
-        currentGroup = name;
+      if (nextIndent > indent) {
+        // Header row (group or sub-group) — becomes the tally_group for children
+        curGroup = name;
         continue;
       }
-      // Indented → individual ledger, fall through to import
-    } else {
-      // No indentation in file — use old heuristics
-      if (hasDr && hasCr) { currentGroup = name; continue; }
-      if (isKnownGroup && !hasDr && !hasCr) { currentGroup = name; continue; }
-      // Also treat known group names with a single-side value as group context rows
-      if (isKnownGroup) { currentGroup = name; continue; }
+
+      const hasDr = dr !== null && dr > 0;
+      const hasCr = cr !== null && cr > 0;
+      let closingBalance: number | null = null;
+      let balanceType: "Dr" | "Cr" | null = null;
+      if (hasDr) { closingBalance = dr!; balanceType = "Dr"; }
+      else if (hasCr) { closingBalance = cr!; balanceType = "Cr"; }
+
+      ledgers.push({
+        tenant_id: "", client_id: "",
+        ledger_name: name,
+        ledger_type: curGroup ? mapTallyGroup(curGroup) : "expense",
+        tally_group: curGroup || null,
+        financial_year: financialYear,
+        closing_balance: closingBalance,
+        balance_type: balanceType,
+        opening_balance: null,
+        source: "trial_balance",
+      });
     }
+  }
 
-    let closingBalance: number | null = null;
-    let balanceType: "Dr" | "Cr" | null = null;
-    if (hasDr) { closingBalance = drAmt!; balanceType = "Dr"; }
-    else if (hasCr) { closingBalance = crAmt!; balanceType = "Cr"; }
+  // ── Layout A/C without indentation: heuristic group detection ────────────
+  else {
+    let currentGroup = "";
+    for (let i = dataStart; i < rawRows.length; i++) {
+      const row = rawRows[i];
+      const name = String(row[0] ?? "").trim();
+      if (!name) continue;
+      if (/^(particulars|ledger|name|debit|credit|dr|cr|closing|opening)$/i.test(name)) continue;
+      if (name.length > 150) { skipped.push(name.slice(0, 30) + "…"); continue; }
 
-    ledgers.push({
-      tenant_id: "", client_id: "",
-      ledger_name: name,
-      ledger_type: currentGroup ? mapTallyGroup(currentGroup) : (isKnownGroup ? mapTallyGroup(name) : "expense"),
-      tally_group: currentGroup || null,
-      financial_year: financialYear,
-      closing_balance: closingBalance,
-      balance_type: balanceType,
-      opening_balance: null,
-      source: "trial_balance",
-    });
+      let drAmt: number | null;
+      let crAmt: number | null;
+      if (isLayoutC) {
+        drAmt = parseAmt(row[3] as string | number | null);
+        crAmt = parseAmt(row[4] as string | number | null);
+      } else {
+        drAmt = parseAmt(row[1] as string | number | null);
+        crAmt = parseAmt(row[2] as string | number | null);
+      }
+
+      const hasDr = drAmt !== null && drAmt > 0;
+      const hasCr = crAmt !== null && crAmt > 0;
+      const isKnownGroup = TALLY_GROUP_MAP[name.toLowerCase()] !== undefined;
+
+      if (hasDr && hasCr) { currentGroup = name; continue; }
+      if (isKnownGroup) { currentGroup = name; continue; }
+
+      let closingBalance: number | null = null;
+      let balanceType: "Dr" | "Cr" | null = null;
+      if (hasDr) { closingBalance = drAmt!; balanceType = "Dr"; }
+      else if (hasCr) { closingBalance = crAmt!; balanceType = "Cr"; }
+
+      ledgers.push({
+        tenant_id: "", client_id: "",
+        ledger_name: name,
+        ledger_type: currentGroup ? mapTallyGroup(currentGroup) : (isKnownGroup ? mapTallyGroup(name) : "expense"),
+        tally_group: currentGroup || null,
+        financial_year: financialYear,
+        closing_balance: closingBalance,
+        balance_type: balanceType,
+        opening_balance: null,
+        source: "trial_balance",
+      });
+    }
   }
 
   // Deduplicate by ledger_name — keep last occurrence

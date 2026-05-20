@@ -22,10 +22,11 @@ export async function GET(
 
   const { data: ledgers } = await supabase
     .from("ledger_masters")
-    .select("id, ledger_name, ledger_type, closing_balance, balance_type, financial_year, source, created_at")
+    .select("id, ledger_name, ledger_type, tally_group, closing_balance, balance_type, financial_year, source, created_at")
     .eq("tenant_id", tenantId)
     .eq("client_id", clientId)
     .order("ledger_type")
+    .order("tally_group", { nullsFirst: false })
     .order("ledger_name")
     .limit(5000);
 

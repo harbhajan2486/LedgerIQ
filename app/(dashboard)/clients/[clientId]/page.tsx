@@ -373,7 +373,7 @@ export default function ClientDetailPage() {
   }
 
   // Ledger master state
-  const [ledgers, setLedgers] = useState<{ id: string; ledger_name: string; ledger_type: string; closing_balance?: number | null; balance_type?: string | null; financial_year?: string | null; source?: string | null }[]>([]);
+  const [ledgers, setLedgers] = useState<{ id: string; ledger_name: string; ledger_type: string; tally_group?: string | null; closing_balance?: number | null; balance_type?: string | null; financial_year?: string | null; source?: string | null }[]>([]);
   const [ledgersLoading, setLedgersLoading] = useState(false);
   const [newLedgerName, setNewLedgerName] = useState("");
   const [newLedgerType, setNewLedgerType] = useState("expense");
@@ -391,6 +391,7 @@ export default function ClientDetailPage() {
   const [selectedLedgerIds, setSelectedLedgerIds] = useState<Set<string>>(new Set());
   const [deletingLedgers, setDeletingLedgers] = useState(false);
   const [ledgerSearch, setLedgerSearch] = useState("");
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
 
   // Ledger mapping rules state
   interface MappingRule {
@@ -3543,89 +3544,156 @@ export default function ClientDetailPage() {
                   <BookOpen size={28} className="mx-auto mb-2 text-gray-300" />
                   No ledgers yet. Add one above or click "Load 25 common ledgers".
                 </div>
-              ) : (
-                <>
-                {/* Bulk action bar */}
-                {selectedLedgerIds.size > 0 && (
-                  <div className="flex items-center gap-3 px-4 py-2 bg-indigo-50 border-b border-indigo-100">
-                    <span className="text-xs text-indigo-700 font-medium">{selectedLedgerIds.size} selected</span>
-                    <button onClick={deleteSelectedLedgers} disabled={deletingLedgers}
-                      className="text-xs px-3 py-1 rounded bg-red-600 text-white font-medium hover:bg-red-700 disabled:opacity-50 inline-flex items-center gap-1">
-                      {deletingLedgers ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
-                      Delete selected
-                    </button>
-                    <button onClick={() => setSelectedLedgerIds(new Set())}
-                      className="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
-                  </div>
-                )}
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b bg-gray-50">
-                      <th className="px-3 py-3 w-8">
-                        <input type="checkbox"
-                          checked={selectedLedgerIds.size === ledgers.length && ledgers.length > 0}
-                          onChange={(e) => setSelectedLedgerIds(e.target.checked ? new Set(ledgers.map(l => l.id)) : new Set())}
-                          className="rounded border-gray-300" />
-                      </th>
-                      <th className="text-left px-5 py-3 text-xs font-medium text-gray-500">Ledger Name</th>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-gray-500">Type</th>
-                      <th className="text-right px-4 py-3 text-xs font-medium text-gray-500">
-                        Closing Balance
-                        {(() => { const fy = ledgers.find(l => l.financial_year)?.financial_year; return fy ? <span className="ml-1 font-normal text-gray-400">· FY {fy}</span> : null; })()}
-                      </th>
-                      <th className="px-4 py-3" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {ledgers.filter(l => !ledgerSearch || l.ledger_name.toLowerCase().includes(ledgerSearch.toLowerCase()) || l.ledger_type.includes(ledgerSearch.toLowerCase())).map((l) => (
-                      <tr key={l.id} className={`border-b last:border-0 hover:bg-gray-50/50 ${selectedLedgerIds.has(l.id) ? "bg-indigo-50/40" : ""}`}>
-                        <td className="px-3 py-2.5">
-                          <input type="checkbox" checked={selectedLedgerIds.has(l.id)}
-                            onChange={(e) => {
-                              const next = new Set(selectedLedgerIds);
-                              e.target.checked ? next.add(l.id) : next.delete(l.id);
-                              setSelectedLedgerIds(next);
-                            }}
+              ) : (() => {
+                const filteredLedgers = ledgers.filter(l =>
+                  !ledgerSearch ||
+                  l.ledger_name.toLowerCase().includes(ledgerSearch.toLowerCase()) ||
+                  l.ledger_type.includes(ledgerSearch.toLowerCase()) ||
+                  (l.tally_group ?? "").toLowerCase().includes(ledgerSearch.toLowerCase())
+                );
+                const fy = ledgers.find(l => l.financial_year)?.financial_year;
+
+                // When searching, show flat list; otherwise group by tally_group
+                const groups: { key: string; label: string; ledgers: typeof filteredLedgers }[] = [];
+                if (ledgerSearch) {
+                  groups.push({ key: "__all__", label: "", ledgers: filteredLedgers });
+                } else {
+                  const groupMap = new Map<string, typeof filteredLedgers>();
+                  for (const l of filteredLedgers) {
+                    const key = l.tally_group ?? `__type__${l.ledger_type}`;
+                    const label = l.tally_group ?? l.ledger_type.charAt(0).toUpperCase() + l.ledger_type.slice(1);
+                    if (!groupMap.has(key)) groupMap.set(key, []);
+                    groupMap.get(key)!.push(l);
+                    // Store label with key — we'll derive it below
+                    void label;
+                  }
+                  for (const [key, items] of groupMap) {
+                    const label = items[0].tally_group ?? (items[0].ledger_type.charAt(0).toUpperCase() + items[0].ledger_type.slice(1));
+                    groups.push({ key, label, ledgers: items });
+                  }
+                }
+
+                return (
+                  <>
+                  {selectedLedgerIds.size > 0 && (
+                    <div className="flex items-center gap-3 px-4 py-2 bg-indigo-50 border-b border-indigo-100">
+                      <span className="text-xs text-indigo-700 font-medium">{selectedLedgerIds.size} selected</span>
+                      <button onClick={deleteSelectedLedgers} disabled={deletingLedgers}
+                        className="text-xs px-3 py-1 rounded bg-red-600 text-white font-medium hover:bg-red-700 disabled:opacity-50 inline-flex items-center gap-1">
+                        {deletingLedgers ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
+                        Delete selected
+                      </button>
+                      <button onClick={() => setSelectedLedgerIds(new Set())}
+                        className="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
+                    </div>
+                  )}
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b bg-gray-50">
+                        <th className="px-3 py-3 w-8">
+                          <input type="checkbox"
+                            checked={selectedLedgerIds.size === ledgers.length && ledgers.length > 0}
+                            onChange={(e) => setSelectedLedgerIds(e.target.checked ? new Set(ledgers.map(l => l.id)) : new Set())}
                             className="rounded border-gray-300" />
-                        </td>
-                        <td className="px-5 py-2.5 font-medium text-gray-800">
-                          <span className="flex items-center gap-2">
-                            {l.ledger_name}
-                            {l.source === "trial_balance" && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 font-semibold tracking-wide">TB</span>
-                            )}
-                            {l.financial_year && <span className="text-[10px] text-gray-400">FY {l.financial_year}</span>}
-                          </span>
-                        </td>
-                        <td className="px-4 py-2.5">
-                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                            l.ledger_type === "expense"   ? "bg-red-50 text-red-700" :
-                            l.ledger_type === "income"    ? "bg-green-50 text-green-700" :
-                            l.ledger_type === "tax"       ? "bg-orange-50 text-orange-700" :
-                            l.ledger_type === "capital"   ? "bg-purple-50 text-purple-700" :
-                            l.ledger_type === "bank"      ? "bg-blue-50 text-blue-700" :
-                            "bg-gray-100 text-gray-600"
-                          }`}>{l.ledger_type}</span>
-                        </td>
-                        <td className="px-4 py-2.5 text-right text-sm">
-                          {l.closing_balance != null ? (
-                            <span className={l.balance_type === "Cr" ? "text-green-700 font-medium" : "text-red-700 font-medium"}>
-                              ₹{Number(l.closing_balance).toLocaleString("en-IN")}
-                              <span className="ml-1 text-[10px] font-normal opacity-70">{l.balance_type}</span>
-                            </span>
-                          ) : <span className="text-gray-300">—</span>}
-                        </td>
-                        <td className="px-4 py-2.5 text-right">
-                          <button onClick={() => deleteLedger(l.id)} className="text-gray-300 hover:text-red-500 transition-colors">
-                            <Trash2 size={14} />
-                          </button>
-                        </td>
+                        </th>
+                        <th className="text-left px-5 py-3 text-xs font-medium text-gray-500">Ledger Name</th>
+                        <th className="text-left px-4 py-3 text-xs font-medium text-gray-500">Type</th>
+                        <th className="text-right px-4 py-3 text-xs font-medium text-gray-500">
+                          Closing Balance
+                          {fy && <span className="ml-1 font-normal text-gray-400">· FY {fy}</span>}
+                        </th>
+                        <th className="px-4 py-3" />
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-                </>
-              )}
+                    </thead>
+                    <tbody>
+                      {groups.map(({ key, label, ledgers: groupLedgers }) => {
+                        const isCollapsed = collapsedGroups.has(key);
+                        const showHeader = key !== "__all__";
+                        const groupDr = groupLedgers.filter(l => l.balance_type === "Dr" && l.closing_balance != null).reduce((s, l) => s + Number(l.closing_balance), 0);
+                        const groupCr = groupLedgers.filter(l => l.balance_type === "Cr" && l.closing_balance != null).reduce((s, l) => s + Number(l.closing_balance), 0);
+                        return (
+                          <>
+                          {showHeader && (
+                            <tr key={`hdr-${key}`}
+                              className="border-b bg-gray-50/80 cursor-pointer hover:bg-gray-100/60 select-none"
+                              onClick={() => setCollapsedGroups(prev => {
+                                const next = new Set(prev);
+                                next.has(key) ? next.delete(key) : next.add(key);
+                                return next;
+                              })}>
+                              <td className="px-3 py-2" />
+                              <td className="px-5 py-2 font-semibold text-gray-700 text-xs uppercase tracking-wide" colSpan={1}>
+                                <span className="flex items-center gap-1.5">
+                                  {isCollapsed ? <ChevronRight size={12} className="text-gray-400" /> : <ChevronDown size={12} className="text-gray-400" />}
+                                  {label}
+                                  <span className="ml-1 font-normal text-gray-400 normal-case tracking-normal">{groupLedgers.length} ledger{groupLedgers.length !== 1 ? "s" : ""}</span>
+                                </span>
+                              </td>
+                              <td className="px-4 py-2" />
+                              <td className="px-4 py-2 text-right text-xs">
+                                {(groupDr > 0 || groupCr > 0) && (
+                                  <span className={groupDr > groupCr ? "text-red-600 font-medium" : "text-green-700 font-medium"}>
+                                    ₹{(groupDr > groupCr ? groupDr : groupCr).toLocaleString("en-IN")}
+                                    <span className="ml-1 font-normal opacity-60">{groupDr > groupCr ? "Dr" : "Cr"}</span>
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-4 py-2" />
+                            </tr>
+                          )}
+                          {!isCollapsed && groupLedgers.map((l) => (
+                            <tr key={l.id} className={`border-b last:border-0 hover:bg-gray-50/50 ${selectedLedgerIds.has(l.id) ? "bg-indigo-50/40" : ""}`}>
+                              <td className="px-3 py-2.5">
+                                <input type="checkbox" checked={selectedLedgerIds.has(l.id)}
+                                  onChange={(e) => {
+                                    const next = new Set(selectedLedgerIds);
+                                    e.target.checked ? next.add(l.id) : next.delete(l.id);
+                                    setSelectedLedgerIds(next);
+                                  }}
+                                  className="rounded border-gray-300" />
+                              </td>
+                              <td className={`py-2.5 font-medium text-gray-800 ${showHeader ? "pl-8 pr-5" : "px-5"}`}>
+                                <span className="flex items-center gap-2">
+                                  {l.ledger_name}
+                                  {l.source === "trial_balance" && (
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 font-semibold tracking-wide">TB</span>
+                                  )}
+                                  {l.financial_year && <span className="text-[10px] text-gray-400">FY {l.financial_year}</span>}
+                                </span>
+                              </td>
+                              <td className="px-4 py-2.5">
+                                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                                  l.ledger_type === "expense"   ? "bg-red-50 text-red-700" :
+                                  l.ledger_type === "income"    ? "bg-green-50 text-green-700" :
+                                  l.ledger_type === "tax"       ? "bg-orange-50 text-orange-700" :
+                                  l.ledger_type === "capital"   ? "bg-purple-50 text-purple-700" :
+                                  l.ledger_type === "bank"      ? "bg-blue-50 text-blue-700" :
+                                  "bg-gray-100 text-gray-600"
+                                }`}>{l.ledger_type}</span>
+                              </td>
+                              <td className="px-4 py-2.5 text-right text-sm">
+                                {l.closing_balance != null ? (
+                                  <span className={l.balance_type === "Cr" ? "text-green-700 font-medium" : "text-red-700 font-medium"}>
+                                    ₹{Number(l.closing_balance).toLocaleString("en-IN")}
+                                    <span className="ml-1 text-[10px] font-normal opacity-70">{l.balance_type}</span>
+                                  </span>
+                                ) : <span className="text-gray-300">—</span>}
+                              </td>
+                              <td className="px-4 py-2.5 text-right">
+                                <button onClick={() => deleteLedger(l.id)} className="text-gray-300 hover:text-red-500 transition-colors">
+                                  <Trash2 size={14} />
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                          </>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  </>
+                );
+              })()}
             </CardContent>
           </Card>
 
