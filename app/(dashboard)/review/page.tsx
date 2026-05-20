@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ClipboardCheck, FileText, ChevronRight, AlertTriangle, RefreshCw, Loader2, Trash2, Building2 } from "lucide-react";
+import { ClipboardCheck, FileText, ChevronRight, AlertTriangle, RefreshCw, Loader2, Trash2, Building2, ChevronLeft, X } from "lucide-react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { toast } from "sonner";
@@ -50,7 +51,10 @@ const STATUS_LABELS: Record<string, string> = {
   failed:     "Extraction failed",
 };
 
-export default function InboxPage() {
+function InboxPageInner() {
+  const searchParams = useSearchParams();
+  const clientFilter = searchParams.get("client");
+
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [stuck, setStuck] = useState<StuckItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -60,9 +64,11 @@ export default function InboxPage() {
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; fileName: string } | null>(null);
   const [clients, setClients] = useState<ClientOption[]>([]);
   const [assigningTo, setAssigningTo] = useState<string | null>(null);
+  const [clientName, setClientName] = useState<string | null>(null);
 
-  function loadQueue() {
-    fetch("/api/v1/review/queue")
+  function loadQueue(filter?: string | null) {
+    const url = `/api/v1/review/queue${filter ? `?client=${filter}` : ""}`;
+    fetch(url)
       .then((r) => r.json())
       .then((d) => {
         setQueue(d.queue ?? []);
@@ -73,9 +79,13 @@ export default function InboxPage() {
   }
 
   useEffect(() => {
-    loadQueue();
-    fetch("/api/v1/clients").then((r) => r.json()).then((d) => setClients(d.clients ?? [])).catch(() => {});
-  }, []);
+    loadQueue(clientFilter);
+    fetch("/api/v1/clients").then((r) => r.json()).then((d) => {
+      const all: ClientOption[] = d.clients ?? [];
+      setClients(all);
+      if (clientFilter) setClientName(all.find(c => c.id === clientFilter)?.client_name ?? null);
+    }).catch(() => {});
+  }, [clientFilter]);
 
   async function performDelete(docId: string, fileName: string) {
     setDeleting(docId);
@@ -158,11 +168,29 @@ export default function InboxPage() {
 
   return (
     <div className="space-y-6 max-w-4xl">
+      {clientFilter && (
+        <div className="flex items-center gap-3">
+          <Link href="/review" className="text-xs text-blue-600 hover:underline flex items-center gap-1">
+            <ChevronLeft size={12} /> All clients
+          </Link>
+          <span className="text-gray-300">|</span>
+          <div className="flex items-center gap-1.5 text-sm text-gray-700">
+            <Building2 size={14} className="text-gray-400" />
+            <span className="font-medium">{clientName ?? "Client"}</span>
+            <span className="text-xs text-gray-400">— filtered to this client only</span>
+          </div>
+          <Link href="/review" className="ml-auto inline-flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600">
+            <X size={11} /> Clear filter
+          </Link>
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-gray-900">Inbox</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Documents waiting for your review across all clients. Every correction teaches the system.
+            {clientFilter
+              ? `Documents for ${clientName ?? "this client"} waiting for review.`
+              : "Documents waiting for your review across all clients. Every correction teaches the system."}
           </p>
         </div>
         {queue.length > 0 && (
@@ -332,5 +360,13 @@ export default function InboxPage() {
         variant="warning"
       />
     </div>
+  );
+}
+
+export default function InboxPage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center py-24"><Loader2 size={24} className="animate-spin text-gray-400" /></div>}>
+      <InboxPageInner />
+    </Suspense>
   );
 }

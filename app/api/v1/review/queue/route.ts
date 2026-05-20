@@ -19,29 +19,36 @@ export async function GET(request: NextRequest) {
     const page = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10));
     const limit = Math.min(50, Math.max(1, parseInt(searchParams.get("limit") ?? "50", 10)));
     const offset = (page - 1) * limit;
+    const clientFilter = searchParams.get("client") ?? null;
 
     // "Stuck" = failed (always retryable) OR still processing after 2 minutes
     const stuckCutoff = new Date(Date.now() - 2 * 60 * 1000).toISOString();
 
+    let countQuery = supabase
+      .from("documents")
+      .select("*", { count: "exact", head: true })
+      .eq("tenant_id", profile.tenant_id)
+      .eq("status", "review_required")
+      .is("deleted_at", null);
+    if (clientFilter) countQuery = countQuery.eq("client_id", clientFilter);
+
+    let docsQuery = supabase
+      .from("documents")
+      .select(`
+        id, original_filename, document_type, status, uploaded_at, client_id,
+        clients(client_name),
+        extractions(id, field_name, extracted_value, confidence, status)
+      `)
+      .eq("tenant_id", profile.tenant_id)
+      .eq("status", "review_required")
+      .is("deleted_at", null)
+      .order("uploaded_at", { ascending: true })
+      .range(offset, offset + limit - 1);
+    if (clientFilter) docsQuery = docsQuery.eq("client_id", clientFilter);
+
     const [{ count }, { data: documents, error }, { data: failedDocs }, { data: stalledDocs }] = await Promise.all([
-      supabase
-        .from("documents")
-        .select("*", { count: "exact", head: true })
-        .eq("tenant_id", profile.tenant_id)
-        .eq("status", "review_required")
-        .is("deleted_at", null),
-      supabase
-        .from("documents")
-        .select(`
-          id, original_filename, document_type, status, uploaded_at, client_id,
-          clients(client_name),
-          extractions(id, field_name, extracted_value, confidence, status)
-        `)
-        .eq("tenant_id", profile.tenant_id)
-        .eq("status", "review_required")
-        .is("deleted_at", null)
-        .order("uploaded_at", { ascending: true })
-        .range(offset, offset + limit - 1),
+      countQuery,
+      docsQuery,
       // Failed docs — always show with retry option
       supabase
         .from("documents")

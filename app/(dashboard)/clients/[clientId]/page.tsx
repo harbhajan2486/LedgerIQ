@@ -202,6 +202,7 @@ export default function ClientDetailPage() {
   const [client, setClient] = useState<Client | null>(null);
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
+  const [livePendingCount, setLivePendingCount] = useState<number | null>(null);
   const [retrying, setRetrying] = useState<string | null>(null);
   const [retagging, setRetagging] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -617,6 +618,13 @@ export default function ClientDetailPage() {
         setDocuments(d.documents ?? []);
       })
       .finally(() => setLoading(false));
+  }
+
+  function refreshPendingCount() {
+    fetch(`/api/v1/review/queue?client=${clientId}`)
+      .then(r => r.json())
+      .then(d => setLivePendingCount((d.queue?.length ?? 0) + (d.stuck?.length ?? 0)))
+      .catch(() => {});
   }
 
   function loadBankTxns() {
@@ -1068,8 +1076,9 @@ export default function ClientDetailPage() {
   useEffect(() => {
     loadData();
     loadRecon();
-    // Re-fetch when user returns from review page so pending count reflects actual DB state
-    const onFocus = () => loadData();
+    refreshPendingCount();
+    // Re-fetch live pending count when user returns from review page
+    const onFocus = () => refreshPendingCount();
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [clientId]);
@@ -1233,10 +1242,10 @@ export default function ClientDetailPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {pendingCount > 0 && (
+          {(livePendingCount ?? pendingCount) > 0 && (
             <Link href={`/review?client=${clientId}`} className={buttonVariants({ variant: "outline" })}>
               <AlertTriangle size={14} className="mr-1.5 text-amber-500" />
-              Review {pendingCount} pending
+              Review {livePendingCount ?? pendingCount} pending
             </Link>
           )}
         </div>
