@@ -34,7 +34,7 @@ export async function GET(request: NextRequest) {
       // Client-level rules
       const { data: clientRules } = await supabase
         .from("ledger_mapping_rules")
-        .select("id, client_id, industry_name, pattern, ledger_name, match_count, confirmed, updated_at")
+        .select("id, client_id, industry_name, pattern, ledger_name, match_count, confirmed, source, financial_year, updated_at")
         .eq("tenant_id", profile.tenant_id)
         .eq("client_id", clientId)
         .order("updated_at", { ascending: false });
@@ -44,7 +44,7 @@ export async function GET(request: NextRequest) {
       if (industryName) {
         const { data: ir } = await supabase
           .from("ledger_mapping_rules")
-          .select("id, client_id, industry_name, pattern, ledger_name, match_count, confirmed, updated_at")
+          .select("id, client_id, industry_name, pattern, ledger_name, match_count, confirmed, source, financial_year, updated_at")
           .eq("tenant_id", profile.tenant_id)
           .eq("industry_name", industryName)
           .is("client_id", null)
@@ -62,7 +62,7 @@ export async function GET(request: NextRequest) {
     // No clientId: return all rules for tenant grouped, with client names joined
     const { data: allRules } = await supabase
       .from("ledger_mapping_rules")
-      .select("id, client_id, industry_name, pattern, ledger_name, match_count, confirmed, updated_at, clients(client_name)")
+      .select("id, client_id, industry_name, pattern, ledger_name, match_count, confirmed, source, financial_year, updated_at, clients(client_name)")
       .eq("tenant_id", profile.tenant_id)
       .order("updated_at", { ascending: false });
 

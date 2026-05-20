@@ -223,6 +223,7 @@ export async function POST(
     if (contentType.includes("application/json")) {
       const body = await request.json() as {
         confirm?: boolean;
+        financial_year?: string;
         rules?: Array<{ pattern: string; ledger_name: string }>;
       };
 
@@ -233,6 +234,33 @@ export async function POST(
         );
       }
 
+      const financialYear = body.financial_year ?? null;
+
+      // Check for cross-year conflicts: existing rules for the same pattern with a different
+      // financial_year AND different ledger → surface as a warning (still upsert, but flag).
+      const patterns = body.rules.map((r) => r.pattern);
+      const { data: existingRules } = await supabase
+        .from("ledger_mapping_rules")
+        .select("pattern, ledger_name, financial_year, source")
+        .eq("tenant_id", tenantId)
+        .eq("client_id", clientId)
+        .in("pattern", patterns);
+
+      const crossYearConflicts: Array<{ pattern: string; prev_ledger: string; prev_fy: string | null; new_ledger: string }> = [];
+      if (existingRules) {
+        for (const r of body.rules) {
+          const existing = existingRules.find((e) => e.pattern === r.pattern);
+          if (existing && existing.ledger_name !== r.ledger_name && existing.financial_year !== financialYear) {
+            crossYearConflicts.push({
+              pattern: r.pattern,
+              prev_ledger: existing.ledger_name,
+              prev_fy: existing.financial_year,
+              new_ledger: r.ledger_name,
+            });
+          }
+        }
+      }
+
       const ruleRows = body.rules.map((r) => ({
         tenant_id: tenantId,
         client_id: clientId,
@@ -241,6 +269,7 @@ export async function POST(
         confirmed: true,
         match_count: 3,
         source: "bank_book_import",
+        financial_year: financialYear,
       }));
 
       const { error: upsertErr } = await supabase
@@ -255,10 +284,13 @@ export async function POST(
         action: "bank_book_import",
         entity_type: "ledger_mapping_rules",
         entity_id: clientId,
-        new_value: { count: body.rules.length },
+        new_value: { count: body.rules.length, financial_year: financialYear },
       });
 
-      return NextResponse.json({ created: body.rules.length });
+      return NextResponse.json({
+        created: body.rules.length,
+        cross_year_conflicts: crossYearConflicts,
+      });
     }
 
     // ── Mode A: file upload (multipart/form-data) ──────────────────────────

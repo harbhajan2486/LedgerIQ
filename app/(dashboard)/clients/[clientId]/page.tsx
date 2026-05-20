@@ -206,7 +206,7 @@ export default function ClientDetailPage() {
   const [retrying, setRetrying] = useState<string | null>(null);
   const [retagging, setRetagging] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"documents" | "bank" | "reconciliation" | "ledgers" | "gst" | "expected" | "summary" | "ledger_view">("documents");
+  const [activeTab, setActiveTab] = useState<"documents" | "bank" | "reconciliation" | "ledgers" | "gst" | "expected" | "summary" | "ledger_view" | "mapping">("documents");
   const [docFolder, setDocFolder] = useState<string | null>(() => searchParams.get("folder")); // restore folder from back-navigation
   const [bankTxns, setBankTxns] = useState<BankTxn[]>([]);
   const [bankSummary, setBankSummary] = useState<BankSummary | null>(null);
@@ -263,6 +263,11 @@ export default function ClientDetailPage() {
   const [bbConfirming, setBbConfirming] = useState(false);
   const [bbResult, setBbResult] = useState<BbMatchResult | null>(null);
   const [bbColsNeeded, setBbColsNeeded] = useState<BbColsNeeded | null>(null);
+  const [bbFinancialYear, setBbFinancialYear] = useState<string>(() => {
+    const now = new Date();
+    const yr = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+    return `${yr}-${String(yr + 1).slice(-2)}`;
+  });
   const [bbColDate, setBbColDate] = useState("");
   const [bbColParticulars, setBbColParticulars] = useState("");
   const [bbColDebit, setBbColDebit] = useState("");
@@ -285,6 +290,7 @@ export default function ClientDetailPage() {
     setBbAmbiguousSelections({}); setBbConflictOverrides({});
     setBbColDate(""); setBbColParticulars(""); setBbColDebit(""); setBbColCredit("");
     setStmtColDate(""); setStmtColNarration(""); setStmtColDebit(""); setStmtColCredit("");
+    setBbFileObj(null); setStmtFileObj(null);
   }
 
   async function submitBbFiles(colOverrides?: {
@@ -344,11 +350,14 @@ export default function ClientDetailPage() {
       const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ confirm: true, rules }),
+        body: JSON.stringify({ confirm: true, rules, financial_year: bbFinancialYear }),
       });
       const d = await res.json();
       if (res.ok) {
-        toast.success(`${d.created} ledger rule${d.created !== 1 ? "s" : ""} created from historical bank data`);
+        const conflictNote = d.cross_year_conflicts?.length > 0
+          ? ` (${d.cross_year_conflicts.length} rule${d.cross_year_conflicts.length > 1 ? "s" : ""} updated from a prior year)`
+          : "";
+        toast.success(`${d.created} ledger rule${d.created !== 1 ? "s" : ""} saved for FY ${bbFinancialYear}${conflictNote}`);
         setBbImportOpen(false);
         bbReset();
         loadBankTxns();
@@ -383,7 +392,7 @@ export default function ClientDetailPage() {
   // Ledger mapping rules state
   interface MappingRule {
     id: string; client_id: string | null; industry_name: string | null;
-    pattern: string; ledger_name: string; match_count: number; confirmed: boolean; updated_at: string;
+    pattern: string; ledger_name: string; match_count: number; confirmed: boolean; updated_at: string; source?: string | null; financial_year?: string | null;
   }
   const [clientMappingRules, setClientMappingRules] = useState<MappingRule[]>([]);
   const [industryMappingRules, setIndustryMappingRules] = useState<MappingRule[]>([]);
@@ -654,7 +663,7 @@ export default function ClientDetailPage() {
   function refreshPendingCount() {
     fetch(`/api/v1/review/queue?client=${clientId}`)
       .then(r => r.json())
-      .then(d => setLivePendingCount((d.queue?.length ?? 0) + (d.stuck?.length ?? 0)))
+      .then(d => setLivePendingCount(d.queue?.length ?? 0))
       .catch(() => {});
   }
 
@@ -1117,6 +1126,7 @@ export default function ClientDetailPage() {
   useEffect(() => { if (activeTab === "reconciliation") loadRecon(); }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "ledger_view" && !ledgerData) loadLedger(ledgerFromDate || undefined, ledgerToDate || undefined); }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "ledgers") { if (ledgers.length === 0) loadLedgers(); loadMappingRules(); } }, [activeTab, clientId]);
+  useEffect(() => { if (activeTab === "mapping") { loadMappingRules(); if (ledgers.length === 0) loadLedgers(); } }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "gst") loadGstData(); }, [activeTab, clientId, gstPeriodFrom, gstPeriodTo]);
   useEffect(() => { if (activeTab === "expected") loadExpected(); }, [activeTab, clientId]);
 
@@ -1299,41 +1309,91 @@ export default function ClientDetailPage() {
         ))}
       </div>
 
-      {/* Tabs */}
-      <div className="flex border-b border-gray-200 gap-1">
-        {([
-          { key: "documents",     label: "Documents",         icon: <FileText size={14} />,  count: documents.length,                                                                          flagCount: 0 },
-          { key: "expected",      label: "Expected Invoices", icon: <Clock size={14} />,      count: expectedInvoices.filter(e => e.status === "pending").length || null,                      flagCount: 0 },
-          { key: "bank",          label: "Bank Statements",   icon: <Landmark size={14} />,   count: bankSummary?.total ?? null,                                                                flagCount: bankSummary?.flag_count ?? 0 },
-          { key: "reconciliation",label: "Reconciliation",    icon: <Link2 size={14} />,      count: reconData?.summary.matched ?? null,                                                        flagCount: 0 },
-          { key: "ledger_view",   label: "Ledger",            icon: <BarChart3 size={14} />,  count: ledgerData ? (ledgerData.purchase.vendors.length + ledgerData.sales.customers.length) || null : null, flagCount: 0 },
-          { key: "ledgers",       label: "Ledger Master",     icon: <BookOpen size={14} />,   count: ledgers.length || null,                                                                    flagCount: 0 },
-          { key: "gst",           label: "GST Filing",        icon: <Receipt size={14} />,    count: null,                                                                                      flagCount: 0 },
-          { key: "summary",       label: "Summary Note",      icon: <ScrollText size={14} />, count: null,                                                                                      flagCount: 0 },
-        ] as { key: string; label: string; icon: React.ReactNode; count: number | null; flagCount: number }[]).map((tab) => (
-          <button
-            key={tab.key}
-            onClick={() => {
-              setActiveTab(tab.key as typeof activeTab);
-              if (tab.key === "summary" && !summary && !summaryLoading) loadSummary();
-              if (tab.key === "ledger_view" && !ledgerData && !ledgerLoading) loadLedger(ledgerFromDate || undefined, ledgerToDate || undefined);
-            }}
-            className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
-              activeTab === tab.key
-                ? "border-blue-500 text-blue-600"
-                : "border-transparent text-gray-500 hover:text-gray-700"
-            }`}
-          >
-            {tab.icon} {tab.label}
-            {tab.count !== null && tab.count > 0 && (
-              <span className="ml-1 text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full">{tab.count}</span>
+      {/* Tabs — two-level: 4 primary groups + sub-tabs within each group */}
+      {(() => {
+        type TabKey = typeof activeTab;
+        const PRIMARY_GROUPS: { key: string; label: string; icon: React.ReactNode; tabs: TabKey[]; flagCount: number }[] = [
+          { key: "docs_group",     label: "Documents",  icon: <FileText size={14} />,  tabs: ["documents", "expected"],                         flagCount: 0 },
+          { key: "banking_group",  label: "Banking",    icon: <Landmark size={14} />,  tabs: ["bank", "mapping"],                               flagCount: bankSummary?.flag_count ?? 0 },
+          { key: "accounts_group", label: "Accounts",   icon: <Link2 size={14} />,     tabs: ["reconciliation", "ledger_view", "ledgers"],       flagCount: 0 },
+          { key: "reports_group",  label: "Tax & Reports", icon: <Receipt size={14} />, tabs: ["gst", "summary"],                               flagCount: 0 },
+        ];
+
+        const SUB_TABS: Record<TabKey, { label: string; count: number | null; flagCount: number }> = {
+          documents:     { label: "All Documents",     count: documents.length || null,                                                                         flagCount: 0 },
+          expected:      { label: "Expected Invoices", count: expectedInvoices.filter(e => e.status === "pending").length || null,                              flagCount: 0 },
+          bank:          { label: "Transactions",      count: bankSummary?.total ?? null,                                                                        flagCount: bankSummary?.flag_count ?? 0 },
+          mapping:       { label: "Mapping Rules",     count: clientMappingRules.length || null,                                                                 flagCount: 0 },
+          reconciliation:{ label: "Reconciliation",    count: reconData?.summary.matched ?? null,                                                                flagCount: 0 },
+          ledger_view:   { label: "Ledger View",       count: ledgerData ? (ledgerData.purchase.vendors.length + ledgerData.sales.customers.length) || null : null, flagCount: 0 },
+          ledgers:       { label: "Chart of Accounts", count: ledgers.length || null,                                                                            flagCount: 0 },
+          gst:           { label: "GST Filing",        count: null,                                                                                              flagCount: 0 },
+          summary:       { label: "Summary Note",      count: null,                                                                                              flagCount: 0 },
+        };
+
+        const activeGroup = PRIMARY_GROUPS.find(g => g.tabs.includes(activeTab)) ?? PRIMARY_GROUPS[0];
+        const activeSubTabs = activeGroup.tabs;
+
+        return (
+          <>
+            {/* Primary row */}
+            <div className="flex border-b border-gray-200 gap-1">
+              {PRIMARY_GROUPS.map(group => {
+                const isActive = group.tabs.includes(activeTab);
+                return (
+                  <button
+                    key={group.key}
+                    onClick={() => {
+                      const target = group.tabs[0];
+                      setActiveTab(target);
+                      if (target === "summary" && !summary && !summaryLoading) loadSummary();
+                      if (target === "ledger_view" && !ledgerData && !ledgerLoading) loadLedger(ledgerFromDate || undefined, ledgerToDate || undefined);
+                    }}
+                    className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+                      isActive ? "border-blue-500 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"
+                    }`}
+                  >
+                    {group.icon} {group.label}
+                    {group.flagCount > 0 && (
+                      <span className="ml-0.5 text-xs bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full font-semibold">⚑ {group.flagCount}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+            {/* Sub-tab row — only shown when group has more than 1 tab */}
+            {activeSubTabs.length > 1 && (
+              <div className="flex gap-1 px-1 border-b border-gray-100 bg-gray-50">
+                {activeSubTabs.map(tabKey => {
+                  const sub = SUB_TABS[tabKey];
+                  const isActive = activeTab === tabKey;
+                  return (
+                    <button
+                      key={tabKey}
+                      onClick={() => {
+                        setActiveTab(tabKey);
+                        if (tabKey === "summary" && !summary && !summaryLoading) loadSummary();
+                        if (tabKey === "ledger_view" && !ledgerData && !ledgerLoading) loadLedger(ledgerFromDate || undefined, ledgerToDate || undefined);
+                      }}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-t transition-colors ${
+                        isActive ? "bg-white border border-b-white border-gray-200 text-blue-600 -mb-px" : "text-gray-500 hover:text-gray-700"
+                      }`}
+                    >
+                      {sub.label}
+                      {sub.count !== null && sub.count > 0 && (
+                        <span className="ml-0.5 bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full text-[10px]">{sub.count}</span>
+                      )}
+                      {sub.flagCount > 0 && (
+                        <span className="ml-0.5 bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full text-[10px] font-semibold">⚑ {sub.flagCount}</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
             )}
-            {tab.flagCount > 0 && (
-              <span className="ml-0.5 text-xs bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full font-semibold" title={`${tab.flagCount} compliance flags`}>⚑ {tab.flagCount}</span>
-            )}
-          </button>
-        ))}
-      </div>
+          </>
+        );
+      })()}
 
       {/* Document folders */}
       {activeTab === "documents" && (() => {
@@ -2424,13 +2484,6 @@ export default function ClientDetailPage() {
                 >
                   <Upload size={11} /> Upload statement
                 </button>
-                <button
-                  onClick={() => { setBbImportOpen(true); bbReset(); }}
-                  className="text-xs text-purple-600 hover:text-purple-800 inline-flex items-center gap-1"
-                  title="Import historical bank book to create ledger mapping rules"
-                >
-                  <BookOpen size={11} /> Import bank book
-                </button>
                 <button onClick={() => setWipeDialogOpen(true)} disabled={wipingBank}
                   className="text-xs text-red-400 hover:text-red-600 inline-flex items-center gap-1 disabled:opacity-50"
                   title="Wipe all bank data and re-upload">
@@ -3178,6 +3231,98 @@ export default function ClientDetailPage() {
               <p className="text-sm">No summary yet.</p>
               <p className="text-xs">Click "Generate Summary" to create a comprehensive accountant note for this client.</p>
             </div>
+          )}
+        </div>
+      )}
+
+      {/* Mapping History tab */}
+      {activeTab === "mapping" && (
+        <div className="space-y-5">
+          {/* Import CTA */}
+          <Card className="border-purple-200 bg-purple-50/40">
+            <CardContent className="py-5 px-6">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                    <BookOpen size={15} className="text-purple-600" /> Historical Bank Book Import
+                  </h2>
+                  <p className="text-xs text-gray-500 mt-1 max-w-lg">
+                    Upload last year&apos;s bank statement and Tally bank book together. The system matches transactions by date &amp; amount, learns which bank narration maps to which ledger, and creates rules automatically for this client.
+                  </p>
+                  <ul className="mt-2 space-y-0.5 text-xs text-gray-400">
+                    <li>• <strong className="text-gray-600">Bank statement</strong> — CSV/Excel from your bank portal (has messy narrations like NEFT/REF/…)</li>
+                    <li>• <strong className="text-gray-600">Bank book</strong> — Tally export (has clean Particulars like "Reliance Steel Works")</li>
+                  </ul>
+                </div>
+                <button
+                  onClick={() => { setBbImportOpen(true); bbReset(); }}
+                  className="flex-shrink-0 px-4 py-2 rounded-md bg-purple-600 text-white text-sm font-medium hover:bg-purple-700 inline-flex items-center gap-2"
+                >
+                  <Upload size={13} /> Import bank book
+                </button>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Rules list — reuses mapping rules state already loaded */}
+          {rulesLoading ? (
+            <div className="flex items-center gap-2 text-sm text-gray-400 py-6"><Loader2 size={15} className="animate-spin" /> Loading rules…</div>
+          ) : clientMappingRules.length === 0 ? (
+            <Card>
+              <CardContent className="py-12 text-center text-gray-400 text-sm">
+                <BookOpen size={26} className="mx-auto mb-2 text-gray-300" />
+                No mapping rules yet for this client. Import a bank book to create rules automatically, or assign ledgers manually in the Bank Statements tab.
+              </CardContent>
+            </Card>
+          ) : (
+            <Card>
+              <CardHeader className="py-3 px-5 border-b flex flex-row items-center justify-between">
+                <CardTitle className="text-sm text-gray-700">
+                  Ledger Mapping Rules <span className="text-gray-400 font-normal">({clientMappingRules.length})</span>
+                </CardTitle>
+                <div className="relative">
+                  <input value={ruleSearch} onChange={e => setRuleSearch(e.target.value)}
+                    placeholder="Search rules…"
+                    className="text-xs h-7 pl-7 pr-2 rounded border border-gray-200 focus:outline-none focus:ring-1 focus:ring-purple-400 w-48" />
+                  <Search size={11} className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400" />
+                </div>
+              </CardHeader>
+              <CardContent className="p-0">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b bg-gray-50 text-gray-500">
+                      <th className="text-left px-5 py-2.5 font-medium">Pattern</th>
+                      <th className="text-left px-4 py-2.5 font-medium">Ledger</th>
+                      <th className="text-left px-4 py-2.5 font-medium">Source</th>
+                      <th className="text-left px-4 py-2.5 font-medium">FY</th>
+                      <th className="text-right px-4 py-2.5 font-medium">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {clientMappingRules
+                      .filter(r => !ruleSearch || r.pattern.includes(ruleSearch.toLowerCase()) || r.ledger_name.toLowerCase().includes(ruleSearch.toLowerCase()))
+                      .sort((a, b) => (b.confirmed ? 1 : -1) - (a.confirmed ? 1 : -1) || a.pattern.localeCompare(b.pattern))
+                      .map(r => (
+                        <tr key={r.id} className="border-b last:border-0 hover:bg-gray-50/50">
+                          <td className="px-5 py-2.5 font-mono text-gray-700">{r.pattern}</td>
+                          <td className="px-4 py-2.5 text-gray-800 font-medium">{r.ledger_name}</td>
+                          <td className="px-4 py-2.5 text-gray-400">
+                            {r.source === "bank_book_import" ? "Bank Book Import" : r.match_count >= 3 ? `Learned (${r.match_count}×)` : `Draft (${r.match_count}/3)`}
+                          </td>
+                          <td className="px-4 py-2.5 text-gray-400">
+                            {r.financial_year ? <span className="bg-purple-50 text-purple-700 px-1.5 py-0.5 rounded text-[10px] font-medium">{r.financial_year}</span> : <span className="text-gray-300">—</span>}
+                          </td>
+                          <td className="px-4 py-2.5 text-right">
+                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium ${r.confirmed ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"}`}>
+                              {r.confirmed ? "Active" : "Draft"}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </CardContent>
+            </Card>
           )}
         </div>
       )}
@@ -4088,7 +4233,35 @@ export default function ClientDetailPage() {
                 <div className="space-y-5">
                   <div className="p-4 bg-purple-50 rounded-lg border border-purple-100 text-xs text-purple-800 space-y-1">
                     <p className="font-semibold text-sm text-purple-900">How this works</p>
-                    <p>Upload last year&apos;s bank statement (from your bank) <strong>and</strong> the bank book (from Tally). The system matches each transaction by date &amp; amount, learns: <em>bank narration → ledger name</em>, and creates rules for this year automatically.</p>
+                    <p>Upload a past year&apos;s bank statement (from your bank) <strong>and</strong> the bank book (from Tally) for the <em>same period</em>. The system matches transactions by date &amp; amount, learns which bank narration maps to which ledger name, and creates rules automatically.</p>
+                    <p className="text-purple-600 mt-1">You can repeat this for multiple financial years — more history = more accurate auto-classification.</p>
+                  </div>
+
+                  {/* Financial year picker */}
+                  <div className="flex items-center gap-3">
+                    <label className="text-xs font-semibold text-gray-700 whitespace-nowrap">Financial Year</label>
+                    <div className="flex gap-2">
+                      {(() => {
+                        const now = new Date();
+                        const baseYr = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+                        return [0, 1, 2].map(offset => {
+                          const yr = baseYr - offset;
+                          const label = `FY ${yr}-${String(yr + 1).slice(-2)}`;
+                          const value = `${yr}-${String(yr + 1).slice(-2)}`;
+                          return (
+                            <button key={value} onClick={() => setBbFinancialYear(value)}
+                              className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                                bbFinancialYear === value
+                                  ? "bg-purple-600 text-white border-purple-600"
+                                  : "border-gray-200 text-gray-600 hover:border-purple-300"
+                              }`}>
+                              {label}
+                            </button>
+                          );
+                        });
+                      })()}
+                    </div>
+                    <span className="text-[11px] text-gray-400">Select the year these files are from</span>
                   </div>
 
                   <div className="grid grid-cols-2 gap-4">
@@ -4114,7 +4287,7 @@ export default function ClientDetailPage() {
 
                   <button disabled={!bbFileObj || !stmtFileObj || bbUploading} onClick={() => submitBbFiles()}
                     className="px-5 py-2 rounded-md bg-purple-600 text-white text-sm font-medium hover:bg-purple-700 disabled:opacity-50 inline-flex items-center gap-2">
-                    {bbUploading ? <><Loader2 size={14} className="animate-spin" /> Matching transactions…</> : "Analyse & Match"}
+                    {bbUploading ? <><Loader2 size={14} className="animate-spin" /> Matching transactions…</> : `Analyse FY ${bbFinancialYear}`}
                   </button>
                 </div>
               )}
