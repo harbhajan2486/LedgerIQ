@@ -8,6 +8,7 @@ import {
 } from "@/lib/bank-book-parser";
 import { parseStatementCsv, type StatementColumnMapping } from "@/lib/bank-statement-parser";
 import { matchBankBookToStatement, buildRuleCandidates } from "@/lib/bank-book-matcher";
+import { extractStatementFromPdf } from "@/lib/pdf-bank-statement";
 
 // POST /api/v1/clients/[id]/import-bank-book
 //
@@ -201,6 +202,9 @@ function reparseStatementWithOverrides(
 
 // ─── Route handler ────────────────────────────────────────────────────────────
 
+// PDF extraction via Claude can take up to 3 minutes for a large statement
+export const maxDuration = 300;
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -331,7 +335,52 @@ export async function POST(
       };
     }
 
-    // ── Parse bank statement ─────────────────────────────────────────────
+    // ── Parse bank statement (CSV/Excel/PDF) ─────────────────────────────
+    const stmtNameLower = stmtFile.name.toLowerCase();
+    const isPdf = stmtNameLower.endsWith(".pdf");
+
+    // PDF path: use Claude Haiku vision extraction — returns StatementRow[] directly
+    // (no column mapping needed, no confidence flag)
+    if (isPdf) {
+      let pdfRows;
+      try {
+        const pdfResult = await extractStatementFromPdf(stmtBuffer);
+        pdfRows = pdfResult.rows;
+        // Log AI cost in background
+        const costUsd = (pdfResult.tokensIn / 1_000_000) * 0.80 + (pdfResult.tokensOut / 1_000_000) * 4.00;
+        supabase.from("ai_usage").insert({
+          tenant_id: tenantId,
+          model: "claude-haiku-4-5-20251001",
+          tokens_in: pdfResult.tokensIn,
+          tokens_out: pdfResult.tokensOut,
+          cost_usd: costUsd,
+        }).then();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return NextResponse.json({ error: `PDF extraction failed: ${msg}` }, { status: 422 });
+      }
+
+      if (pdfRows.length === 0) {
+        return NextResponse.json({ error: "Could not extract any transactions from the PDF. Try a CSV or Excel export instead." }, { status: 422 });
+      }
+
+      // Skip column-mapping step — go straight to match
+      const matchResult = matchBankBookToStatement(bbResult.rows, pdfRows);
+      const ruleCandidates = buildRuleCandidates(matchResult.matched);
+      return NextResponse.json({
+        needs_column_mapping: false,
+        total_bb_rows: bbResult.rows.length,
+        total_stmt_rows: pdfRows.length,
+        matched_count: matchResult.matched.length,
+        ambiguous_count: matchResult.ambiguous.length,
+        unmatched_count: matchResult.unmatchedBb.length,
+        rule_candidates: ruleCandidates,
+        ambiguous: matchResult.ambiguous,
+        unmatched_bb: matchResult.unmatchedBb.slice(0, 20),
+      });
+    }
+
+    // CSV / Excel path
     let stmtResult = parseStatementCsv(stmtBuffer, stmtFile.name);
 
     const stmtColDate = (formData.get("stmt_column_date") as string | null)?.trim() || null;

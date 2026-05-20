@@ -26,7 +26,8 @@ export async function GET(
     .eq("tenant_id", tenantId)
     .eq("client_id", clientId)
     .order("ledger_type")
-    .order("ledger_name");
+    .order("ledger_name")
+    .limit(5000);
 
   return NextResponse.json({ ledgers: ledgers ?? [] });
 }

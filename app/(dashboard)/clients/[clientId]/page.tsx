@@ -203,6 +203,9 @@ export default function ClientDetailPage() {
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
   const [livePendingCount, setLivePendingCount] = useState<number | null>(null);
+  const [editClientOpen, setEditClientOpen] = useState(false);
+  const [editClientForm, setEditClientForm] = useState({ client_name: "", gstin: "", pan: "", industry_name: "" });
+  const [savingClient, setSavingClient] = useState(false);
   const [retrying, setRetrying] = useState<string | null>(null);
   const [retagging, setRetagging] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -1248,11 +1251,37 @@ export default function ClientDetailPage() {
               <Building2 size={18} className="text-blue-600" />
             </div>
             <div>
-              <h1 className="text-xl font-semibold text-gray-900">{client.client_name}</h1>
+              <div className="flex items-center gap-2">
+                <h1 className="text-xl font-semibold text-gray-900">{client.client_name}</h1>
+                <button
+                  onClick={() => {
+                    setEditClientForm({
+                      client_name: client.client_name,
+                      gstin: client.gstin ?? "",
+                      pan: client.pan ?? "",
+                      industry_name: client.industry_name ?? "",
+                    });
+                    setEditClientOpen(true);
+                  }}
+                  className="text-gray-400 hover:text-gray-600 transition-colors"
+                  title="Edit client details"
+                >
+                  <Pencil size={13} />
+                </button>
+              </div>
               <div className="flex items-center gap-2 mt-0.5 text-xs text-gray-400">
-                {client.industry_name && <span>{client.industry_name}</span>}
-                {client.gstin && <><span className="text-gray-300">·</span><span className="font-mono">{client.gstin}</span></>}
-                {client.pan && <><span className="text-gray-300">·</span><span className="font-mono">PAN: {client.pan}</span></>}
+                {client.industry_name
+                  ? <span>{client.industry_name}</span>
+                  : <button onClick={() => { setEditClientForm({ client_name: client.client_name, gstin: client.gstin ?? "", pan: client.pan ?? "", industry_name: "" }); setEditClientOpen(true); }} className="text-amber-500 hover:text-amber-700 italic">+ add industry</button>
+                }
+                {client.gstin
+                  ? <><span className="text-gray-300">·</span><span className="font-mono">{client.gstin}</span></>
+                  : <><span className="text-gray-300">·</span><button onClick={() => { setEditClientForm({ client_name: client.client_name, gstin: "", pan: client.pan ?? "", industry_name: client.industry_name ?? "" }); setEditClientOpen(true); }} className="text-amber-500 hover:text-amber-700 italic">+ GSTIN</button></>
+                }
+                {client.pan
+                  ? <><span className="text-gray-300">·</span><span className="font-mono">PAN: {client.pan}</span></>
+                  : <><span className="text-gray-300">·</span><button onClick={() => { setEditClientForm({ client_name: client.client_name, gstin: client.gstin ?? "", pan: "", industry_name: client.industry_name ?? "" }); setEditClientOpen(true); }} className="text-amber-500 hover:text-amber-700 italic">+ PAN</button></>
+                }
                 <span className="text-gray-300">·</span>
                 <button
                   onClick={async () => {
@@ -1291,6 +1320,98 @@ export default function ClientDetailPage() {
           )}
         </div>
       </div>
+
+      {/* Edit client details modal */}
+      {editClientOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm mx-4 p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-semibold text-gray-900">Edit client details</h2>
+              <button onClick={() => setEditClientOpen(false)} className="text-gray-400 hover:text-gray-600"><X size={16} /></button>
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs font-medium text-gray-600 block mb-1">Company name *</label>
+                <input
+                  value={editClientForm.client_name}
+                  onChange={e => setEditClientForm(f => ({ ...f, client_name: e.target.value }))}
+                  className="w-full text-sm border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                  placeholder="e.g. Sharma Enterprises"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-gray-600 block mb-1">Industry <span className="text-gray-400 font-normal">(optional)</span></label>
+                <input
+                  value={editClientForm.industry_name}
+                  onChange={e => setEditClientForm(f => ({ ...f, industry_name: e.target.value }))}
+                  className="w-full text-sm border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                  placeholder="e.g. Manufacturing, Retail, Services"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-medium text-gray-600 block mb-1">GSTIN <span className="text-gray-400 font-normal">(optional)</span></label>
+                  <input
+                    value={editClientForm.gstin}
+                    onChange={e => setEditClientForm(f => ({ ...f, gstin: e.target.value.toUpperCase() }))}
+                    className="w-full text-sm font-mono border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                    placeholder="29ABCDE1234F1Z5"
+                    maxLength={15}
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-gray-600 block mb-1">PAN <span className="text-gray-400 font-normal">(optional)</span></label>
+                  <input
+                    value={editClientForm.pan}
+                    onChange={e => setEditClientForm(f => ({ ...f, pan: e.target.value.toUpperCase() }))}
+                    className="w-full text-sm font-mono border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                    placeholder="ABCDE1234F"
+                    maxLength={10}
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={async () => {
+                  if (!editClientForm.client_name.trim()) return;
+                  setSavingClient(true);
+                  try {
+                    const res = await fetch(`/api/v1/clients/${clientId}`, {
+                      method: "PATCH",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        client_name: editClientForm.client_name.trim(),
+                        gstin: editClientForm.gstin.trim() || null,
+                        pan: editClientForm.pan.trim() || null,
+                        industry_name: editClientForm.industry_name.trim() || null,
+                      }),
+                    });
+                    if (res.ok) {
+                      const d = await res.json();
+                      setClient(prev => prev ? { ...prev, ...d.client } : prev);
+                      toast.success("Client details updated");
+                      setEditClientOpen(false);
+                    } else {
+                      const d = await res.json();
+                      toast.error(d.error ?? "Could not update client");
+                    }
+                  } finally {
+                    setSavingClient(false);
+                  }
+                }}
+                disabled={savingClient || !editClientForm.client_name.trim()}
+                className="flex-1 py-2 rounded-md bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 inline-flex items-center justify-center gap-2"
+              >
+                {savingClient ? <><Loader2 size={14} className="animate-spin" /> Saving…</> : "Save changes"}
+              </button>
+              <button onClick={() => setEditClientOpen(false)} className="px-4 py-2 rounded-md border border-gray-200 text-sm text-gray-600 hover:bg-gray-50">
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-4 gap-4">
@@ -4269,10 +4390,17 @@ export default function ClientDetailPage() {
                     <div className="border rounded-lg p-4 space-y-2">
                       <p className="text-xs font-semibold text-gray-700">1. Bank Statement <span className="text-gray-400 font-normal">(from bank portal)</span></p>
                       <p className="text-[11px] text-gray-400">Has: Date, Narration (bank text), Debit, Credit</p>
-                      <input ref={stmtFileRef} type="file" accept=".xlsx,.xls,.csv"
+                      <input ref={stmtFileRef} type="file" accept=".xlsx,.xls,.csv,.pdf"
                         className="block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border file:border-gray-200 file:text-xs file:bg-white hover:file:bg-gray-50"
                         onChange={e => setStmtFileObj(e.target.files?.[0] ?? null)} />
-                      {stmtFileObj && <p className="text-[11px] text-purple-600">{stmtFileObj.name}</p>}
+                      {stmtFileObj && (
+                        <p className="text-[11px] text-purple-600">
+                          {stmtFileObj.name}
+                          {stmtFileObj.name.toLowerCase().endsWith(".pdf") && (
+                            <span className="ml-1 text-amber-600">(AI extraction — may take ~30s)</span>
+                          )}
+                        </p>
+                      )}
                     </div>
                     {/* Bank book */}
                     <div className="border rounded-lg p-4 space-y-2">
