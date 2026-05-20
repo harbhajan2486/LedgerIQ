@@ -70,99 +70,159 @@ function parseAmt(val: string | number | undefined | null): number | null {
 /**
  * Parse a Tally trial balance Excel in "raw array" mode.
  *
- * Tally exports look like:
- *   Row 0: ["Company Name","",""]          ← metadata
- *   Row 1: ["Trial Balance","",""]         ← metadata
- *   Row 2: ["1-Apr-23 to 31-Mar-24","",""] ← metadata
- *   Row 3: ["","Company Name",""]          ← metadata
- *   Row 4: ["Particulars","Period",""]     ← metadata
- *   Row 5: ["","Closing Balance",""]       ← metadata
- *   Row 6: ["","Debit","Credit"]           ← column headers (not always here)
- *   Row 7: ["Capital Account","",195313.99] ← GROUP row (only one side has value)
- *   Row 8: ["  Ledger Name",50000,""]      ← individual ledger (indented name)
- *   ...
+ * Handles three common Tally export layouts:
  *
- * Group rows: col[0] has a name, AND col[1] + col[2] are BOTH non-zero
- *             OR the name matches a known Tally group
- * Ledger rows: col[0] has a name, and ONLY col[1] OR col[2] is non-zero
+ * Layout A — 3-col (Name | Dr | Cr):
+ *   ["Capital Account",  "",  195313]   ← group row (in TALLY_GROUP_MAP, or both sides non-zero)
+ *   ["  Proprietor Capital",  "",  195313]  ← ledger row (leading whitespace on name)
+ *
+ * Layout B — 4-col (Group/Under | Name | Dr | Cr):
+ *   ["Capital Account",  "Proprietor Capital",  "",  195313]
+ *   ["Indirect Expenses", "Rent",  120000,  ""]
+ *
+ * Layout C — 5-col with opening+closing (Name | OpDr | OpCr | ClDr | ClCr):
+ *   ["Capital Account",  0,  195313,  0,  195313]  ← both closing sides same
+ *   ["  Proprietor Capital",  0,  195313,  0,  195313]
+ *
+ * Indentation rule (Layout A): group rows have no leading whitespace; ledger rows do.
+ * If NO rows are indented, fall back to hasDr&&hasCr / TALLY_GROUP_MAP group detection.
  */
 function parseTallyRawArrays(
   rawRows: unknown[][],
   financialYear: string | null
-): { ledgers: LedgerRow[]; skipped: string[]; tenantId?: string; clientId?: string } {
+): { ledgers: LedgerRow[]; skipped: string[] } {
   const ledgers: LedgerRow[] = [];
   const skipped: string[] = [];
 
-  // Find data start: first row where col[0] is non-empty string AND (col[1] or col[2] is a number)
+  function isNumericCell(v: unknown): boolean {
+    if (typeof v === "number") return !isNaN(v) && v !== 0;
+    if (typeof v === "string") return v.trim() !== "" && !isNaN(parseFloat((v as string).replace(/[₹,\s]/g, "")));
+    return false;
+  }
+
+  // ── Find data start: first row where at least one column past col[0] is numeric ──
   let dataStart = -1;
   for (let i = 0; i < rawRows.length; i++) {
     const row = rawRows[i];
-    const name = String(row[0] ?? "").trim();
-    if (!name) continue;
-    const c1 = row[1];
-    const c2 = row[2];
-    const c1IsNum = typeof c1 === "number" || (typeof c1 === "string" && c1.trim() !== "" && !isNaN(parseFloat(c1.replace(/[₹,\s]/g, ""))));
-    const c2IsNum = typeof c2 === "number" || (typeof c2 === "string" && c2.trim() !== "" && !isNaN(parseFloat(c2.replace(/[₹,\s]/g, ""))));
-    if (c1IsNum || c2IsNum) {
-      dataStart = i;
-      break;
-    }
+    if (!String(row[0] ?? "").trim()) continue;
+    if (row.slice(1).some(isNumericCell)) { dataStart = i; break; }
   }
-
   if (dataStart === -1) return { ledgers, skipped };
+
+  // ── Detect layout by sampling first 20 data rows ──────────────────────────────
+  const sample = rawRows.slice(dataStart, dataStart + 20);
+
+  // Layout B: col[1] is consistently non-numeric text (the real ledger name)
+  const col1AsString = sample.filter(r => {
+    const v = r[1];
+    return typeof v === "string" && v.trim() !== "" && !isNumericCell(v);
+  }).length;
+  const isLayoutB = col1AsString >= Math.ceil(sample.length * 0.5);
+
+  // Layout C: 5+ numeric columns (opening+closing balances)
+  const avgNumericCols = sample.reduce((s, r) => s + r.slice(1).filter(isNumericCell).length, 0) / Math.max(sample.length, 1);
+  const isLayoutC = !isLayoutB && avgNumericCols >= 3;
+
+  // Layout A: check if any row has leading whitespace (Tally indentation)
+  const hasIndentedRows = rawRows.slice(dataStart).some(r => {
+    const raw = String(r[0] ?? "");
+    return raw !== raw.trimStart() && raw.trim().length > 0;
+  });
 
   let currentGroup = "";
 
   for (let i = dataStart; i < rawRows.length; i++) {
     const row = rawRows[i];
-    const name = String(row[0] ?? "").trim();
-    if (!name) continue;
 
-    // Skip header-like rows
+    // ── Layout B: Group | LedgerName | Dr | Cr ──────────────────────────────
+    if (isLayoutB) {
+      const groupRaw = String(row[0] ?? "").trim();
+      const ledgerRaw = String(row[1] ?? "").trim();
+      if (!ledgerRaw) continue;
+      if (/^(particulars|ledger|name|debit|credit|dr|cr|closing|opening|under|group)$/i.test(ledgerRaw)) continue;
+      if (ledgerRaw.length > 150) { skipped.push(ledgerRaw.slice(0, 30) + "…"); continue; }
+
+      const drAmt = parseAmt(row[2] as string | number | null);
+      const crAmt = parseAmt(row[3] as string | number | null);
+      const hasDr = drAmt !== null && drAmt > 0;
+      const hasCr = crAmt !== null && crAmt > 0;
+
+      if (groupRaw) currentGroup = groupRaw;
+
+      let closingBalance: number | null = null;
+      let balanceType: "Dr" | "Cr" | null = null;
+      if (hasDr) { closingBalance = drAmt!; balanceType = "Dr"; }
+      else if (hasCr) { closingBalance = crAmt!; balanceType = "Cr"; }
+
+      ledgers.push({
+        tenant_id: "", client_id: "",
+        ledger_name: ledgerRaw,
+        ledger_type: mapTallyGroup(currentGroup || groupRaw),
+        tally_group: currentGroup || groupRaw || null,
+        financial_year: financialYear,
+        closing_balance: closingBalance,
+        balance_type: balanceType,
+        opening_balance: null,
+        source: "trial_balance",
+      });
+      continue;
+    }
+
+    // ── Layout A / C: Name in col[0] ──────────────────────────────────────
+    const rawNameStr = String(row[0] ?? "");
+    const isIndented = rawNameStr !== rawNameStr.trimStart();
+    const name = rawNameStr.trim();
+    if (!name) continue;
     if (/^(particulars|ledger|name|debit|credit|dr|cr|closing|opening)$/i.test(name)) continue;
     if (name.length > 150) { skipped.push(name.slice(0, 30) + "…"); continue; }
 
-    const drAmt = parseAmt(row[1] as string | number | null);
-    const crAmt = parseAmt(row[2] as string | number | null);
+    // Determine Dr/Cr amounts based on layout
+    let drAmt: number | null;
+    let crAmt: number | null;
+
+    if (isLayoutC) {
+      // 5-col: Name | OpDr | OpCr | ClDr | ClCr → use closing balance (col[3]/col[4])
+      drAmt = parseAmt(row[3] as string | number | null);
+      crAmt = parseAmt(row[4] as string | number | null);
+    } else {
+      // Layout A standard: Name | Dr | Cr
+      drAmt = parseAmt(row[1] as string | number | null);
+      crAmt = parseAmt(row[2] as string | number | null);
+    }
 
     const hasDr = drAmt !== null && drAmt > 0;
     const hasCr = crAmt !== null && crAmt > 0;
 
-    // Group row: BOTH sides have values → this is a subtotal/group row
-    // Track it as the current group context, don't import as a ledger
-    if (hasDr && hasCr) {
-      currentGroup = name;
-      continue;
+    // Group row detection:
+    // 1. If file has indentation: non-indented row = group, indented = ledger
+    // 2. If no indentation: use TALLY_GROUP_MAP or hasDr&&hasCr heuristic
+    const nameKey = name.toLowerCase();
+    const isKnownGroup = TALLY_GROUP_MAP[nameKey] !== undefined;
+
+    if (hasIndentedRows) {
+      if (!isIndented) {
+        // Non-indented → group header, update context and skip
+        currentGroup = name;
+        continue;
+      }
+      // Indented → individual ledger, fall through to import
+    } else {
+      // No indentation in file — use old heuristics
+      if (hasDr && hasCr) { currentGroup = name; continue; }
+      if (isKnownGroup && !hasDr && !hasCr) { currentGroup = name; continue; }
+      // Also treat known group names with a single-side value as group context rows
+      if (isKnownGroup) { currentGroup = name; continue; }
     }
 
-    // Also detect group by name matching TALLY_GROUP_MAP
-    const nameKey = name.toLowerCase().trim();
-    if (TALLY_GROUP_MAP[nameKey] !== undefined && !hasDr && !hasCr) {
-      // Group name with no balances — just update context
-      currentGroup = name;
-      continue;
-    }
-
-    // Individual ledger row
     let closingBalance: number | null = null;
     let balanceType: "Dr" | "Cr" | null = null;
-
-    if (hasDr) {
-      closingBalance = drAmt!;
-      balanceType = "Dr";
-    } else if (hasCr) {
-      closingBalance = crAmt!;
-      balanceType = "Cr";
-    }
-    // If neither side has a value, still import with null balance (ledger exists but zero balance)
-
-    const ledgerType = currentGroup ? mapTallyGroup(currentGroup) : "expense";
+    if (hasDr) { closingBalance = drAmt!; balanceType = "Dr"; }
+    else if (hasCr) { closingBalance = crAmt!; balanceType = "Cr"; }
 
     ledgers.push({
-      tenant_id: "", // filled by caller
-      client_id: "",  // filled by caller
+      tenant_id: "", client_id: "",
       ledger_name: name,
-      ledger_type: ledgerType,
+      ledger_type: currentGroup ? mapTallyGroup(currentGroup) : (isKnownGroup ? mapTallyGroup(name) : "expense"),
       tally_group: currentGroup || null,
       financial_year: financialYear,
       closing_balance: closingBalance,
@@ -172,7 +232,7 @@ function parseTallyRawArrays(
     });
   }
 
-  // Deduplicate by ledger_name — keep last occurrence (handles Tally duplicate group rows)
+  // Deduplicate by ledger_name — keep last occurrence
   const seen = new Map<string, LedgerRow>();
   for (const l of ledgers) seen.set(l.ledger_name, l);
 
