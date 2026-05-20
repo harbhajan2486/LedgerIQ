@@ -19,7 +19,7 @@ export async function GET(
     const { id: clientId } = await params;
 
     // Fetch client industry + confirmed rules for ledger source derivation
-    const [txnsResult, clientRow, rulesResult, industryRulesResult, allClientRulesResult] = await Promise.all([
+    const [txnsResult, clientRow, rulesResult, industryRulesResult, allClientRulesResult, ledgerMastersResult] = await Promise.all([
       supabase
         .from("bank_transactions")
         .select("id, transaction_date, narration, ref_number, debit_amount, credit_amount, balance, bank_name, status, category, voucher_type, ledger_name")
@@ -35,9 +35,22 @@ export async function GET(
       // Load all client rules including unconfirmed, for Learning (X/3) progress display
       supabase.from("ledger_mapping_rules").select("pattern, match_count, confirmed")
         .eq("client_id", clientId).eq("tenant_id", profile.tenant_id),
+      // Load ledger masters for taxation flag computation
+      supabase.from("ledger_masters").select("ledger_name, ledger_type")
+        .eq("tenant_id", profile.tenant_id).eq("client_id", clientId),
     ]);
 
     const rows = txnsResult.data ?? [];
+
+    // Build ledger master lookup structures for O(1) flag checks
+    const ledgerMasters = ledgerMastersResult.data ?? [];
+    const ledgerTypeMap: Record<string, string> = {};
+    const ledgerNameSet: Set<string> = new Set();
+    for (const lm of ledgerMasters) {
+      const key = (lm.ledger_name as string).toLowerCase();
+      ledgerTypeMap[key] = (lm.ledger_type as string).toLowerCase();
+      ledgerNameSet.add(key);
+    }
 
     // Load approved global rules (dynamic Layer 1 from crowd-sourced nominations)
     const approvedGlobalRules = await fetchApprovedGlobalRules();
@@ -158,11 +171,132 @@ export async function GET(
       };
     });
 
+    // ── Taxation / mapping flag computation ──────────────────────────────────
+
+    // Flag 3 (round_trip) prep: group by pattern for pair detection
+    type TxnRef = { id: string; date: Date; amount: number; isDebit: boolean };
+    const patternGroups: Record<string, TxnRef[]> = {};
+    for (const txn of rows) {
+      const amount = (txn.debit_amount ?? 0) > 0 ? txn.debit_amount! : (txn.credit_amount ?? 0);
+      if (amount <= 10000) continue; // ignore trivial amounts for round-trip
+      const pat = extractPattern(txn.narration ?? "");
+      if (!patternGroups[pat]) patternGroups[pat] = [];
+      patternGroups[pat].push({
+        id: txn.id,
+        date: new Date(txn.transaction_date),
+        amount,
+        isDebit: (txn.debit_amount ?? 0) > 0,
+      });
+    }
+
+    const roundTripIds = new Set<string>();
+    for (const group of Object.values(patternGroups)) {
+      const debits = group.filter((t) => t.isDebit);
+      const credits = group.filter((t) => !t.isDebit);
+      for (const d of debits) {
+        for (const c of credits) {
+          const daysDiff = Math.abs(d.date.getTime() - c.date.getTime()) / (1000 * 60 * 60 * 24);
+          if (daysDiff <= 7 && Math.abs(d.amount - c.amount) <= 1) {
+            roundTripIds.add(d.id);
+            roundTripIds.add(c.id);
+          }
+        }
+      }
+    }
+
+    // Flag 4 (salary_tds_missing) prep: group salary txns by month
+    const salaryByMonth: Record<string, string[]> = {}; // YYYY-MM → txn ids
+    const tdsByMonth: Set<string> = new Set();           // YYYY-MM keys with TDS present
+    for (const txn of rows) {
+      const narLower = (txn.narration ?? "").toLowerCase();
+      const narUpper = (txn.narration ?? "").toUpperCase();
+      const ledgerLower = (txn.ledger_name ?? "").toLowerCase();
+
+      const isSalary =
+        narLower.includes("salary") ||
+        narLower.includes("sal ") ||
+        ledgerLower.includes("salary");
+
+      const isTds =
+        narUpper.includes("TDS") ||
+        narUpper.includes("ITNS") ||
+        narUpper.includes("TRACES") ||
+        narUpper.includes("192");
+
+      const month = (txn.transaction_date ?? "").slice(0, 7); // YYYY-MM
+      if (!month) continue;
+
+      if (isSalary) {
+        if (!salaryByMonth[month]) salaryByMonth[month] = [];
+        salaryByMonth[month].push(txn.id);
+      }
+      if (isTds) tdsByMonth.add(month);
+    }
+
+    const salaryTdsMissingIds = new Set<string>();
+    for (const [month, ids] of Object.entries(salaryByMonth)) {
+      if (!tdsByMonth.has(month)) {
+        for (const id of ids) salaryTdsMissingIds.add(id);
+      }
+    }
+
+    // Build flagsByTxnId
+    const flagsByTxnId: Record<string, string[]> = {};
+    function addFlag(id: string, flag: string) {
+      if (!flagsByTxnId[id]) flagsByTxnId[id] = [];
+      flagsByTxnId[id].push(flag);
+    }
+
+    for (const txn of rows) {
+      const narLower = (txn.narration ?? "").toLowerCase();
+      const ledgerKey = (txn.ledger_name ?? "").toLowerCase();
+      const isDebit = (txn.debit_amount ?? 0) > 0;
+      const isCredit = (txn.credit_amount ?? 0) > 0;
+      const amount = isDebit ? txn.debit_amount! : (txn.credit_amount ?? 0);
+
+      // Flag 1: direction_mismatch
+      if (txn.ledger_name && ledgerNameSet.has(ledgerKey)) {
+        const ltype = ledgerTypeMap[ledgerKey];
+        if (isDebit && ltype === "income") addFlag(txn.id, "direction_mismatch");
+        else if (isCredit && ltype === "expense") addFlag(txn.id, "direction_mismatch");
+      }
+
+      // Flag 2: cash_limit_269st
+      if (
+        (narLower.includes("cash") || (txn.category ?? "").toLowerCase() === "contra") &&
+        amount > 200000
+      ) {
+        addFlag(txn.id, "cash_limit_269st");
+      }
+
+      // Flag 3: round_trip
+      if (roundTripIds.has(txn.id)) addFlag(txn.id, "round_trip");
+
+      // Flag 4: salary_tds_missing
+      if (salaryTdsMissingIds.has(txn.id)) addFlag(txn.id, "salary_tds_missing");
+
+      // Flag 5: not_in_ledger_master
+      if (
+        txn.ledger_name &&
+        ledgerMasters.length > 5 &&
+        !ledgerNameSet.has(ledgerKey)
+      ) {
+        addFlag(txn.id, "not_in_ledger_master");
+      }
+    }
+
+    // Attach flags to enriched rows
+    const flaggedRows = enrichedRows.map((txn) => ({
+      ...txn,
+      flags: flagsByTxnId[txn.id] ?? [],
+    }));
+
     // Summary stats
     const totalDebit = rows.reduce((s, r) => s + (r.debit_amount ?? 0), 0);
     const totalCredit = rows.reduce((s, r) => s + (r.credit_amount ?? 0), 0);
     const matched = rows.filter((r) => r.status === "matched").length;
     const unmatched = rows.filter((r) => r.status === "unmatched").length;
+    const ledgerMapped = rows.filter((r) => !!r.ledger_name).length;
 
     // Get true total count to detect if we hit the 2000-row cap
     const { count: totalRowsInDb } = await supabase
@@ -171,8 +305,10 @@ export async function GET(
       .eq("tenant_id", profile.tenant_id)
       .eq("client_id", clientId);
 
+    const flagCount = flaggedRows.filter((t) => t.flags.length > 0).length;
+
     return NextResponse.json({
-      transactions: enrichedRows,
+      transactions: flaggedRows,
       summary: {
         total: rows.length,
         total_rows_in_db: totalRowsInDb ?? rows.length,
@@ -181,6 +317,8 @@ export async function GET(
         total_credit: totalCredit,
         matched,
         unmatched,
+        ledger_mapped: ledgerMapped,
+        flag_count: flagCount,
       },
     });
   } catch (err) {

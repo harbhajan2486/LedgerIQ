@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -15,6 +15,7 @@ import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { toast } from "sonner";
 import { extractPattern } from "@/lib/ledger-rules";
+import { fuzzyMatchLedgers } from "@/lib/party-match";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { GLOBAL_RULES_DISPLAY } from "@/lib/ledger-rules";
 
@@ -64,6 +65,7 @@ interface BankTxn {
   match_reasons?: string[] | null;
   matched_invoice_number?: string | null;
   matched_doc_filename?: string | null;
+  flags?: string[];
 }
 
 interface BankSummary {
@@ -74,6 +76,8 @@ interface BankSummary {
   total_credit: number;
   matched: number;
   unmatched: number;
+  ledger_mapped: number;
+  flag_count: number;
 }
 
 interface ReconDoc {
@@ -113,6 +117,14 @@ const CATEGORIES = [
   "Inter-bank Transfer","Other Payment","Other Receipt",
 ];
 const VOUCHER_TYPES = ["Payment","Receipt","Journal","Contra","Purchase","Sales"];
+
+const FLAG_CONFIG: Record<string, { label: string; description: string; severity: "high" | "medium" }> = {
+  direction_mismatch:    { label: "Direction mismatch", description: "Debit assigned to income ledger or credit assigned to expense ledger — likely wrong mapping", severity: "high" },
+  cash_limit_269st:      { label: "Cash >₹2L (269ST)", description: "Cash/contra transaction exceeds ₹2,00,000 — may violate Section 269ST", severity: "high" },
+  round_trip:            { label: "Round trip", description: "Same pattern, same amount, opposite direction within 7 days — possible circular transaction", severity: "medium" },
+  salary_tds_missing:    { label: "Salary TDS missing", description: "Salary payment in this month but no TDS payment found — possible non-compliance", severity: "medium" },
+  not_in_ledger_master:  { label: "Not in ledger master", description: "Assigned ledger does not exist in this client's ledger master", severity: "medium" },
+};
 
 // Transactions in these categories never have an invoice — hide "unmatched" for them
 const DIRECT_EXPENSE_CATEGORIES = new Set([
@@ -221,6 +233,7 @@ export default function ClientDetailPage() {
   const [bsLedgerFilters, setBsLedgerFilters] = useState<Set<string>>(new Set());
   const [bsStatusFilters, setBsStatusFilters] = useState<Set<string>>(new Set());
   const [bsCategoryFilters, setBsCategoryFilters] = useState<Set<string>>(new Set());
+  const [bsFlagsOnly, setBsFlagsOnly] = useState(false);
   const [bsDateSort, setBsDateSort] = useState<"asc" | "desc">("asc");
   const [openFilterCol, setOpenFilterCol] = useState<string | null>(null);
   const [bsColFilterSearch, setBsColFilterSearch] = useState("");
@@ -236,6 +249,84 @@ export default function ClientDetailPage() {
   const [claimSelected, setClaimSelected] = useState<Set<string>>(new Set());
   const [claimLoading, setClaimLoading] = useState(false);
   const [claimSaving, setClaimSaving] = useState(false);
+
+  // Bank book import state
+  type BbCandidate = { particulars: string; pattern: string; ledger_name: string; ledger_type: string | null; confidence: "high" | "medium" | "none"; score: number; debit_total: number; credit_total: number; count: number };
+  type BbBuckets = { high: BbCandidate[]; medium: BbCandidate[]; none: BbCandidate[] };
+  const [bbImportOpen, setBbImportOpen] = useState(false);
+  const [bbStep, setBbStep] = useState<"upload" | "columns" | "review">("upload");
+  const [bbUploading, setBbUploading] = useState(false);
+  const [bbConfirming, setBbConfirming] = useState(false);
+  const [bbBuckets, setBbBuckets] = useState<BbBuckets | null>(null);
+  const [bbTotalRows, setBbTotalRows] = useState(0);
+  const [bbNeedsColumns, setBbNeedsColumns] = useState(false);
+  const [bbRawHeaders, setBbRawHeaders] = useState<string[]>([]);
+  const [bbPreview, setBbPreview] = useState<Record<string, string>[]>([]);
+  const [bbColDate, setBbColDate] = useState("");
+  const [bbColParticulars, setBbColParticulars] = useState("");
+  const [bbColDebit, setBbColDebit] = useState("");
+  const [bbColCredit, setBbColCredit] = useState("");
+  const [bbMediumOverrides, setBbMediumOverrides] = useState<Record<string, string>>({});
+  const bbFileRef = useRef<HTMLInputElement>(null);
+  const [bbFileObj, setBbFileObj] = useState<File | null>(null);
+
+  async function submitBbFile(file: File, colOverrides?: { date?: string; particulars?: string; debit?: string; credit?: string }) {
+    setBbUploading(true);
+    const fd = new FormData();
+    fd.append("file", file);
+    if (colOverrides?.date)        fd.append("column_date", colOverrides.date);
+    if (colOverrides?.particulars) fd.append("column_particulars", colOverrides.particulars);
+    if (colOverrides?.debit)       fd.append("column_debit", colOverrides.debit);
+    if (colOverrides?.credit)      fd.append("column_credit", colOverrides.credit);
+    try {
+      const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: fd });
+      const d = await res.json();
+      if (!res.ok) { toast.error(d.error ?? "Import failed"); return; }
+      if (d.needs_column_mapping) {
+        setBbNeedsColumns(true);
+        setBbRawHeaders(d.raw_headers ?? []);
+        setBbPreview(d.preview ?? []);
+        setBbStep("columns");
+      } else {
+        setBbBuckets(d.buckets);
+        setBbTotalRows(d.total_rows ?? 0);
+        setBbStep("review");
+      }
+    } finally {
+      setBbUploading(false);
+    }
+  }
+
+  async function confirmBbRules() {
+    if (!bbBuckets) return;
+    setBbConfirming(true);
+    const highRules = bbBuckets.high.map(c => ({ pattern: c.pattern, ledger_name: c.ledger_name }));
+    const medRules = bbBuckets.medium
+      .filter(c => bbMediumOverrides[c.pattern] !== "__skip__")
+      .map(c => ({ pattern: c.pattern, ledger_name: bbMediumOverrides[c.pattern] ?? c.ledger_name }));
+    const rules = [...highRules, ...medRules];
+    if (rules.length === 0) { toast.info("No rules to create"); setBbConfirming(false); return; }
+    try {
+      const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: true, rules }),
+      });
+      const d = await res.json();
+      if (res.ok) {
+        toast.success(`${d.created} ledger rule${d.created !== 1 ? "s" : ""} created from bank book`);
+        setBbImportOpen(false);
+        setBbStep("upload");
+        setBbBuckets(null);
+        setBbMediumOverrides({});
+        loadBankTxns();
+      } else {
+        toast.error(d.error ?? "Failed to save rules");
+      }
+    } finally {
+      setBbConfirming(false);
+    }
+  }
 
   // Ledger master state
   const [ledgers, setLedgers] = useState<{ id: string; ledger_name: string; ledger_type: string; closing_balance?: number | null; balance_type?: string | null; financial_year?: string | null; source?: string | null }[]>([]);
@@ -1171,18 +1262,22 @@ export default function ClientDetailPage() {
       {/* Tabs */}
       <div className="flex border-b border-gray-200 gap-1">
         {([
-          { key: "documents", label: "Documents", icon: <FileText size={14} />, count: documents.length },
-          { key: "expected", label: "Expected Invoices", icon: <Clock size={14} />, count: expectedInvoices.filter(e => e.status === "pending").length || null },
-          { key: "bank", label: "Bank Statements", icon: <Landmark size={14} />, count: bankSummary?.total ?? null },
-          { key: "reconciliation", label: "Reconciliation", icon: <Link2 size={14} />, count: reconData?.summary.matched ?? null },
-          { key: "ledger_view", label: "Ledger", icon: <BarChart3 size={14} />, count: ledgerData ? (ledgerData.purchase.vendors.length + ledgerData.sales.customers.length) || null : null },
-          { key: "ledgers", label: "Ledger Master", icon: <BookOpen size={14} />, count: ledgers.length || null },
-          { key: "gst", label: "GST Filing", icon: <Receipt size={14} />, count: null },
-          { key: "summary", label: "Summary Note", icon: <ScrollText size={14} />, count: null },
-        ] as const).map((tab) => (
+          { key: "documents",     label: "Documents",         icon: <FileText size={14} />,  count: documents.length,                                                                          flagCount: 0 },
+          { key: "expected",      label: "Expected Invoices", icon: <Clock size={14} />,      count: expectedInvoices.filter(e => e.status === "pending").length || null,                      flagCount: 0 },
+          { key: "bank",          label: "Bank Statements",   icon: <Landmark size={14} />,   count: bankSummary?.total ?? null,                                                                flagCount: bankSummary?.flag_count ?? 0 },
+          { key: "reconciliation",label: "Reconciliation",    icon: <Link2 size={14} />,      count: reconData?.summary.matched ?? null,                                                        flagCount: 0 },
+          { key: "ledger_view",   label: "Ledger",            icon: <BarChart3 size={14} />,  count: ledgerData ? (ledgerData.purchase.vendors.length + ledgerData.sales.customers.length) || null : null, flagCount: 0 },
+          { key: "ledgers",       label: "Ledger Master",     icon: <BookOpen size={14} />,   count: ledgers.length || null,                                                                    flagCount: 0 },
+          { key: "gst",           label: "GST Filing",        icon: <Receipt size={14} />,    count: null,                                                                                      flagCount: 0 },
+          { key: "summary",       label: "Summary Note",      icon: <ScrollText size={14} />, count: null,                                                                                      flagCount: 0 },
+        ] as { key: string; label: string; icon: React.ReactNode; count: number | null; flagCount: number }[]).map((tab) => (
           <button
             key={tab.key}
-            onClick={() => { setActiveTab(tab.key); if (tab.key === "summary" && !summary && !summaryLoading) loadSummary(); if (tab.key === "ledger_view" && !ledgerData && !ledgerLoading) loadLedger(ledgerFromDate || undefined, ledgerToDate || undefined); }}
+            onClick={() => {
+              setActiveTab(tab.key as typeof activeTab);
+              if (tab.key === "summary" && !summary && !summaryLoading) loadSummary();
+              if (tab.key === "ledger_view" && !ledgerData && !ledgerLoading) loadLedger(ledgerFromDate || undefined, ledgerToDate || undefined);
+            }}
             className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
               activeTab === tab.key
                 ? "border-blue-500 text-blue-600"
@@ -1192,6 +1287,9 @@ export default function ClientDetailPage() {
             {tab.icon} {tab.label}
             {tab.count !== null && tab.count > 0 && (
               <span className="ml-1 text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full">{tab.count}</span>
+            )}
+            {tab.flagCount > 0 && (
+              <span className="ml-0.5 text-xs bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full font-semibold" title={`${tab.flagCount} compliance flags`}>⚑ {tab.flagCount}</span>
             )}
           </button>
         ))}
@@ -1314,12 +1412,14 @@ export default function ClientDetailPage() {
                   <div className="text-center py-12">
                     <FolderOpen size={32} className="text-gray-300 mx-auto mb-2" />
                     <p className="text-sm text-gray-500 mb-3">
-                      {docFolder ? "No documents in this folder yet." : "No documents yet."}
+                      {docFolder ? "No documents in this folder yet." : "Select a folder above to upload documents."}
                     </p>
-                    <Link href={`/upload?client=${clientId}${docFolder ? `&type=${docFolder}` : ""}`}
-                      className={`${buttonVariants()} inline-flex`}>
-                      <Upload size={14} className="mr-1.5" /> Upload documents
-                    </Link>
+                    {docFolder && (
+                      <Link href={`/upload?client=${clientId}&type=${docFolder}`}
+                        className={`${buttonVariants()} inline-flex`}>
+                        <Upload size={14} className="mr-1.5" /> Upload to this folder
+                      </Link>
+                    )}
                   </div>
                 ) : (
                   <table className="w-full text-sm">
@@ -2041,21 +2141,35 @@ export default function ClientDetailPage() {
       {activeTab === "bank" && (
         <div className="space-y-4">
           {/* BS summary cards */}
-          {bankSummary && bankSummary.total > 0 && (
-            <div className="grid grid-cols-4 gap-3">
-              {[
-                { label: "Total transactions", value: bankSummary.total, cls: "text-gray-900" },
-                { label: "Total debits", value: `₹${bankSummary.total_debit.toLocaleString("en-IN")}`, cls: "text-red-600" },
-                { label: "Total credits", value: `₹${bankSummary.total_credit.toLocaleString("en-IN")}`, cls: "text-green-600" },
-                { label: "Unmatched", value: bankSummary.unmatched, cls: bankSummary.unmatched > 0 ? "text-amber-600" : "text-gray-500" },
-              ].map(({ label, value, cls }) => (
-                <Card key={label}><CardContent className="py-3 px-4">
-                  <p className="text-xs text-gray-500">{label}</p>
-                  <p className={`text-xl font-bold mt-0.5 ${cls}`}>{value}</p>
+          {bankSummary && bankSummary.total > 0 && (() => {
+            const mappedPct = bankSummary.total > 0 ? Math.round((bankSummary.ledger_mapped / bankSummary.total) * 100) : 0;
+            return (
+              <div className="grid grid-cols-5 gap-3">
+                {[
+                  { label: "Total transactions", value: bankSummary.total, cls: "text-gray-900" },
+                  { label: "Total debits", value: `₹${bankSummary.total_debit.toLocaleString("en-IN")}`, cls: "text-red-600" },
+                  { label: "Total credits", value: `₹${bankSummary.total_credit.toLocaleString("en-IN")}`, cls: "text-green-600" },
+                  { label: "Unmatched", value: bankSummary.unmatched, cls: bankSummary.unmatched > 0 ? "text-amber-600" : "text-gray-500" },
+                ].map(({ label, value, cls }) => (
+                  <Card key={label}><CardContent className="py-3 px-4">
+                    <p className="text-xs text-gray-500">{label}</p>
+                    <p className={`text-xl font-bold mt-0.5 ${cls}`}>{value}</p>
+                  </CardContent></Card>
+                ))}
+                <Card><CardContent className="py-3 px-4">
+                  <p className="text-xs text-gray-500">Ledger mapping</p>
+                  <p className={`text-xl font-bold mt-0.5 ${mappedPct === 100 ? "text-green-600" : mappedPct >= 70 ? "text-blue-600" : "text-amber-600"}`}>
+                    {mappedPct}%
+                  </p>
+                  <div className="mt-1.5 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full transition-all ${mappedPct === 100 ? "bg-green-500" : mappedPct >= 70 ? "bg-blue-500" : "bg-amber-500"}`}
+                      style={{ width: `${mappedPct}%` }} />
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-1">{bankSummary.ledger_mapped}/{bankSummary.total} mapped</p>
                 </CardContent></Card>
-              ))}
-            </div>
-          )}
+              </div>
+            );
+          })()}
 
           {/* Truncation warning — shown when DB has more than 2000 rows */}
           {bankSummary?.truncated && (
@@ -2215,9 +2329,21 @@ export default function ClientDetailPage() {
                 >
                   Date {bsDateSort === "asc" ? <ArrowUp size={10} /> : <ArrowDown size={10} />}
                 </button>
-                {hasFilters && (
+                {bankSummary && bankSummary.flag_count > 0 && (
                   <button
-                    onClick={() => { setBsLedgerFilters(new Set()); setBsStatusFilters(new Set()); setBsCategoryFilters(new Set()); }}
+                    onClick={() => setBsFlagsOnly(v => !v)}
+                    className={`inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border font-medium transition-colors ${
+                      bsFlagsOnly
+                        ? "border-red-400 bg-red-50 text-red-700"
+                        : "border-gray-200 text-gray-500 hover:border-red-300 hover:text-red-600"
+                    }`}
+                  >
+                    ⚑ Flags only {bsFlagsOnly && `(${bankTxns.filter(t => (t.flags?.length ?? 0) > 0).length})`}
+                  </button>
+                )}
+                {(hasFilters || bsFlagsOnly) && (
+                  <button
+                    onClick={() => { setBsLedgerFilters(new Set()); setBsStatusFilters(new Set()); setBsCategoryFilters(new Set()); setBsFlagsOnly(false); }}
                     className="inline-flex items-center gap-1 text-xs text-red-400 hover:text-red-600 ml-1"
                   >
                     <X size={10} /> Clear filters
@@ -2257,6 +2383,13 @@ export default function ClientDetailPage() {
                   className="text-xs text-blue-600 hover:text-blue-800 inline-flex items-center gap-1"
                 >
                   <Upload size={11} /> Upload statement
+                </button>
+                <button
+                  onClick={() => { setBbImportOpen(true); setBbStep("upload"); setBbBuckets(null); setBbMediumOverrides({}); }}
+                  className="text-xs text-purple-600 hover:text-purple-800 inline-flex items-center gap-1"
+                  title="Import historical bank book to create ledger mapping rules"
+                >
+                  <BookOpen size={11} /> Import bank book
                 </button>
                 <button onClick={() => setWipeDialogOpen(true)} disabled={wipingBank}
                   className="text-xs text-red-400 hover:text-red-600 inline-flex items-center gap-1 disabled:opacity-50"
@@ -2322,6 +2455,7 @@ export default function ClientDetailPage() {
                       .filter(txn => bsLedgerFilters.size   === 0 || bsLedgerFilters.has(txn.ledger_name ?? ""))
                       .filter(txn => bsStatusFilters.size   === 0 || bsStatusFilters.has(txn.status ?? "unmatched"))
                       .filter(txn => bsCategoryFilters.size === 0 || bsCategoryFilters.has(txn.category ?? ""))
+                      .filter(txn => !bsFlagsOnly || (txn.flags?.length ?? 0) > 0)
                       .sort((a, b) => {
                         const d1 = new Date(a.transaction_date).getTime();
                         const d2 = new Date(b.transaction_date).getTime();
@@ -2357,11 +2491,31 @@ export default function ClientDetailPage() {
                               <span className="text-gray-300">→</span>{" "}
                               <span className="font-mono">{extractPattern(txn.narration ?? "")}</span>
                             </p>
+                            {(txn.flags ?? []).length > 0 && (
+                              <div className="flex flex-wrap gap-1 mt-1">
+                                {(txn.flags ?? []).map(f => (
+                                  <span key={f} title={FLAG_CONFIG[f]?.description ?? f}
+                                    className={`inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded-full font-medium cursor-help ${
+                                      FLAG_CONFIG[f]?.severity === "high"
+                                        ? "bg-red-100 text-red-700"
+                                        : "bg-amber-100 text-amber-700"
+                                    }`}>
+                                    ⚑ {FLAG_CONFIG[f]?.label ?? f}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
                           </td>
                           <td className="px-4 py-2.5">
                             <LedgerCell
-                              txnId={txn.id} value={txn.ledger_name}
+                              txnId={txn.id}
+                              narration={txn.narration ?? ""}
+                              value={txn.ledger_name}
                               ledgers={ledgers}
+                              similarCount={bankTxns.filter(
+                                (t) => t.id !== txn.id && !t.ledger_name &&
+                                  extractPattern(t.narration ?? "") === extractPattern(txn.narration ?? "")
+                              ).length}
                               onSave={async (txnId, val) => {
                                 const res = await fetch(`/api/v1/reconciliation/transactions/${txnId}`, {
                                   method: "PATCH",
@@ -2373,6 +2527,21 @@ export default function ClientDetailPage() {
                                   toast.success(`Rule confirmed — "${d.pattern}" → ${d.ledger} will now auto-map on future uploads`);
                                 } else if (d.match_count && d.match_count < 3) {
                                   toast.info(`Learning (${d.match_count}/3) — assign ${3 - d.match_count} more time${3 - d.match_count !== 1 ? "s" : ""} to auto-confirm this rule`);
+                                }
+                                loadBankTxns();
+                                return { pattern: d.pattern };
+                              }}
+                              onBulkApply={async (pattern, ledgerName) => {
+                                const res = await fetch(`/api/v1/clients/${clientId}/bulk-apply-ledger`, {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ pattern, ledger_name: ledgerName }),
+                                });
+                                const d = await res.json();
+                                if (d.updated > 0) {
+                                  toast.success(`Applied "${ledgerName}" to ${d.updated} transaction${d.updated !== 1 ? "s" : ""}`);
+                                } else {
+                                  toast.info("No additional transactions matched");
                                 }
                                 loadBankTxns();
                               }}
@@ -2996,7 +3165,7 @@ export default function ClientDetailPage() {
               <button onClick={() => ledgerImportRef.current?.click()} disabled={importingLedgers}
                 className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
                 {importingLedgers ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />}
-                Import Trial Balance
+                Import Ledger List
               </button>
               <button onClick={seedLedgers} disabled={seedingLedgers}
                 className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
@@ -3846,6 +4015,218 @@ export default function ClientDetailPage() {
         onConfirm={() => deleteDocTarget && performDeleteDocument(deleteDocTarget.id, deleteDocTarget.fileName)}
         variant="warning"
       />
+
+      {/* Bank book import modal */}
+      {bbImportOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 flex flex-col max-h-[90vh]">
+            <div className="flex items-center justify-between px-6 py-4 border-b">
+              <div>
+                <h2 className="text-base font-semibold text-gray-900">Import Historical Bank Book</h2>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Upload a Tally bank ledger export to auto-create ledger mapping rules for this client
+                </p>
+              </div>
+              <button onClick={() => setBbImportOpen(false)} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-6 py-4">
+              {/* Step: upload */}
+              {bbStep === "upload" && (
+                <div className="space-y-4">
+                  <div className="p-4 bg-purple-50 rounded-lg border border-purple-200 text-sm text-purple-800">
+                    <p className="font-medium mb-1">What this does</p>
+                    <ul className="list-disc pl-4 space-y-0.5 text-xs text-purple-700">
+                      <li>Reads the Particulars column — these are ledger names your CA already assigned</li>
+                      <li>Matches them against this client&apos;s Ledger List using fuzzy search</li>
+                      <li>Creates mapping rules so future bank statements auto-fill ledger names</li>
+                    </ul>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Upload Tally bank ledger export (Excel or CSV)
+                    </label>
+                    <input
+                      ref={bbFileRef}
+                      type="file"
+                      accept=".xlsx,.xls,.csv"
+                      className="block w-full text-sm text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border file:border-gray-300 file:text-xs file:font-medium file:bg-white hover:file:bg-gray-50"
+                      onChange={e => setBbFileObj(e.target.files?.[0] ?? null)}
+                    />
+                    {bbFileObj && <p className="text-xs text-gray-400 mt-1">{bbFileObj.name} · {(bbFileObj.size / 1024).toFixed(0)} KB</p>}
+                  </div>
+                  <button
+                    disabled={!bbFileObj || bbUploading}
+                    onClick={() => bbFileObj && submitBbFile(bbFileObj)}
+                    className="px-4 py-2 rounded-md bg-purple-600 text-white text-sm font-medium hover:bg-purple-700 disabled:opacity-50 inline-flex items-center gap-2"
+                  >
+                    {bbUploading ? <><Loader2 size={14} className="animate-spin" /> Analysing…</> : "Analyse Bank Book"}
+                  </button>
+                </div>
+              )}
+
+              {/* Step: column mapping */}
+              {bbStep === "columns" && (
+                <div className="space-y-4">
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
+                    <AlertTriangle size={12} className="inline mr-1" />
+                    Column headers not recognised automatically. Please map them manually.
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs border border-gray-200 rounded">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          {bbRawHeaders.map(h => (
+                            <th key={h} className="px-2 py-2 text-left font-medium text-gray-500 border-b">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {bbPreview.slice(0, 3).map((row, i) => (
+                          <tr key={i} className="border-b border-gray-100">
+                            {bbRawHeaders.map(h => (
+                              <td key={h} className="px-2 py-1.5 text-gray-700 truncate max-w-[120px]">{row[h]}</td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    {([
+                      { label: "Date column", value: bbColDate, set: setBbColDate },
+                      { label: "Particulars column", value: bbColParticulars, set: setBbColParticulars },
+                      { label: "Debit column", value: bbColDebit, set: setBbColDebit },
+                      { label: "Credit column", value: bbColCredit, set: setBbColCredit },
+                    ] as { label: string; value: string; set: (v: string) => void }[]).map(({ label, value, set }) => (
+                      <div key={label}>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">{label}</label>
+                        <select
+                          value={value}
+                          onChange={e => set(e.target.value)}
+                          className="w-full text-xs border border-gray-300 rounded px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                        >
+                          <option value="">— select —</option>
+                          {bbRawHeaders.map(h => <option key={h} value={h}>{h}</option>)}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    disabled={!bbColDate || !bbColParticulars || (!bbColDebit && !bbColCredit) || bbUploading}
+                    onClick={() => bbFileObj && submitBbFile(bbFileObj, { date: bbColDate, particulars: bbColParticulars, debit: bbColDebit, credit: bbColCredit })}
+                    className="px-4 py-2 rounded-md bg-purple-600 text-white text-sm font-medium hover:bg-purple-700 disabled:opacity-50 inline-flex items-center gap-2"
+                  >
+                    {bbUploading ? <><Loader2 size={14} className="animate-spin" /> Re-analysing…</> : "Analyse with these columns"}
+                  </button>
+                </div>
+              )}
+
+              {/* Step: review buckets */}
+              {bbStep === "review" && bbBuckets && (
+                <div className="space-y-5">
+                  <p className="text-xs text-gray-500">{bbTotalRows.toLocaleString()} transactions analysed · {bbBuckets.high.length + bbBuckets.medium.length + bbBuckets.none.length} unique Particulars found</p>
+
+                  {/* High confidence */}
+                  {bbBuckets.high.length > 0 && (
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-xs font-semibold text-green-700 bg-green-100 px-2 py-0.5 rounded-full">
+                          ✓ High confidence — {bbBuckets.high.length} rules
+                        </span>
+                        <span className="text-xs text-gray-400">Will be created automatically</span>
+                      </div>
+                      <div className="space-y-1">
+                        {bbBuckets.high.map(c => (
+                          <div key={c.pattern} className="flex items-center justify-between text-xs px-3 py-2 bg-green-50 rounded border border-green-100">
+                            <span className="font-medium text-gray-800 truncate max-w-[200px]" title={c.particulars}>{c.particulars}</span>
+                            <span className="text-gray-400 mx-2">→</span>
+                            <span className="text-green-700 font-medium truncate max-w-[180px]">{c.ledger_name}</span>
+                            <span className="ml-2 text-gray-400 flex-shrink-0">{c.count}×</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Medium confidence — CA confirms each */}
+                  {bbBuckets.medium.length > 0 && (
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-xs font-semibold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">
+                          ⚠ Review needed — {bbBuckets.medium.length}
+                        </span>
+                        <span className="text-xs text-gray-400">Confirm or change each mapping below</span>
+                      </div>
+                      <div className="space-y-1">
+                        {bbBuckets.medium.map(c => (
+                          <div key={c.pattern} className="flex items-center gap-2 text-xs px-3 py-2 bg-amber-50 rounded border border-amber-100">
+                            <span className="font-medium text-gray-800 truncate w-[180px] flex-shrink-0" title={c.particulars}>{c.particulars}</span>
+                            <span className="text-gray-400">→</span>
+                            <select
+                              value={bbMediumOverrides[c.pattern] ?? c.ledger_name}
+                              onChange={e => setBbMediumOverrides(prev => ({ ...prev, [c.pattern]: e.target.value }))}
+                              className="flex-1 text-xs border border-amber-300 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                            >
+                              <option value="__skip__">— skip this one —</option>
+                              {ledgers.map(l => <option key={l.id} value={l.ledger_name}>{l.ledger_name}</option>)}
+                            </select>
+                            <span className="text-gray-400 flex-shrink-0">{c.count}×</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* None — no match found */}
+                  {bbBuckets.none.length > 0 && (
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-xs font-semibold text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full">
+                          — No match — {bbBuckets.none.length}
+                        </span>
+                        <span className="text-xs text-gray-400">These will be skipped</span>
+                      </div>
+                      <div className="space-y-0.5">
+                        {bbBuckets.none.slice(0, 8).map(c => (
+                          <p key={c.pattern} className="text-xs text-gray-400 px-3 py-1 truncate">{c.particulars} ({c.count}×)</p>
+                        ))}
+                        {bbBuckets.none.length > 8 && <p className="text-xs text-gray-400 px-3">…and {bbBuckets.none.length - 8} more</p>}
+                      </div>
+                    </div>
+                  )}
+
+                  {bbBuckets.high.length === 0 && bbBuckets.medium.length === 0 && (
+                    <div className="text-center py-6 text-sm text-gray-400">
+                      No ledger matches found. Make sure this client has ledgers in their Ledger List tab first.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {bbStep === "review" && (
+              <div className="px-6 py-4 border-t flex items-center justify-between">
+                <p className="text-xs text-gray-400">
+                  {bbBuckets ? `${bbBuckets.high.length} auto + ${bbBuckets.medium.filter(c => (bbMediumOverrides[c.pattern] ?? c.ledger_name) !== "__skip__").length} confirmed rules` : ""}
+                </p>
+                <div className="flex gap-3">
+                  <button onClick={() => setBbImportOpen(false)} className="text-sm px-4 py-2 rounded border border-gray-200 text-gray-600 hover:bg-gray-50">
+                    Cancel
+                  </button>
+                  <button
+                    onClick={confirmBbRules}
+                    disabled={bbConfirming || (!bbBuckets?.high.length && !bbBuckets?.medium.length)}
+                    className="text-sm px-4 py-2 rounded bg-purple-600 text-white font-medium hover:bg-purple-700 disabled:opacity-50 inline-flex items-center gap-2"
+                  >
+                    {bbConfirming ? <><Loader2 size={14} className="animate-spin" /> Creating rules…</> : "Create rules"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -3944,36 +4325,166 @@ function SummaryRenderer({ markdown }: { markdown: string }) {
   return <div>{elements}</div>;
 }
 
-function LedgerCell({ txnId, value, ledgers, onSave }: {
+function LedgerCell({ txnId, narration, value, ledgers, similarCount, onSave, onBulkApply }: {
   txnId: string;
+  narration: string;
   value: string | null | undefined;
   ledgers: { id: string; ledger_name: string; ledger_type: string }[];
-  onSave: (txnId: string, value: string) => Promise<void>;
+  similarCount: number; // unassigned txns with same pattern (excluding self)
+  onSave: (txnId: string, value: string) => Promise<{ pattern?: string }>;
+  onBulkApply: (pattern: string, ledgerName: string) => Promise<void>;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [editing, setEditing]       = useState(false);
+  const [saving, setSaving]         = useState(false);
+  const [search, setSearch]         = useState("");
+  const [bulkPattern, setBulkPattern] = useState<string | null>(null);
+  const [bulkLedger, setBulkLedger]   = useState<string | null>(null);
+  const [bulkApplying, setBulkApplying] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
 
-  if (editing) {
-    return (
-      <select autoFocus defaultValue={value ?? ""}
-        className="text-xs rounded border border-blue-300 px-1 py-0.5 max-w-[160px] focus:outline-none focus:ring-1 focus:ring-blue-400"
-        onBlur={(e) => { setEditing(false); if (e.target.value && e.target.value !== value) { setSaving(true); onSave(txnId, e.target.value).finally(() => setSaving(false)); } }}
-        onChange={async (e) => { if (e.target.value) { setEditing(false); setSaving(true); await onSave(txnId, e.target.value); setSaving(false); } }}>
-        <option value="">— select ledger —</option>
-        {ledgers.map((l) => <option key={l.id} value={l.ledger_name}>{l.ledger_name}</option>)}
-      </select>
+  // Compute fuzzy suggestions only when dropdown opens, memoised on narration+ledgers
+  const suggestions = useMemo(() => {
+    if (!editing) return [];
+    return fuzzyMatchLedgers(narration ?? "", ledgers, 6);
+  }, [editing, narration, ledgers]);
+
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase();
+    if (!q) return ledgers;
+    return ledgers.filter((l) =>
+      l.ledger_name.toLowerCase().includes(q) || l.ledger_type.toLowerCase().includes(q)
     );
+  }, [search, ledgers]);
+
+  async function pick(ledgerName: string) {
+    setEditing(false);
+    setSearch("");
+    if (ledgerName === value) return;
+    setSaving(true);
+    const result = await onSave(txnId, ledgerName);
+    setSaving(false);
+    if (result?.pattern && similarCount > 0) {
+      setBulkPattern(result.pattern);
+      setBulkLedger(ledgerName);
+    }
+  }
+
+  async function applyBulk() {
+    if (!bulkPattern || !bulkLedger) return;
+    setBulkApplying(true);
+    await onBulkApply(bulkPattern, bulkLedger);
+    setBulkApplying(false);
+    setBulkPattern(null);
+    setBulkLedger(null);
   }
 
   if (saving) return <span className="text-xs text-gray-400 italic">Saving…</span>;
 
   return (
-    <button onClick={() => setEditing(true)}
-      className={`group inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded max-w-[160px] truncate ${
-        value ? "bg-green-50 text-green-800 hover:opacity-80" : "bg-amber-50 text-amber-700 hover:opacity-80 italic"
-      }`}>
-      <span className="truncate">{value ?? "Set ledger"}</span>
-      <Pencil size={9} className="flex-shrink-0 opacity-0 group-hover:opacity-60" />
-    </button>
+    <div className="relative">
+      {/* Value button */}
+      <button onClick={() => { setEditing(true); setTimeout(() => inputRef.current?.focus(), 50); }}
+        className={`group inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded max-w-[180px] truncate ${
+          value ? "bg-green-50 text-green-800 hover:opacity-80" : "bg-amber-50 text-amber-700 hover:opacity-80 italic"
+        }`}>
+        <span className="truncate">{value ?? "Set ledger"}</span>
+        <Pencil size={9} className="flex-shrink-0 opacity-0 group-hover:opacity-60" />
+      </button>
+
+      {/* Bulk apply prompt */}
+      {bulkPattern && bulkLedger && !editing && (
+        <div className="mt-1 flex items-center gap-1.5 text-xs bg-blue-50 border border-blue-200 rounded px-2 py-1">
+          <span className="text-blue-700 font-medium">{similarCount} more</span>
+          <span className="text-blue-600">same pattern — apply?</span>
+          <button
+            onClick={applyBulk}
+            disabled={bulkApplying}
+            className="ml-1 text-xs font-semibold text-blue-700 hover:text-blue-900 disabled:opacity-50 flex items-center gap-0.5"
+          >
+            {bulkApplying ? <><Loader2 size={9} className="animate-spin" /> Applying…</> : "Apply all"}
+          </button>
+          <button onClick={() => { setBulkPattern(null); setBulkLedger(null); }} className="text-gray-400 hover:text-gray-600 ml-1">
+            <X size={10} />
+          </button>
+        </div>
+      )}
+
+      {/* Dropdown */}
+      {editing && (
+        <>
+          {/* Backdrop */}
+          <div className="fixed inset-0 z-10" onClick={() => { setEditing(false); setSearch(""); }} />
+          <div className="absolute left-0 top-full mt-1 z-20 w-72 bg-white border border-gray-200 rounded-lg shadow-lg overflow-hidden">
+            {/* Search */}
+            <div className="p-2 border-b border-gray-100">
+              <input
+                ref={inputRef}
+                type="text"
+                placeholder="Search ledgers…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") { setEditing(false); setSearch(""); }
+                  if (e.key === "Enter" && filtered.length === 1) pick(filtered[0].ledger_name);
+                }}
+                className="w-full text-xs px-2 py-1.5 border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"
+              />
+            </div>
+
+            <div className="max-h-72 overflow-y-auto">
+              {/* Fuzzy suggestions — only show when not searching */}
+              {!search && suggestions.length > 0 && (
+                <div>
+                  <div className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wider bg-gray-50 border-b border-gray-100 flex items-center gap-1">
+                    <Search size={9} /> Best matches for this narration
+                  </div>
+                  {suggestions.map((s) => (
+                    <button
+                      key={s.ledger_name}
+                      onClick={() => pick(s.ledger_name)}
+                      className="w-full text-left px-3 py-2 hover:bg-blue-50 flex items-center justify-between group border-b border-gray-50 last:border-0"
+                    >
+                      <div>
+                        <span className="text-xs font-medium text-gray-800">{s.ledger_name}</span>
+                        {s.matchedTokens.length > 0 && (
+                          <div className="flex gap-1 mt-0.5">
+                            {s.matchedTokens.map((t) => (
+                              <span key={t} className="text-[10px] px-1 py-0 rounded bg-blue-100 text-blue-700">{t}</span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <span className="text-[10px] text-gray-400 flex-shrink-0 ml-2">{s.ledger_type.replace(/_/g, " ")}</span>
+                    </button>
+                  ))}
+                  <div className="border-t border-dashed border-gray-200 my-1" />
+                </div>
+              )}
+
+              {/* All / filtered ledgers */}
+              {!search && (
+                <div className="px-3 py-1.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wider bg-gray-50 border-b border-gray-100">
+                  All ledgers ({ledgers.length})
+                </div>
+              )}
+              {filtered.length === 0 ? (
+                <p className="text-xs text-gray-400 px-3 py-3">No ledgers match "{search}"</p>
+              ) : (
+                filtered.map((l) => (
+                  <button
+                    key={l.id}
+                    onClick={() => pick(l.ledger_name)}
+                    className="w-full text-left px-3 py-1.5 hover:bg-gray-50 flex items-center justify-between text-xs"
+                  >
+                    <span className={`truncate ${l.ledger_name === value ? "font-semibold text-green-700" : "text-gray-700"}`}>{l.ledger_name}</span>
+                    <span className="text-[10px] text-gray-400 flex-shrink-0 ml-2">{l.ledger_type.replace(/_/g, " ")}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
   );
 }

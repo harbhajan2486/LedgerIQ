@@ -33,7 +33,8 @@ export async function GET(request: NextRequest) {
       supabase
         .from("documents")
         .select(`
-          id, original_filename, document_type, status, uploaded_at,
+          id, original_filename, document_type, status, uploaded_at, client_id,
+          clients(client_name),
           extractions(id, field_name, extracted_value, confidence, status)
         `)
         .eq("tenant_id", profile.tenant_id)
@@ -75,6 +76,7 @@ export async function GET(request: NextRequest) {
         ? extractions.reduce((s, e) => s + e.confidence, 0) / extractions.length
         : 0;
 
+      const clientInfo = Array.isArray(doc.clients) ? doc.clients[0] : doc.clients;
       return {
         id: doc.id,
         fileName: doc.original_filename,
@@ -83,6 +85,8 @@ export async function GET(request: NextRequest) {
         totalFields: extractions.length,
         lowConfidenceFields: lowConfidence,
         avgConfidence: Math.round(avgConfidence * 100),
+        client_id: (doc as { client_id?: string | null }).client_id ?? null,
+        client_name: (clientInfo as { client_name?: string } | null)?.client_name ?? null,
       };
     });
 

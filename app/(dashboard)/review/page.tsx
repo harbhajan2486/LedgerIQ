@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ClipboardCheck, FileText, ChevronRight, AlertTriangle, RefreshCw, Loader2, Trash2 } from "lucide-react";
+import { ClipboardCheck, FileText, ChevronRight, AlertTriangle, RefreshCw, Loader2, Trash2, Building2 } from "lucide-react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { toast } from "sonner";
@@ -17,6 +17,8 @@ interface QueueItem {
   totalFields: number;
   lowConfidenceFields: number;
   avgConfidence: number;
+  client_id: string | null;
+  client_name: string | null;
 }
 
 interface StuckItem {
@@ -25,6 +27,11 @@ interface StuckItem {
   type: string;
   status: string;
   uploadedAt: string;
+}
+
+interface ClientOption {
+  id: string;
+  client_name: string;
 }
 
 const DOC_TYPE_LABELS: Record<string, string> = {
@@ -51,6 +58,8 @@ export default function InboxPage() {
   const [retrying, setRetrying] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; fileName: string } | null>(null);
+  const [clients, setClients] = useState<ClientOption[]>([]);
+  const [assigningTo, setAssigningTo] = useState<string | null>(null);
 
   function loadQueue() {
     fetch("/api/v1/review/queue")
@@ -63,7 +72,10 @@ export default function InboxPage() {
       .catch(() => { setError("Failed to load review queue."); setLoading(false); });
   }
 
-  useEffect(() => { loadQueue(); }, []);
+  useEffect(() => {
+    loadQueue();
+    fetch("/api/v1/clients").then((r) => r.json()).then((d) => setClients(d.clients ?? [])).catch(() => {});
+  }, []);
 
   async function performDelete(docId: string, fileName: string) {
     setDeleting(docId);
@@ -96,6 +108,24 @@ export default function InboxPage() {
       }
     } finally {
       setRetrying(null);
+    }
+  }
+
+  async function assignClient(docId: string, clientId: string) {
+    const client = clients.find((c) => c.id === clientId);
+    if (!client) return;
+    const res = await fetch(`/api/v1/documents/${docId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id: clientId }),
+    });
+    if (res.ok) {
+      toast.success(`Assigned to ${client.client_name}`);
+      setQueue((prev) => prev.map((d) => d.id === docId ? { ...d, client_id: clientId, client_name: client.client_name } : d));
+      setAssigningTo(null);
+    } else {
+      const d = await res.json();
+      toast.error(d.error ?? "Could not assign client");
     }
   }
 
@@ -233,6 +263,32 @@ export default function InboxPage() {
                           <span>{item.totalFields} fields extracted</span>
                           <span>·</span>
                           <span>{new Date(item.uploadedAt).toLocaleDateString("en-IN")}</span>
+                          {item.client_name ? (
+                            <span className="flex items-center gap-1 text-blue-600">
+                              <Building2 size={10} /> {item.client_name}
+                            </span>
+                          ) : (
+                            assigningTo === item.id ? (
+                              <select
+                                autoFocus
+                                className="text-xs border border-amber-300 rounded px-1.5 py-0.5 bg-white"
+                                defaultValue=""
+                                onChange={(e) => { if (e.target.value) assignClient(item.id, e.target.value); }}
+                                onBlur={() => setAssigningTo(null)}
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <option value="" disabled>Select client…</option>
+                                {clients.map((c) => <option key={c.id} value={c.id}>{c.client_name}</option>)}
+                              </select>
+                            ) : (
+                              <button
+                                onClick={(e) => { e.preventDefault(); setAssigningTo(item.id); }}
+                                className="flex items-center gap-1 text-amber-600 hover:text-amber-800 font-medium"
+                              >
+                                <AlertTriangle size={10} /> No client — assign
+                              </button>
+                            )
+                          )}
                         </div>
                       </div>
                       <div className="flex items-center gap-3 flex-shrink-0">

@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, Suspense } from "react";
-import { useSearchParams } from "next/navigation";
+import { useState, useRef, useEffect, Suspense } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import { Upload, FileText, CheckCircle2, AlertCircle, X, Loader2, AlertTriangle, Building2 } from "lucide-react";
+import { Upload, FileText, CheckCircle2, AlertCircle, X, Loader2, AlertTriangle, Building2, ChevronLeft } from "lucide-react";
 import { validateFileSize, validateFileMagicBytes, DOCUMENT_TYPES } from "@/lib/file-validation";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
@@ -37,6 +37,7 @@ export default function UploadPage() {
 
 function UploadPageInner() {
   const searchParams = useSearchParams();
+  const router = useRouter();
   const preselectedClientId = searchParams.get("client");
   const lockedType = searchParams.get("type"); // pre-locks document type when uploading from a folder
 
@@ -44,16 +45,23 @@ function UploadPageInner() {
   const [dragging, setDragging] = useState(false);
   const [budgetWarning, setBudgetWarning] = useState<string | null>(null);
   const [aiDown, setAiDown] = useState(false);
-  const [clients, setClients] = useState<ClientOption[]>([]);
-  const [selectedClientId, setSelectedClientId] = useState<string>(preselectedClientId ?? "");
+  const [clientName, setClientName] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Enforce: upload only accessible from a client + folder context
   useEffect(() => {
+    if (!preselectedClientId || !lockedType) {
+      router.replace("/clients");
+      return;
+    }
     fetch("/api/v1/clients")
       .then((r) => r.json())
-      .then((d) => setClients(d.clients ?? []))
+      .then((d) => {
+        const c = (d.clients ?? []).find((c: ClientOption) => c.id === preselectedClientId);
+        if (c) setClientName(c.client_name);
+      })
       .catch(() => {});
-  }, []);
+  }, [preselectedClientId, lockedType, router]);
 
   function addFiles(newFiles: File[]) {
     const defaultType = lockedType && DOCUMENT_TYPES.find((t) => t.value === lockedType)
@@ -101,24 +109,30 @@ function UploadPageInner() {
     const formData = new FormData();
     formData.append("file", item.file);
     formData.append("documentType", item.documentType);
-    if (selectedClientId) formData.append("clientId", selectedClientId);
+    if (preselectedClientId) formData.append("clientId", preselectedClientId);
 
     try {
       const res = await fetch("/api/v1/documents/upload", { method: "POST", body: formData });
-      const data = await res.json();
+      let data: Record<string, unknown> = {};
+      try {
+        data = await res.json();
+      } catch {
+        updateFile(item.id, { status: "error", error: "Server error — unexpected response. The file may be too large or the server restarted. Please try again." });
+        return;
+      }
 
-      if (!res.ok) { updateFile(item.id, { status: "error", error: data.error }); return; }
-      if (data.budgetWarning) setBudgetWarning(data.budgetWarning);
+      if (!res.ok) { updateFile(item.id, { status: "error", error: String(data.error ?? "Upload failed") }); return; }
+      if (data.budgetWarning) setBudgetWarning(data.budgetWarning as string);
 
       if (data.queued) {
         setAiDown(true);
-        updateFile(item.id, { status: "queued", progress: 100, documentId: data.documentId });
+        updateFile(item.id, { status: "queued", progress: 100, documentId: data.documentId as string });
       } else {
-        updateFile(item.id, { status: "processing", progress: 70, documentId: data.documentId });
-        pollForCompletion(item.id, data.documentId);
+        updateFile(item.id, { status: "processing", progress: 70, documentId: data.documentId as string });
+        pollForCompletion(item.id, data.documentId as string);
       }
     } catch {
-      updateFile(item.id, { status: "error", error: "Upload failed. Please check your connection and try again." });
+      updateFile(item.id, { status: "error", error: "Upload failed — could not reach the server. Please check your connection and try again." });
     }
   }
 
@@ -155,38 +169,25 @@ function UploadPageInner() {
 
   return (
     <div className="space-y-6 max-w-3xl">
+      {/* Context strip — client + folder locked from URL */}
+      <div className="flex items-center gap-3">
+        <Link href={`/clients/${preselectedClientId}`} className="text-xs text-blue-600 hover:underline flex items-center gap-1">
+          <ChevronLeft size={12} /> Back to client
+        </Link>
+        <span className="text-gray-300">|</span>
+        <div className="flex items-center gap-1.5 text-sm text-gray-700">
+          <Building2 size={14} className="text-gray-400" />
+          <span className="font-medium">{clientName ?? "Client"}</span>
+          <span className="text-gray-400">→</span>
+          <span>{DOCUMENT_TYPES.find((t) => t.value === lockedType)?.label ?? lockedType}</span>
+        </div>
+      </div>
+
       <div>
         <h1 className="text-2xl font-semibold text-gray-900">Upload Documents</h1>
         <p className="text-sm text-gray-500 mt-1">
-          {lockedType
-            ? `Uploading to: ${DOCUMENT_TYPES.find((t) => t.value === lockedType)?.label ?? lockedType} — all files will be tagged automatically.`
-            : "Upload invoices, expense bills, or bank statements. AI reads them automatically."}
+          Files will be tagged as <strong>{DOCUMENT_TYPES.find((t) => t.value === lockedType)?.label ?? lockedType}</strong> for <strong>{clientName ?? "this client"}</strong> automatically.
         </p>
-      </div>
-
-      {/* Client selector */}
-      <div className="flex items-center gap-3 p-3 bg-gray-50 border border-gray-200 rounded-lg">
-        <Building2 size={16} className="text-gray-400 flex-shrink-0" />
-        <div className="flex-1">
-          <label className="text-xs font-medium text-gray-600 block mb-1">Client (optional)</label>
-          <select
-            value={selectedClientId}
-            onChange={(e) => setSelectedClientId(e.target.value)}
-            className="w-full text-sm border border-gray-200 rounded px-2 py-1 bg-white text-gray-700 outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            <option value="">— No client / unassigned —</option>
-            {clients.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.client_name}{c.industry_name ? ` (${c.industry_name})` : ""}
-              </option>
-            ))}
-          </select>
-        </div>
-        {clients.length === 0 && (
-          <Link href="/clients" className="text-xs text-blue-600 hover:underline flex-shrink-0">
-            Add clients →
-          </Link>
-        )}
       </div>
 
       {/* Banners */}
@@ -255,19 +256,7 @@ function UploadPageInner() {
                     </div>
                     <p className="text-xs text-gray-400 mt-0.5">{(item.file.size / 1024 / 1024).toFixed(2)} MB</p>
 
-                    {item.status === "pending" && !lockedType && (
-                      <select
-                        value={item.documentType}
-                        onChange={(e) => updateFile(item.id, { documentType: e.target.value })}
-                        className="mt-2 text-xs border border-gray-200 rounded px-2 py-1 bg-white text-gray-700"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        {DOCUMENT_TYPES.map((t) => (
-                          <option key={t.value} value={t.value}>{t.label}</option>
-                        ))}
-                      </select>
-                    )}
-                    {item.status === "pending" && lockedType && (
+                    {item.status === "pending" && (
                       <p className="text-xs text-blue-600 mt-1.5 font-medium">
                         {DOCUMENT_TYPES.find((t) => t.value === lockedType)?.label ?? lockedType}
                       </p>
@@ -290,6 +279,7 @@ function UploadPageInner() {
                     {item.status === "done" && (
                       <p className="text-xs text-green-600 mt-1">
                         Ready for review — <Link href="/review" className="underline">go to Inbox</Link>
+                        {preselectedClientId && <> or <Link href={`/clients/${preselectedClientId}?folder=${lockedType}`} className="underline">back to client folder</Link></>}
                       </p>
                     )}
                     {item.status === "queued" && (
