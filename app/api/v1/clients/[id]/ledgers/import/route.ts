@@ -72,15 +72,32 @@ const HEADER_RE = /^(name|ledger\s*name?|particulars|account\s*name?|under|group
  *   ["HDFC Bank", "Bank Accounts"]
  *   ["Rent",      "Indirect Expenses"]
  *
- * Format 2 — Indented single-col (Tally report view):
- *   ["Capital Account"]     ← group/sub-group header (followed by deeper-indented row)
- *   ["  Partner Capital"]   ← leaf ledger (indented child)
+ * Format 2 — Single col, hierarchy via bold formatting and/or indentation:
+ *   "Capital Account"    (bold)    ← group header  → skip
+ *   "  Reserves"         (bold)    ← sub-group     → skip  (also deeper indent)
+ *   "    General Reserve"(normal)  ← leaf ledger   → import
+ *   "Partner Capital"    (normal)  ← leaf ledger   → import  (no indent, not bold)
  *
- * Format 3 — Single column, no hierarchy info.
+ * Bold is the primary signal (used when Excel styles are readable).
+ * Indentation depth is the secondary signal (two-pass: a row whose next
+ * sibling is deeper-indented is treated as a header).
+ * TALLY_GROUP_MAP is the last-resort fallback for plain CSV.
  */
-function parseLedgerList(rawRows: unknown[][]): { ledgers: LedgerRow[]; skipped: string[] } {
+function parseLedgerList(
+  rawRows: unknown[][],
+  ws: XLSX.WorkSheet,
+): { ledgers: LedgerRow[]; skipped: string[] } {
   const ledgers: LedgerRow[] = [];
   const skipped: string[] = [];
+
+  // rawRows[i] corresponds to sheet row (sheetRowBase + i)
+  const range = XLSX.utils.decode_range(ws["!ref"] || "A1");
+  const sheetRowBase = range.s.r;
+
+  function isCellBold(rowIndex: number): boolean {
+    const cell = ws[XLSX.utils.encode_cell({ r: sheetRowBase + rowIndex, c: 0 })];
+    return cell?.s?.font?.bold === true;
+  }
 
   // Find data start: scan first 15 rows for a "Name" header, start after it.
   // If no header found, start from row 0 (plain export with no title rows).
@@ -96,21 +113,13 @@ function parseLedgerList(rawRows: unknown[][]): { ledgers: LedgerRow[]; skipped:
   const dataRows = rawRows.slice(dataStart);
   if (dataRows.length === 0) return { ledgers, skipped };
 
-  // Sample non-empty rows to detect format
+  // Sample non-empty rows to detect Format 1 (flat 2-col with "Under" column)
   const sample = dataRows.filter(r => String(r[0] ?? "").trim()).slice(0, 30);
-
-  // Format 1: col[1] is consistently non-empty text (the "Under" group column)
   const col1NonEmpty = sample.filter(r => {
     const v = String(r[1] ?? "").trim();
     return v.length > 0 && isNaN(parseFloat(v));
   }).length;
   const isFlatTwoCols = col1NonEmpty >= Math.ceil(sample.length * 0.4);
-
-  // Format 2: col[0] has indented rows (leading whitespace)
-  const hasIndentedRows = !isFlatTwoCols && dataRows.some(r => {
-    const raw = String(r[0] ?? "");
-    return raw !== raw.trimStart() && raw.trim().length > 0;
-  });
 
   // ── Format 1: Name | Under ──────────────────────────────────────────────
   if (isFlatTwoCols) {
@@ -130,47 +139,49 @@ function parseLedgerList(rawRows: unknown[][]): { ledgers: LedgerRow[]; skipped:
     }
   }
 
-  // ── Format 2: indented hierarchy — two-pass ─────────────────────────────
-  else if (hasIndentedRows) {
-    type Item = { name: string; indent: number };
+  // ── Format 2: single col — bold + indentation + TALLY_GROUP_MAP ──────────
+  else {
+    type Item = { name: string; indent: number; isBold: boolean; rawIdx: number };
     const items: Item[] = [];
 
-    for (const row of dataRows) {
-      const rawStr = String(row[0] ?? "");
+    for (let i = 0; i < dataRows.length; i++) {
+      const rawStr = String(dataRows[i][0] ?? "");
       const name = rawStr.trim();
       if (!name || HEADER_RE.test(name)) continue;
       if (name.length > 150) { skipped.push(name.slice(0, 30) + "…"); continue; }
-      items.push({ name, indent: rawStr.length - rawStr.trimStart().length });
+      items.push({
+        name,
+        indent: rawStr.length - rawStr.trimStart().length,
+        isBold: isCellBold(dataStart + i),
+        rawIdx: dataStart + i,
+      });
     }
+
+    const hasBold = items.some(it => it.isBold);
+    const hasIndent = items.some(it => it.indent > 0);
 
     let curGroup = "";
     for (let j = 0; j < items.length; j++) {
-      const { name, indent } = items[j];
+      const { name, indent, isBold } = items[j];
       const nextIndent = j + 1 < items.length ? items[j + 1].indent : -1;
-      if (nextIndent > indent) { curGroup = name; continue; }
+
+      // Group/sub-group if: bold (Excel styles), OR next row is deeper (indentation),
+      // OR name is a known Tally group and we have no other signals.
+      const isGroupHeader =
+        (hasBold && isBold) ||
+        (hasIndent && nextIndent > indent) ||
+        (!hasBold && !hasIndent && !!TALLY_GROUP_MAP[name.toLowerCase()]);
+
+      if (isGroupHeader) {
+        curGroup = name;
+        continue;
+      }
+
       ledgers.push({
         tenant_id: "", client_id: "",
         ledger_name: name,
         ledger_type: curGroup ? mapTallyGroup(curGroup) : "expense",
         tally_group: curGroup || null,
-        financial_year: null, closing_balance: null, balance_type: null, opening_balance: null,
-        source: "ledger_list",
-      });
-    }
-  }
-
-  // ── Format 3: single column, no group info ──────────────────────────────
-  else {
-    for (const row of dataRows) {
-      const name = String(row[0] ?? "").trim();
-      if (!name || HEADER_RE.test(name)) continue;
-      if (TALLY_GROUP_MAP[name.toLowerCase()]) continue; // skip group-only rows
-      if (name.length > 150) { skipped.push(name.slice(0, 30) + "…"); continue; }
-      ledgers.push({
-        tenant_id: "", client_id: "",
-        ledger_name: name,
-        ledger_type: "expense",
-        tally_group: null,
         financial_year: null, closing_balance: null, balance_type: null, opening_balance: null,
         source: "ledger_list",
       });
@@ -207,7 +218,7 @@ export async function POST(
     if (fileName.endsWith(".csv")) {
       wb = XLSX.read(new TextDecoder().decode(buffer), { type: "string" });
     } else if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
-      wb = XLSX.read(buffer, { type: "array" });
+      wb = XLSX.read(buffer, { type: "array", cellStyles: true });
     } else {
       return NextResponse.json({ error: "Upload CSV or Excel file" }, { status: 400 });
     }
@@ -270,7 +281,7 @@ export async function POST(
     }
   } else {
     // Tally report format — company name/title rows at top, then indented or 2-col data
-    const result = parseLedgerList(rawRows);
+    const result = parseLedgerList(rawRows, ws);
     ledgerRows = result.ledgers.map(l => ({ ...l, tenant_id: profile.tenant_id, client_id: clientId }));
     skipped = result.skipped;
   }
