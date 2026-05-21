@@ -74,7 +74,7 @@ export async function POST(
   return NextResponse.json({ ledger: data });
 }
 
-// DELETE — remove a ledger by id
+// DELETE — remove a single ledger by id, or all ledgers for the client
 export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -84,7 +84,19 @@ export async function DELETE(
   if (!tenantId) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
 
   const { id: clientId } = await params;
-  const { ledgerId } = await request.json();
+  const body = await request.json();
+
+  if (body.clearAll === true) {
+    const { error } = await supabase
+      .from("ledger_masters")
+      .delete()
+      .eq("tenant_id", tenantId)
+      .eq("client_id", clientId);
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ success: true });
+  }
+
+  const { ledgerId } = body;
   if (!ledgerId) return NextResponse.json({ error: "ledgerId required" }, { status: 400 });
 
   const { error } = await supabase

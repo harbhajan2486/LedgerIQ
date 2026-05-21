@@ -1053,15 +1053,15 @@ export default function ClientDetailPage() {
   async function clearAllLedgers() {
     if (!confirm(`Delete ALL ${ledgers.length} ledgers for this client? This cannot be undone.`)) return;
     setDeletingLedgers(true);
-    await Promise.all(
-      ledgers.map((l) =>
-        fetch(`/api/v1/clients/${clientId}/ledgers`, {
-          method: "DELETE",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ledgerId: l.id }),
-        })
-      )
-    );
+    const res = await fetch(`/api/v1/clients/${clientId}/ledgers`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clearAll: true }),
+    });
+    if (!res.ok) {
+      const d = await res.json();
+      toast.error(d.error ?? "Failed to delete ledgers");
+    }
     setSelectedLedgerIds(new Set());
     setDeletingLedgers(false);
     loadLedgers();
