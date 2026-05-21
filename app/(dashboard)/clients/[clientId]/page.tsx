@@ -373,7 +373,7 @@ export default function ClientDetailPage() {
   }
 
   // Ledger master state
-  const [ledgers, setLedgers] = useState<{ id: string; ledger_name: string; ledger_type: string; tally_group?: string | null; closing_balance?: number | null; balance_type?: string | null; financial_year?: string | null; source?: string | null }[]>([]);
+  const [ledgers, setLedgers] = useState<{ id: string; ledger_name: string; ledger_type: string; tally_group?: string | null }[]>([]);
   const [ledgersLoading, setLedgersLoading] = useState(false);
   const [newLedgerName, setNewLedgerName] = useState("");
   const [newLedgerType, setNewLedgerType] = useState("expense");
@@ -381,12 +381,6 @@ export default function ClientDetailPage() {
   const [seedingLedgers, setSeedingLedgers] = useState(false);
   const [reapplying, setReapplying] = useState(false);
   const [importingLedgers, setImportingLedgers] = useState(false);
-  const [trialBalanceFY, setTrialBalanceFY] = useState(() => {
-    // Default to current Indian financial year e.g. "2024-25"
-    const now = new Date();
-    const yr = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
-    return `${yr}-${String(yr + 1).slice(-2)}`;
-  });
   const ledgerImportRef = useRef<HTMLInputElement>(null);
   const [selectedLedgerIds, setSelectedLedgerIds] = useState<Set<string>>(new Set());
   const [deletingLedgers, setDeletingLedgers] = useState(false);
@@ -1080,12 +1074,10 @@ export default function ClientDetailPage() {
     setImportingLedgers(true);
     const fd = new FormData();
     fd.append("file", file);
-    fd.append("financial_year", trialBalanceFY);
     const res = await fetch(`/api/v1/clients/${clientId}/ledgers/import`, { method: "POST", body: fd });
     const d = await res.json();
     if (res.ok) {
-      const balanceNote = d.has_balance_data ? " with balances" : "";
-      toast.success(`Imported ${d.imported} ledgers${balanceNote}${d.skipped > 0 ? ` (${d.skipped} skipped)` : ""}. Re-mapping transactions…`);
+      toast.success(`Imported ${d.imported} ledger${d.imported !== 1 ? "s" : ""}${d.skipped > 0 ? ` (${d.skipped} skipped)` : ""}. Re-mapping transactions…`);
       loadLedgers();
       // Step 1: Re-apply rules so existing transactions use the new TB ledger names
       try {
@@ -3459,16 +3451,6 @@ export default function ClientDetailPage() {
             </div>
             <div className="flex items-center gap-2">
               <input ref={ledgerImportRef} type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={importLedgers} />
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs text-gray-500">FY</span>
-                <input
-                  type="text"
-                  value={trialBalanceFY}
-                  onChange={e => setTrialBalanceFY(e.target.value)}
-                  placeholder="2024-25"
-                  className="w-20 text-xs border border-gray-300 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-400"
-                />
-              </div>
               <button onClick={() => ledgerImportRef.current?.click()} disabled={importingLedgers}
                 className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
                 {importingLedgers ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />}
@@ -3551,7 +3533,6 @@ export default function ClientDetailPage() {
                   l.ledger_type.includes(ledgerSearch.toLowerCase()) ||
                   (l.tally_group ?? "").toLowerCase().includes(ledgerSearch.toLowerCase())
                 );
-                const fy = ledgers.find(l => l.financial_year)?.financial_year;
 
                 // When searching, show flat list; otherwise group by tally_group
                 const groups: { key: string; label: string; ledgers: typeof filteredLedgers }[] = [];
@@ -3561,11 +3542,8 @@ export default function ClientDetailPage() {
                   const groupMap = new Map<string, typeof filteredLedgers>();
                   for (const l of filteredLedgers) {
                     const key = l.tally_group ?? `__type__${l.ledger_type}`;
-                    const label = l.tally_group ?? l.ledger_type.charAt(0).toUpperCase() + l.ledger_type.slice(1);
                     if (!groupMap.has(key)) groupMap.set(key, []);
                     groupMap.get(key)!.push(l);
-                    // Store label with key — we'll derive it below
-                    void label;
                   }
                   for (const [key, items] of groupMap) {
                     const label = items[0].tally_group ?? (items[0].ledger_type.charAt(0).toUpperCase() + items[0].ledger_type.slice(1));
@@ -3598,10 +3576,6 @@ export default function ClientDetailPage() {
                         </th>
                         <th className="text-left px-5 py-3 text-xs font-medium text-gray-500">Ledger Name</th>
                         <th className="text-left px-4 py-3 text-xs font-medium text-gray-500">Type</th>
-                        <th className="text-right px-4 py-3 text-xs font-medium text-gray-500">
-                          Closing Balance
-                          {fy && <span className="ml-1 font-normal text-gray-400">· FY {fy}</span>}
-                        </th>
                         <th className="px-4 py-3" />
                       </tr>
                     </thead>
@@ -3609,8 +3583,6 @@ export default function ClientDetailPage() {
                       {groups.map(({ key, label, ledgers: groupLedgers }) => {
                         const isCollapsed = collapsedGroups.has(key);
                         const showHeader = key !== "__all__";
-                        const groupDr = groupLedgers.filter(l => l.balance_type === "Dr" && l.closing_balance != null).reduce((s, l) => s + Number(l.closing_balance), 0);
-                        const groupCr = groupLedgers.filter(l => l.balance_type === "Cr" && l.closing_balance != null).reduce((s, l) => s + Number(l.closing_balance), 0);
                         return (
                           <>
                           {showHeader && (
@@ -3622,21 +3594,12 @@ export default function ClientDetailPage() {
                                 return next;
                               })}>
                               <td className="px-3 py-2" />
-                              <td className="px-5 py-2 font-semibold text-gray-700 text-xs uppercase tracking-wide" colSpan={1}>
+                              <td className="px-5 py-2 font-semibold text-gray-700 text-xs uppercase tracking-wide" colSpan={2}>
                                 <span className="flex items-center gap-1.5">
                                   {isCollapsed ? <ChevronRight size={12} className="text-gray-400" /> : <ChevronDown size={12} className="text-gray-400" />}
                                   {label}
                                   <span className="ml-1 font-normal text-gray-400 normal-case tracking-normal">{groupLedgers.length} ledger{groupLedgers.length !== 1 ? "s" : ""}</span>
                                 </span>
-                              </td>
-                              <td className="px-4 py-2" />
-                              <td className="px-4 py-2 text-right text-xs">
-                                {(groupDr > 0 || groupCr > 0) && (
-                                  <span className={groupDr > groupCr ? "text-red-600 font-medium" : "text-green-700 font-medium"}>
-                                    ₹{(groupDr > groupCr ? groupDr : groupCr).toLocaleString("en-IN")}
-                                    <span className="ml-1 font-normal opacity-60">{groupDr > groupCr ? "Dr" : "Cr"}</span>
-                                  </span>
-                                )}
                               </td>
                               <td className="px-4 py-2" />
                             </tr>
@@ -3653,13 +3616,7 @@ export default function ClientDetailPage() {
                                   className="rounded border-gray-300" />
                               </td>
                               <td className={`py-2.5 font-medium text-gray-800 ${showHeader ? "pl-8 pr-5" : "px-5"}`}>
-                                <span className="flex items-center gap-2">
-                                  {l.ledger_name}
-                                  {l.source === "trial_balance" && (
-                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 font-semibold tracking-wide">TB</span>
-                                  )}
-                                  {l.financial_year && <span className="text-[10px] text-gray-400">FY {l.financial_year}</span>}
-                                </span>
+                                {l.ledger_name}
                               </td>
                               <td className="px-4 py-2.5">
                                 <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
@@ -3670,14 +3627,6 @@ export default function ClientDetailPage() {
                                   l.ledger_type === "bank"      ? "bg-blue-50 text-blue-700" :
                                   "bg-gray-100 text-gray-600"
                                 }`}>{l.ledger_type}</span>
-                              </td>
-                              <td className="px-4 py-2.5 text-right text-sm">
-                                {l.closing_balance != null ? (
-                                  <span className={l.balance_type === "Cr" ? "text-green-700 font-medium" : "text-red-700 font-medium"}>
-                                    ₹{Number(l.closing_balance).toLocaleString("en-IN")}
-                                    <span className="ml-1 text-[10px] font-normal opacity-70">{l.balance_type}</span>
-                                  </span>
-                                ) : <span className="text-gray-300">—</span>}
                               </td>
                               <td className="px-4 py-2.5 text-right">
                                 <button onClick={() => deleteLedger(l.id)} className="text-gray-300 hover:text-red-500 transition-colors">
