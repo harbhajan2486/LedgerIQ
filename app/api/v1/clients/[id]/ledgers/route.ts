@@ -10,6 +10,8 @@ async function getTenantId(supabase: Awaited<ReturnType<typeof createClient>>) {
 }
 
 // GET — list ledgers for a client
+// Paginates internally in 1,000-row pages to work around PostgREST's
+// server-side max_rows cap (default 1000 on hosted Supabase).
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -20,17 +22,28 @@ export async function GET(
 
   const { id: clientId } = await params;
 
-  const { data: ledgers } = await supabase
-    .from("ledger_masters")
-    .select("id, ledger_name, ledger_type, tally_group, closing_balance, balance_type, financial_year, source, created_at")
-    .eq("tenant_id", tenantId)
-    .eq("client_id", clientId)
-    .order("ledger_type")
-    .order("tally_group", { nullsFirst: false })
-    .order("ledger_name")
-    .limit(25000);
+  const PAGE = 1000;
+  const allLedgers: Record<string, unknown>[] = [];
+  let from = 0;
 
-  return NextResponse.json({ ledgers: ledgers ?? [] });
+  while (true) {
+    const { data: page, error } = await supabase
+      .from("ledger_masters")
+      .select("id, ledger_name, ledger_type, tally_group, closing_balance, balance_type, financial_year, source, created_at")
+      .eq("tenant_id", tenantId)
+      .eq("client_id", clientId)
+      .order("ledger_type")
+      .order("tally_group", { nullsFirst: false })
+      .order("ledger_name")
+      .range(from, from + PAGE - 1);
+
+    if (error || !page || page.length === 0) break;
+    allLedgers.push(...page);
+    if (page.length < PAGE) break;
+    from += PAGE;
+  }
+
+  return NextResponse.json({ ledgers: allLedgers });
 }
 
 // POST — add a ledger OR seed common ledgers
