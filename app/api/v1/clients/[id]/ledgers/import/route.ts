@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import * as XLSX from "xlsx";
 
+export const maxDuration = 60;
+
 // Tally Group → ledger_type mapping
 const TALLY_GROUP_MAP: Record<string, string> = {
   "bank accounts":                    "bank",
@@ -290,11 +292,15 @@ export async function POST(
     return NextResponse.json({ error: "No valid ledger names found. Check that the file is a Tally ledger list export." }, { status: 400 });
   }
 
-  const { error } = await supabase
-    .from("ledger_masters")
-    .upsert(ledgerRows, { onConflict: "tenant_id,client_id,ledger_name", ignoreDuplicates: false });
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  // Batch upsert in 1,000-row chunks — a single request with 20k rows risks
+  // hitting Supabase's request-size limits and takes longer to recover on error.
+  const BATCH = 1000;
+  for (let i = 0; i < ledgerRows.length; i += BATCH) {
+    const { error } = await supabase
+      .from("ledger_masters")
+      .upsert(ledgerRows.slice(i, i + BATCH), { onConflict: "tenant_id,client_id,ledger_name", ignoreDuplicates: false });
+    if (error) return NextResponse.json({ error: `Batch ${Math.floor(i / BATCH) + 1}: ${error.message}` }, { status: 500 });
+  }
 
   return NextResponse.json({ imported: ledgerRows.length, skipped: skipped.length, skipped_names: skipped.slice(0, 5) });
 }

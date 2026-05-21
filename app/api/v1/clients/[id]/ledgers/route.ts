@@ -28,7 +28,7 @@ export async function GET(
     .order("ledger_type")
     .order("tally_group", { nullsFirst: false })
     .order("ledger_name")
-    .limit(5000);
+    .limit(25000);
 
   return NextResponse.json({ ledgers: ledgers ?? [] });
 }
