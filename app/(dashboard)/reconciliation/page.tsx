@@ -99,7 +99,7 @@ function ReconciliationPageInner() {
   // Upload state — pre-open and pre-select client if coming from client page
   const [uploadOpen, setUploadOpen] = useState(() => !!preselectedClientId);
   const [uploading, setUploading] = useState(false);
-  const [uploadMsg, setUploadMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [uploadMsg, setUploadMsg] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
   const [bankName, setBankName] = useState("HDFC Bank");
   const [uploadClientId, setUploadClientId] = useState<string>(preselectedClientId);
   const [clients, setClients] = useState<{ id: string; client_name: string }[]>([]);
@@ -153,35 +153,119 @@ function ReconciliationPageInner() {
     if (!file) return;
     setUploading(true);
     setUploadMsg(null);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 6 * 60 * 1000);
+
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("bank_name", bankName);
-      if (uploadClientId) formData.append("client_id", uploadClientId);
-      const res = await fetch("/api/v1/reconciliation/upload-statement", {
-        method: "POST",
-        body: formData,
-        signal: controller.signal,
-      });
-      const d = await res.json().catch(() => ({}));
-      if (res.ok) {
-        setUploadMsg({ type: "success", text: d.message ?? `${d.count} transactions imported.` });
+      const isPdf = file.name.toLowerCase().endsWith(".pdf");
+
+      if (isPdf) {
+        const { PDFDocument } = await import("pdf-lib");
+        const fileBytes = await file.arrayBuffer();
+        const pdf = await PDFDocument.load(fileBytes);
+        const totalPages = pdf.getPageCount();
+        const CHUNK = 25;
+        const totalChunks = Math.ceil(totalPages / CHUNK);
+        const cachePrefix = `recon_${uploadClientId || "no-client"}_${file.name}_${file.size}`;
+
+        type RawTxn = { date: string; narration: string; ref_number: string | null; debit: number | null; credit: number | null; balance: number | null };
+        const allTxns: RawTxn[] = [];
+        let totalIn = 0, totalOut = 0;
+
+        for (let i = 0; i < totalChunks; i++) {
+          const startPage = i * CHUNK + 1;
+          const endPage = Math.min((i + 1) * CHUNK, totalPages);
+          const cacheKey = `${cachePrefix}_c${i}`;
+
+          const cached = localStorage.getItem(cacheKey);
+          if (cached) {
+            const c = JSON.parse(cached) as { transactions: RawTxn[]; tokens_in: number; tokens_out: number };
+            setUploadMsg({ type: "info", text: `Pages ${startPage}–${endPage} of ${totalPages} — cached (${i + 1}/${totalChunks})` });
+            allTxns.push(...c.transactions);
+            totalIn += c.tokens_in; totalOut += c.tokens_out;
+            continue;
+          }
+
+          setUploadMsg({ type: "info", text: `Extracting pages ${startPage}–${endPage} of ${totalPages} (${i + 1}/${totalChunks})…` });
+
+          const chunkDoc = await PDFDocument.create();
+          const indices = Array.from({ length: endPage - startPage + 1 }, (_, k) => startPage - 1 + k);
+          const copied = await chunkDoc.copyPages(pdf, indices);
+          copied.forEach((p: import("pdf-lib").PDFPage) => chunkDoc.addPage(p));
+          const chunkBytes = await chunkDoc.save();
+
+          const fd = new FormData();
+          fd.append("mode", "extract_chunk");
+          fd.append("file", new Blob([new Uint8Array(chunkBytes)], { type: "application/pdf" }), `chunk-${i + 1}.pdf`);
+
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 2 * 60 * 1000);
+          let d: { transactions?: RawTxn[]; tokens_in?: number; tokens_out?: number; error?: string };
+          try {
+            const res = await fetch("/api/v1/reconciliation/upload-statement", { method: "POST", body: fd, signal: controller.signal });
+            d = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(d.error ?? `Pages ${startPage}–${endPage}: extraction failed`);
+          } finally {
+            clearTimeout(timer);
+          }
+
+          const chunkResult = { transactions: d.transactions ?? [], tokens_in: d.tokens_in ?? 0, tokens_out: d.tokens_out ?? 0 };
+          localStorage.setItem(cacheKey, JSON.stringify(chunkResult));
+          allTxns.push(...chunkResult.transactions);
+          totalIn += chunkResult.tokens_in; totalOut += chunkResult.tokens_out;
+        }
+
+        if (allTxns.length === 0) {
+          setUploadMsg({ type: "error", text: "No transactions found in PDF. Try a CSV/Excel export instead." });
+          return;
+        }
+
+        setUploadMsg({ type: "info", text: `Saving ${allTxns.length} transactions…` });
+        const saveFd = new FormData();
+        saveFd.append("mode", "save_rows");
+        saveFd.append("rows_json", JSON.stringify(allTxns));
+        saveFd.append("bank_name", bankName);
+        if (uploadClientId) saveFd.append("client_id", uploadClientId);
+        saveFd.append("file_name", file.name);
+        saveFd.append("tokens_in", String(totalIn));
+        saveFd.append("tokens_out", String(totalOut));
+
+        const saveRes = await fetch("/api/v1/reconciliation/upload-statement", { method: "POST", body: saveFd });
+        const saveData = await saveRes.json().catch(() => ({}));
+        if (!saveRes.ok) throw new Error(saveData.error ?? "Save failed");
+
+        for (let i = 0; i < totalChunks; i++) localStorage.removeItem(`${cachePrefix}_c${i}`);
+
+        setUploadMsg({ type: "success", text: saveData.message ?? `${saveData.count ?? 0} transactions imported.` });
         setTimeout(() => { setUploadOpen(false); setUploadMsg(null); loadData(); }, 2500);
       } else {
-        setUploadMsg({ type: "error", text: d.error ?? `Upload failed (${res.status}).` });
+        // CSV / XLSX — single request
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 6 * 60 * 1000);
+        try {
+          const formData = new FormData();
+          formData.append("file", file);
+          formData.append("bank_name", bankName);
+          if (uploadClientId) formData.append("client_id", uploadClientId);
+          const res = await fetch("/api/v1/reconciliation/upload-statement", { method: "POST", body: formData, signal: controller.signal });
+          const d = await res.json().catch(() => ({}));
+          if (res.ok) {
+            setUploadMsg({ type: "success", text: d.message ?? `${d.count} transactions imported.` });
+            setTimeout(() => { setUploadOpen(false); setUploadMsg(null); loadData(); }, 2500);
+          } else {
+            setUploadMsg({ type: "error", text: d.error ?? `Upload failed (${res.status}).` });
+          }
+        } finally {
+          clearTimeout(timer);
+        }
       }
     } catch (err) {
       const isTimeout = err instanceof Error && err.name === "AbortError";
       setUploadMsg({
         type: "error",
         text: isTimeout
-          ? "Upload timed out — try splitting the PDF or use CSV/Excel instead."
-          : "Upload failed. Check your connection and try again.",
+          ? "Upload timed out — try again (progress is cached)."
+          : (err instanceof Error ? err.message : "Upload failed. Check your connection."),
       });
     } finally {
-      clearTimeout(timer);
       setUploading(false);
     }
   }
@@ -295,16 +379,21 @@ function ReconciliationPageInner() {
                     className="w-full text-sm text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-sm file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" />
                   <p className="text-xs text-gray-400">CSV, Excel, or PDF — AI reads transactions automatically.</p>
                 </div>
-                {uploading && (
+                {uploading && !uploadMsg && (
                   <div className="flex items-center gap-2 text-sm text-blue-600 bg-blue-50 rounded-md px-3 py-2">
                     <Loader2 className="w-4 h-4 animate-spin flex-shrink-0" />
-                    <span>Processing… PDF statements take 30–90 seconds. Please wait.</span>
+                    <span>Starting…</span>
                   </div>
                 )}
                 {uploadMsg && (
-                  <p className={`text-sm ${uploadMsg.type === "success" ? "text-green-600" : "text-red-600"}`}>
-                    {uploadMsg.text}
-                  </p>
+                  <div className={`flex items-center gap-2 text-sm rounded-md px-3 py-2 ${
+                    uploadMsg.type === "success" ? "text-green-700 bg-green-50" :
+                    uploadMsg.type === "info" ? "text-blue-700 bg-blue-50" :
+                    "text-red-700 bg-red-50"
+                  }`}>
+                    {uploading && <Loader2 className="w-4 h-4 animate-spin flex-shrink-0" />}
+                    <span>{uploadMsg.text}</span>
+                  </div>
                 )}
                 <div className="flex gap-2 justify-end">
                   <Button type="button" variant="outline" onClick={() => { setUploadOpen(false); setUploadMsg(null); }} disabled={uploading}>
