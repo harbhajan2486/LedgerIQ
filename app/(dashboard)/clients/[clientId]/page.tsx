@@ -835,9 +835,6 @@ export default function ClientDetailPage() {
           totalIn += chunkResult.tokens_in; totalOut += chunkResult.tokens_out;
         }
 
-        // Clear cache after all chunks succeed
-        for (let i = 0; i < totalChunks; i++) localStorage.removeItem(`${cachePrefix}_c${i}`);
-
         if (allTxns.length === 0) {
           setBankUploadMsg({ type: "error", text: "No transactions found in PDF. Try a CSV/Excel export instead." });
           return;
@@ -856,6 +853,10 @@ export default function ClientDetailPage() {
         const saveRes = await fetch("/api/v1/reconciliation/upload-statement", { method: "POST", body: saveFd });
         const saveData = await saveRes.json().catch(() => ({}));
         if (!saveRes.ok) throw new Error(saveData.error ?? "Save failed");
+
+        // Clear chunk cache only after a successful save — if save fails, cache
+        // stays intact so the next upload attempt skips re-extraction.
+        for (let i = 0; i < totalChunks; i++) localStorage.removeItem(`${cachePrefix}_c${i}`);
 
         setBankUploadMsg({ type: "success", text: `Done — ${saveData.count ?? 0} transactions from ${totalPages} pages.` });
         if (bankUploadRef.current) bankUploadRef.current.value = "";
