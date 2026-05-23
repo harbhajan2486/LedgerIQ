@@ -218,7 +218,7 @@ export default function ClientDetailPage() {
   const [bankLoading, setBankLoading] = useState(false);
   const [bankUploadOpen, setBankUploadOpen] = useState(false);
   const [bankUploading, setBankUploading] = useState(false);
-  const [bankUploadMsg, setBankUploadMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [bankUploadMsg, setBankUploadMsg] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
   const [bankUploadBankName, setBankUploadBankName] = useState("HDFC Bank");
   const bankUploadRef = useRef<HTMLInputElement>(null);
 
@@ -769,29 +769,123 @@ export default function ClientDetailPage() {
     if (!file) return;
     setBankUploading(true);
     setBankUploadMsg(null);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 6 * 60 * 1000);
+
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("bank_name", bankUploadBankName);
-      formData.append("client_id", clientId);
-      const res = await fetch("/api/v1/reconciliation/upload-statement", {
-        method: "POST", body: formData, signal: controller.signal,
-      });
-      const d = await res.json().catch(() => ({}));
-      if (res.ok) {
-        setBankUploadMsg({ type: "success", text: `Done — ${d.count ?? d.inserted ?? 0} new transactions added.` });
+      const isPdf = file.name.toLowerCase().endsWith(".pdf");
+
+      if (isPdf) {
+        // Client-side chunked PDF extraction:
+        // 1. Split into 25-page chunks with pdf-lib (browser)
+        // 2. Extract each chunk via extract_chunk — with page progress + localStorage cache
+        // 3. Save all accumulated transactions via save_rows in one request
+        const { PDFDocument } = await import("pdf-lib");
+        const fileBytes = await file.arrayBuffer();
+        const pdf = await PDFDocument.load(fileBytes);
+        const totalPages = pdf.getPageCount();
+        const CHUNK = 25;
+        const totalChunks = Math.ceil(totalPages / CHUNK);
+        const cachePrefix = `recon_${clientId}_${file.name}_${file.size}`;
+
+        type RawTxn = { date: string; narration: string; ref_number: string | null; debit: number | null; credit: number | null; balance: number | null };
+        const allTxns: RawTxn[] = [];
+        let totalIn = 0, totalOut = 0;
+
+        for (let i = 0; i < totalChunks; i++) {
+          const startPage = i * CHUNK + 1;
+          const endPage = Math.min((i + 1) * CHUNK, totalPages);
+          const cacheKey = `${cachePrefix}_c${i}`;
+
+          // Resume from cache if this chunk was already extracted
+          const cached = localStorage.getItem(cacheKey);
+          if (cached) {
+            const c = JSON.parse(cached) as { transactions: RawTxn[]; tokens_in: number; tokens_out: number };
+            setBankUploadMsg({ type: "info", text: `Pages ${startPage}–${endPage} of ${totalPages} — cached, resuming (${i + 1}/${totalChunks})` });
+            allTxns.push(...c.transactions);
+            totalIn += c.tokens_in; totalOut += c.tokens_out;
+            continue;
+          }
+
+          setBankUploadMsg({ type: "info", text: `Extracting pages ${startPage}–${endPage} of ${totalPages} (${i + 1}/${totalChunks})…` });
+
+          // Build chunk PDF in browser
+          const chunkDoc = await PDFDocument.create();
+          const indices = Array.from({ length: endPage - startPage + 1 }, (_, k) => startPage - 1 + k);
+          const copied = await chunkDoc.copyPages(pdf, indices);
+          copied.forEach((p: import("pdf-lib").PDFPage) => chunkDoc.addPage(p));
+          const chunkBytes = await chunkDoc.save();
+
+          const fd = new FormData();
+          fd.append("mode", "extract_chunk");
+          fd.append("file", new Blob([new Uint8Array(chunkBytes)], { type: "application/pdf" }), `chunk-${i + 1}.pdf`);
+
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 2 * 60 * 1000);
+          let d: { transactions?: RawTxn[]; tokens_in?: number; tokens_out?: number; error?: string };
+          try {
+            const res = await fetch("/api/v1/reconciliation/upload-statement", { method: "POST", body: fd, signal: controller.signal });
+            d = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(d.error ?? `Pages ${startPage}–${endPage}: extraction failed`);
+          } finally {
+            clearTimeout(timer);
+          }
+
+          const chunkResult = { transactions: d.transactions ?? [], tokens_in: d.tokens_in ?? 0, tokens_out: d.tokens_out ?? 0 };
+          localStorage.setItem(cacheKey, JSON.stringify(chunkResult));
+          allTxns.push(...chunkResult.transactions);
+          totalIn += chunkResult.tokens_in; totalOut += chunkResult.tokens_out;
+        }
+
+        // Clear cache after all chunks succeed
+        for (let i = 0; i < totalChunks; i++) localStorage.removeItem(`${cachePrefix}_c${i}`);
+
+        if (allTxns.length === 0) {
+          setBankUploadMsg({ type: "error", text: "No transactions found in PDF. Try a CSV/Excel export instead." });
+          return;
+        }
+
+        setBankUploadMsg({ type: "info", text: `Saving ${allTxns.length} transactions…` });
+        const saveFd = new FormData();
+        saveFd.append("mode", "save_rows");
+        saveFd.append("rows_json", JSON.stringify(allTxns));
+        saveFd.append("bank_name", bankUploadBankName);
+        saveFd.append("client_id", clientId);
+        saveFd.append("file_name", file.name);
+        saveFd.append("tokens_in", String(totalIn));
+        saveFd.append("tokens_out", String(totalOut));
+
+        const saveRes = await fetch("/api/v1/reconciliation/upload-statement", { method: "POST", body: saveFd });
+        const saveData = await saveRes.json().catch(() => ({}));
+        if (!saveRes.ok) throw new Error(saveData.error ?? "Save failed");
+
+        setBankUploadMsg({ type: "success", text: `Done — ${saveData.count ?? 0} transactions from ${totalPages} pages.` });
         if (bankUploadRef.current) bankUploadRef.current.value = "";
         loadBankTxns();
       } else {
-        setBankUploadMsg({ type: "error", text: d.error ?? "Upload failed" });
+        // CSV / XLSX — single request, no chunking needed
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 2 * 60 * 1000);
+        try {
+          const formData = new FormData();
+          formData.append("file", file);
+          formData.append("bank_name", bankUploadBankName);
+          formData.append("client_id", clientId);
+          const res = await fetch("/api/v1/reconciliation/upload-statement", { method: "POST", body: formData, signal: controller.signal });
+          const d = await res.json().catch(() => ({}));
+          if (res.ok) {
+            setBankUploadMsg({ type: "success", text: `Done — ${d.count ?? d.inserted ?? 0} new transactions added.` });
+            if (bankUploadRef.current) bankUploadRef.current.value = "";
+            loadBankTxns();
+          } else {
+            setBankUploadMsg({ type: "error", text: d.error ?? "Upload failed" });
+          }
+        } finally {
+          clearTimeout(timer);
+        }
       }
     } catch (err) {
-      const isTimeout = err instanceof Error && err.name === "AbortError";
-      setBankUploadMsg({ type: "error", text: isTimeout ? "PDF is taking too long — try a CSV/Excel export instead, or split the PDF into smaller files." : "Upload failed. Check your connection and try again." });
+      const msg = err instanceof Error ? err.message : "Upload failed";
+      setBankUploadMsg({ type: "error", text: msg });
     } finally {
-      clearTimeout(timer);
       setBankUploading(false);
     }
   }
@@ -2536,7 +2630,7 @@ export default function ClientDetailPage() {
                     <p className="w-full text-xs text-blue-600">PDF statements take 30–90 seconds — please wait…</p>
                   )}
                   {bankUploadMsg && (
-                    <p className={`w-full text-xs font-medium ${bankUploadMsg.type === "success" ? "text-green-700" : "text-red-600"}`}>
+                    <p className={`w-full text-xs font-medium ${bankUploadMsg.type === "success" ? "text-green-700" : bankUploadMsg.type === "info" ? "text-blue-600" : "text-red-600"}`}>
                       {bankUploadMsg.text}
                     </p>
                   )}

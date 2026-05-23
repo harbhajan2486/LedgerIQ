@@ -96,21 +96,26 @@ Rules:
 - Skip opening balance and closing balance summary rows
 - Separate every field with a TAB character, not a comma`;
 
-interface PDFParseResult {
-  transactions: ParsedTransaction[];
-  tokensIn: number;
-  tokensOut: number;
-  rawSample: string;
-  chunks: number;
+// Extract a single pre-split PDF chunk — one Claude call, no further splitting.
+async function extractChunkDirect(fileBytes: ArrayBuffer): Promise<{ transactions: ParsedTransaction[]; tokensIn: number; tokensOut: number }> {
+  const base64 = toBase64(new Uint8Array(fileBytes));
+  const response = await callWithRetry(() => anthropic.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 8192,
+    messages: [{
+      role: "user",
+      content: [
+        { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
+        { type: "text", text: TSV_PROMPT },
+      ],
+    }],
+  }));
+  const text = response.content[0].type === "text" ? response.content[0].text : "";
+  return { transactions: parseTsvLines(text), tokensIn: response.usage.input_tokens, tokensOut: response.usage.output_tokens };
 }
 
-async function parsePDFStatement(fileBytes: ArrayBuffer): Promise<PDFParseResult> {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error("ANTHROPIC_API_KEY is not set in Vercel environment variables.");
-  }
-
-  // Split into 25-page chunks. A 360-page PDF sent whole = ~108k input tokens,
-  // which exceeds the 50k/min rate limit in a single call. 25 pages ≈ 7.5k tokens.
+// Full-file PDF extraction (server-side splitting for backwards compat with direct uploads).
+async function parsePDFStatement(fileBytes: ArrayBuffer): Promise<{ transactions: ParsedTransaction[]; tokensIn: number; tokensOut: number; rawSample: string; chunks: number }> {
   const uint8 = new Uint8Array(fileBytes);
   const chunks = await splitPdfIntoChunks(uint8, 25);
 
@@ -121,169 +126,78 @@ async function parsePDFStatement(fileBytes: ArrayBuffer): Promise<PDFParseResult
 
   for (let i = 0; i < chunks.length; i++) {
     if (i > 0) await sleep(2000);
-
-    const base64 = toBase64(chunks[i]);
-    const response = await callWithRetry(() => anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 8192,
-      messages: [{
-        role: "user",
-        content: [
-          { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-          { type: "text", text: TSV_PROMPT },
-        ],
-      }],
-    }));
-
-    totalTokensIn += response.usage.input_tokens;
-    totalTokensOut += response.usage.output_tokens;
-
-    const text = response.content[0].type === "text" ? response.content[0].text : "";
-    if (i === 0) rawSample = text.split("\n").slice(0, 8).join("\n");
-    allTransactions.push(...parseTsvLines(text));
+    const result = await extractChunkDirect(chunks[i].buffer as ArrayBuffer);
+    totalTokensIn += result.tokensIn;
+    totalTokensOut += result.tokensOut;
+    if (i === 0) {
+      const text = result.transactions.slice(0, 3).map(t => `${t.date}\t${t.narration}\t${t.debit ?? ""}\t${t.credit ?? ""}`).join("\n");
+      rawSample = text;
+    }
+    allTransactions.push(...result.transactions);
   }
 
   return { transactions: allTransactions, tokensIn: totalTokensIn, tokensOut: totalTokensOut, rawSample, chunks: chunks.length };
 }
 
-// Tell Vercel this route needs more than the default 10s timeout
-// Requires Vercel Pro or higher (free plan max is 10s)
-export const maxDuration = 300; // 5 minutes — enough for multi-pass large PDFs
+// ── Save helper — shared by regular upload and save_rows mode ─────────────────
 
-export async function POST(request: NextRequest) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+const MONTHS: Record<string, string> = {
+  jan:"01",feb:"02",mar:"03",apr:"04",may:"05",jun:"06",
+  jul:"07",aug:"08",sep:"09",oct:"10",nov:"11",dec:"12",
+};
 
-  const { data: profile } = await supabase
-    .from("users")
-    .select("tenant_id")
-    .eq("id", user.id)
-    .single();
-
-  if (!profile?.tenant_id) return NextResponse.json({ error: "Tenant not found" }, { status: 400 });
-  const tenantId = profile.tenant_id;
-
-  const formData = await request.formData();
-  const file = formData.get("file") as File | null;
-  const bankName = (formData.get("bank_name") as string) || "Unknown Bank";
-  const clientId = (formData.get("client_id") as string) || null;
-
-  if (!file) return NextResponse.json({ error: "No file provided" }, { status: 400 });
-
-  const fileName = file.name.toLowerCase();
-  const fileSize = file.size;
-
-  if (fileSize > 20 * 1024 * 1024) {
-    return NextResponse.json({ error: "File too large (max 20MB)" }, { status: 400 });
+function toISODate(d: string): string {
+  if (!d) return d;
+  const s = d.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  if (/^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4}$/.test(s)) {
+    const [dd, mm, yyyy] = s.split(/[\/\-\.]/);
+    return `${yyyy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
   }
-
-  let transactions: ParsedTransaction[];
-  let pdfDebug: { raw_sample: string; parsed_sample: ParsedTransaction[] } | null = null;
-  try {
-    if (fileName.endsWith(".csv")) {
-      const text = await file.text();
-      transactions = parseCSV(text);
-    } else if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
-      const buffer = await file.arrayBuffer();
-      transactions = parseXLSX(buffer);
-    } else if (fileName.endsWith(".pdf")) {
-      const buffer = await file.arrayBuffer();
-      const pdfResult = await parsePDFStatement(buffer);
-      transactions = pdfResult.transactions;
-      pdfDebug = { raw_sample: pdfResult.rawSample, parsed_sample: pdfResult.transactions.slice(0, 3) };
-      // Haiku pricing: $0.80/MTok input, $4.00/MTok output
-      const costUsd = (pdfResult.tokensIn / 1_000_000) * 0.80 + (pdfResult.tokensOut / 1_000_000) * 4.00;
-      supabase.from("ai_usage").insert({
-        tenant_id: tenantId,
-        model: "claude-haiku-4-5-20251001",
-        tokens_in: pdfResult.tokensIn,
-        tokens_out: pdfResult.tokensOut,
-        cost_usd: costUsd,
-      }).then();
-    } else {
-      return NextResponse.json(
-        { error: "Unsupported format. Upload CSV, Excel, or PDF bank statement." },
-        { status: 400 }
-      );
-    }
-  } catch (err) {
-    console.error("[upload-statement] parse error:", err);
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("API key") || msg.includes("auth") || msg.includes("401")) {
-      return NextResponse.json({ error: "AI service not configured. Add ANTHROPIC_API_KEY to Vercel environment variables." }, { status: 503 });
-    }
-    return NextResponse.json(
-      { error: `Could not read the file: ${msg}` },
-      { status: 400 }
-    );
+  if (/^\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2}$/.test(s)) {
+    const [yyyy, mm, dd] = s.split(/[\/\-\.]/);
+    return `${yyyy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
   }
+  const monMatch = s.match(/^(\d{1,2})[\s\-\/]([A-Za-z]{3})[\s\-\/](\d{4})$/);
+  if (monMatch) {
+    const mm = MONTHS[monMatch[2].toLowerCase()];
+    if (mm) return `${monMatch[3]}-${mm}-${monMatch[1].padStart(2,"0")}`;
+  }
+  const longMonMatch = s.match(/^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/);
+  if (longMonMatch) {
+    const mm = MONTHS[longMonMatch[2].slice(0,3).toLowerCase()];
+    if (mm) return `${longMonMatch[3]}-${mm}-${longMonMatch[1].padStart(2,"0")}`;
+  }
+  return s;
+}
 
+function categoryFromLedger(ledgerName: string | null, narration: string, isDebit: boolean): { category: string; voucher_type: string } {
+  if (ledgerName) {
+    const meta = ledgerToMeta(ledgerName);
+    if (meta) return meta;
+  }
+  const n = narration.toUpperCase();
+  if (/\bSELF TRANSFER\b|\bFD TRANSFER\b|\bSWEEP\b|\bOD ACCOUNT\b|\bOWN ACCOUNT\b/.test(n))
+    return { category: "Inter-bank Transfer", voucher_type: "Contra" };
+  if (!isDebit) return { category: "Customer Receipt", voucher_type: "Receipt" };
+  return { category: "Vendor Payment", voucher_type: "Payment" };
+}
+
+async function saveTransactionsToDb(
+  transactions: ParsedTransaction[],
+  bankName: string,
+  clientId: string | null,
+  tenantId: string,
+  userId: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any,
+  fileName: string,
+): Promise<NextResponse> {
   if (transactions.length === 0) {
-    return NextResponse.json({ error: "No transactions found in file. Check the file has transaction rows." }, { status: 400 });
+    return NextResponse.json({ error: "No transactions found." }, { status: 400 });
   }
 
-  // Normalise any date format → YYYY-MM-DD for PostgreSQL
-  const MONTHS: Record<string, string> = {
-    jan:"01",feb:"02",mar:"03",apr:"04",may:"05",jun:"06",
-    jul:"07",aug:"08",sep:"09",oct:"10",nov:"11",dec:"12",
-  };
-  function toISODate(d: string): string {
-    if (!d) return d;
-    const s = d.trim();
-    // Already YYYY-MM-DD
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-    // DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
-    if (/^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4}$/.test(s)) {
-      const [dd, mm, yyyy] = s.split(/[\/\-\.]/);
-      return `${yyyy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
-    }
-    // YYYY/MM/DD or YYYY.MM.DD
-    if (/^\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2}$/.test(s)) {
-      const [yyyy, mm, dd] = s.split(/[\/\-\.]/);
-      return `${yyyy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
-    }
-    // DD-Mon-YYYY or DD/Mon/YYYY (e.g. 13-Apr-2024, 13 Apr 2024)
-    const monMatch = s.match(/^(\d{1,2})[\s\-\/]([A-Za-z]{3})[\s\-\/](\d{4})$/);
-    if (monMatch) {
-      const mm = MONTHS[monMatch[2].toLowerCase()];
-      if (mm) return `${monMatch[3]}-${mm}-${monMatch[1].padStart(2,"0")}`;
-    }
-    // DD Month YYYY (e.g. 13 April 2024)
-    const longMonMatch = s.match(/^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/);
-    if (longMonMatch) {
-      const mm = MONTHS[longMonMatch[2].slice(0,3).toLowerCase()];
-      if (mm) return `${longMonMatch[3]}-${mm}-${longMonMatch[1].padStart(2,"0")}`;
-    }
-    // Fallback — return as-is and let DB error surface
-    return s;
-  }
-
-  // Derive category + voucher_type from ledger name (shared ledgerToMeta),
-  // falling back to narration heuristics for unrecognized/custom ledgers.
-  function categoryFromLedger(
-    ledgerName: string | null,
-    narration: string,
-    isDebit: boolean,
-  ): { category: string; voucher_type: string } {
-    if (ledgerName) {
-      const meta = ledgerToMeta(ledgerName);
-      if (meta) return meta;
-    }
-    const n = narration.toUpperCase();
-    if (/\bSELF TRANSFER\b|\bFD TRANSFER\b|\bSWEEP\b|\bOD ACCOUNT\b|\bOWN ACCOUNT\b/.test(n))
-      return { category: "Inter-bank Transfer", voucher_type: "Contra" };
-    if (!isDebit)
-      return { category: "Customer Receipt", voucher_type: "Receipt" };
-    return { category: "Vendor Payment", voucher_type: "Payment" };
-  }
-
-  // Build rows with hash-based dedup
-  const rowsToInsert: Record<string, unknown>[] = [];
-  const allHashes: string[] = [];
-  let minDate = "9999-12-31", maxDate = "0000-01-01";
-
-  // Pre-load confirmed client-specific rules (Layer 3) and industry rules (Layer 2)
+  // Pre-load confirmed client-specific and industry rules
   const clientRules: Map<string, string> = new Map();
   const industryRules: Map<string, string> = new Map();
   if (clientId) {
@@ -295,7 +209,6 @@ export async function POST(request: NextRequest) {
       .eq("confirmed", true);
     for (const r of rules ?? []) clientRules.set(r.pattern, r.ledger_name);
 
-    // Fetch industry for this client, then load industry rules
     const { data: clientRow } = await supabase
       .from("clients")
       .select("industry_name")
@@ -314,19 +227,17 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  const rowsToInsert: Record<string, unknown>[] = [];
+  const allHashes: string[] = [];
+  let minDate = "9999-12-31", maxDate = "0000-01-01";
+
   for (const txn of transactions) {
     const isoDate = toISODate(txn.date);
     const isDebit = !!txn.debit;
-
-    // Compute ledger first (Layer 3 → Layer 2 → Layer 1), then derive category from it.
-    // This keeps category and ledger in sync — no more "Bank Charges ledger / Vendor Payment category" splits.
     const pattern = extractPattern(txn.narration ?? "");
     const ledger_name = clientRules.get(pattern) ?? industryRules.get(pattern) ?? suggestLedger(txn.narration ?? "") ?? null;
     const { category, voucher_type } = categoryFromLedger(ledger_name, txn.narration ?? "", isDebit);
 
-    // Hash = bank + date + narration (normalised) + debit + credit + balance for dedup
-    // Balance included so genuinely identical-looking transactions (same date/amount/narration)
-    // that differ only in running balance still get unique hashes.
     const hashStr = `${bankName}|${isoDate}|${(txn.narration ?? "").toLowerCase().trim()}|${txn.debit ?? ""}|${txn.credit ?? ""}|${txn.balance ?? ""}`;
     const hashBuf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(hashStr));
     const txnHash = Array.from(new Uint8Array(hashBuf)).map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -355,29 +266,9 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  // ── Clean re-upload strategy ──────────────────────────────────────────────
-  //
-  // PROBLEM with the old incremental approach:
-  //   1. Hash check used `.in("txn_hash", 434 hashes)` → ~28 KB URL → Supabase
-  //      silently returns empty → all hashes look "new" → INSERT all → duplicate
-  //      key constraint error on the second upload of the same file.
-  //   2. When the CSV parser had bugs (split amounts), old wrong rows (hash based
-  //      on "11" + "947.00") stayed in the DB forever. Uploading fixed parser
-  //      produced different hashes → rows stacked on top → 447 + 434 = 881 rows.
-  //
-  // SOLUTION: for a scoped (client-specific) upload, DELETE all existing rows
-  // for this client + bank + date range, then INSERT the freshly parsed rows.
-  // This is the right semantics: re-uploading a statement replaces it.
-  // Reconciliation entries linked to those transactions are deleted first to
-  // avoid FK violations.
-  //
-  // For uploads without a clientId (rare / global), fall back to hash dedup
-  // in batches of 100 to stay well under URL limits.
-
   let alreadyPresent = 0;
 
   if (minDate !== "9999-12-31" && clientId) {
-    // Step 1: find IDs of existing rows in this period
     const { data: existingTxns } = await supabase
       .from("bank_transactions")
       .select("id")
@@ -387,17 +278,15 @@ export async function POST(request: NextRequest) {
       .gte("transaction_date", minDate)
       .lte("transaction_date", maxDate);
 
-    const existingIds = (existingTxns ?? []).map((t) => (t as { id: string }).id);
+    const existingIds = (existingTxns ?? []).map((t: { id: string }) => t.id);
     alreadyPresent = existingIds.length;
 
     if (existingIds.length > 0) {
-      // Step 2: delete reconciliation rows linked to these transactions (FK safety)
       for (let i = 0; i < existingIds.length; i += 100) {
         await supabase.from("reconciliations").delete()
           .eq("tenant_id", tenantId)
           .in("bank_transaction_id", existingIds.slice(i, i + 100));
       }
-      // Step 3: delete the bank transaction rows themselves
       await supabase.from("bank_transactions").delete()
         .eq("tenant_id", tenantId)
         .eq("client_id", clientId)
@@ -406,7 +295,6 @@ export async function POST(request: NextRequest) {
         .lte("transaction_date", maxDate);
     }
   } else if (minDate !== "9999-12-31") {
-    // No clientId: batch hash-check (100 at a time to stay under URL limits)
     const existingHashSet = new Set<string>();
     for (let i = 0; i < allHashes.length; i += 100) {
       const batch = allHashes.slice(i, i + 100);
@@ -422,9 +310,7 @@ export async function POST(request: NextRequest) {
 
   if (rowsToInsert.length === 0) {
     return NextResponse.json({
-      success: true,
-      count: 0,
-      already_present: alreadyPresent,
+      success: true, count: 0, already_present: alreadyPresent,
       total_in_file: transactions.length,
       message: `All ${transactions.length} transactions already present — no duplicates added.`,
     });
@@ -435,23 +321,21 @@ export async function POST(request: NextRequest) {
     .insert(rowsToInsert)
     .select("id");
 
-  if (insertError) {
-    return NextResponse.json({ error: insertError.message }, { status: 500 });
-  }
+  if (insertError) return NextResponse.json({ error: insertError.message }, { status: 500 });
 
   const newlyAdded = (inserted ?? []).length;
   const total = transactions.length;
 
   await supabase.from("audit_log").insert({
     tenant_id: tenantId,
-    user_id: user.id,
+    user_id: userId,
     action: "upload_bank_statement",
     entity_type: "bank_transactions",
     entity_id: tenantId,
-    new_value: { file_name: file.name, bank_name: bankName, total, newly_added: newlyAdded, already_present: alreadyPresent },
+    new_value: { file_name: fileName, bank_name: bankName, total, newly_added: newlyAdded, already_present: alreadyPresent },
   });
 
-  const transactionIds = (inserted ?? []).map((r) => r.id);
+  const transactionIds = (inserted ?? []).map((r: { id: string }) => r.id);
   if (transactionIds.length > 0) {
     fetch(`${process.env.NEXT_PUBLIC_APP_URL}/api/v1/reconciliation/auto-match`, {
       method: "POST",
@@ -460,20 +344,96 @@ export async function POST(request: NextRequest) {
     }).catch(() => {});
   }
 
-  // Build a user-friendly message
-  let message: string;
-  if (alreadyPresent > 0) {
-    message = `${newlyAdded} transactions imported (replaced ${alreadyPresent} previous rows for this period).`;
-  } else {
-    message = `${newlyAdded} transactions imported successfully.`;
+  const message = alreadyPresent > 0
+    ? `${newlyAdded} transactions imported (replaced ${alreadyPresent} previous rows for this period).`
+    : `${newlyAdded} transactions imported successfully.`;
+
+  return NextResponse.json({ success: true, count: newlyAdded, already_present: alreadyPresent, total_in_file: total, message });
+}
+
+// ── Route ─────────────────────────────────────────────────────────────────────
+
+export const maxDuration = 300;
+
+export async function POST(request: NextRequest) {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorised" }, { status: 401 });
+
+  const { data: profile } = await supabase
+    .from("users").select("tenant_id").eq("id", user.id).single();
+  if (!profile?.tenant_id) return NextResponse.json({ error: "Tenant not found" }, { status: 400 });
+  const tenantId = profile.tenant_id;
+
+  const formData = await request.formData();
+  const mode = (formData.get("mode") as string | null) ?? "";
+
+  // ── Mode: extract_chunk ───────────────────────────────────────────────────
+  // Client sends one pre-split 25-page PDF blob. Server calls Claude once and
+  // returns extracted transactions. No saving — client accumulates all chunks,
+  // then calls save_rows at the end.
+  if (mode === "extract_chunk") {
+    const file = formData.get("file") as File | null;
+    if (!file) return NextResponse.json({ error: "file required" }, { status: 400 });
+    try {
+      const buffer = await file.arrayBuffer();
+      const result = await extractChunkDirect(buffer);
+      const costUsd = (result.tokensIn / 1_000_000) * 0.80 + (result.tokensOut / 1_000_000) * 4.00;
+      supabase.from("ai_usage").insert({ tenant_id: tenantId, model: "claude-haiku-4-5-20251001", tokens_in: result.tokensIn, tokens_out: result.tokensOut, cost_usd: costUsd }).then();
+      return NextResponse.json({ transactions: result.transactions, tokens_in: result.tokensIn, tokens_out: result.tokensOut });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return NextResponse.json({ error: msg }, { status: 422 });
+    }
   }
 
-  return NextResponse.json({
-    success: true,
-    count: newlyAdded,
-    already_present: alreadyPresent,
-    total_in_file: total,
-    message,
-    ...(pdfDebug ? { debug: pdfDebug } : {}),
-  });
+  // ── Mode: save_rows ───────────────────────────────────────────────────────
+  // Client has finished extracting all chunks and sends the full accumulated
+  // transactions array. Server runs dedup + save + auto-match.
+  if (mode === "save_rows") {
+    const rowsJson = formData.get("rows_json") as string | null;
+    const bankName = (formData.get("bank_name") as string) || "Unknown Bank";
+    const clientId = (formData.get("client_id") as string) || null;
+    const fileName = (formData.get("file_name") as string) || "statement.pdf";
+
+    let transactions: ParsedTransaction[];
+    try { transactions = JSON.parse(rowsJson ?? "[]"); }
+    catch { return NextResponse.json({ error: "Invalid rows_json" }, { status: 400 }); }
+
+    return saveTransactionsToDb(transactions, bankName, clientId, tenantId, user.id, supabase, fileName);
+  }
+
+  // ── Regular upload: CSV / XLSX / PDF (full-file, server-side splitting) ───
+  const file = formData.get("file") as File | null;
+  const bankName = (formData.get("bank_name") as string) || "Unknown Bank";
+  const clientId = (formData.get("client_id") as string) || null;
+
+  if (!file) return NextResponse.json({ error: "No file provided" }, { status: 400 });
+  if (file.size > 20 * 1024 * 1024) return NextResponse.json({ error: "File too large (max 20MB)" }, { status: 400 });
+
+  const fileName = file.name.toLowerCase();
+  let transactions: ParsedTransaction[];
+  try {
+    if (fileName.endsWith(".csv")) {
+      transactions = parseCSV(await file.text()) as ParsedTransaction[];
+    } else if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
+      transactions = parseXLSX(await file.arrayBuffer()) as ParsedTransaction[];
+    } else if (fileName.endsWith(".pdf")) {
+      const pdfResult = await parsePDFStatement(await file.arrayBuffer());
+      transactions = pdfResult.transactions;
+      const costUsd = (pdfResult.tokensIn / 1_000_000) * 0.80 + (pdfResult.tokensOut / 1_000_000) * 4.00;
+      supabase.from("ai_usage").insert({ tenant_id: tenantId, model: "claude-haiku-4-5-20251001", tokens_in: pdfResult.tokensIn, tokens_out: pdfResult.tokensOut, cost_usd: costUsd }).then();
+    } else {
+      return NextResponse.json({ error: "Unsupported format. Upload CSV, Excel, or PDF bank statement." }, { status: 400 });
+    }
+  } catch (err) {
+    console.error("[upload-statement] parse error:", err);
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("API key") || msg.includes("auth") || msg.includes("401")) {
+      return NextResponse.json({ error: "AI service not configured. Add ANTHROPIC_API_KEY to Vercel environment variables." }, { status: 503 });
+    }
+    return NextResponse.json({ error: `Could not read the file: ${msg}` }, { status: 400 });
+  }
+
+  return saveTransactionsToDb(transactions, bankName, clientId, tenantId, user.id, supabase, file.name);
 }
