@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { parseCSV, parseXLSX } from "@/lib/bank-statement-parser";
 import Anthropic from "@anthropic-ai/sdk";
+import { PDFDocument } from "pdf-lib";
 import { suggestLedger, extractPattern, ledgerToMeta } from "@/lib/ledger-rules";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
@@ -9,23 +10,47 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 async function callWithRetry(fn: () => Promise<Anthropic.Message>): Promise<Anthropic.Message> {
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       return await fn();
     } catch (err) {
       if (err instanceof Anthropic.RateLimitError) {
         const headers = err.headers as unknown as Record<string, string> | undefined;
         const retryAfterHeader = headers?.["retry-after"];
-        const waitSec = retryAfterHeader
-          ? Math.ceil(parseFloat(retryAfterHeader))
-          : 15 * (attempt + 1);
+        const waitSec = retryAfterHeader ? Math.ceil(parseFloat(retryAfterHeader)) : 15 * (attempt + 1);
         await sleep(waitSec * 1000);
         continue;
       }
       throw err;
     }
   }
-  throw new Error("Rate limit exceeded — please try again in a minute, or use a CSV/Excel export instead.");
+  throw new Error("Rate limit exceeded after retries — try again in a minute.");
+}
+
+async function splitPdfIntoChunks(bytes: Uint8Array, pagesPerChunk: number): Promise<Uint8Array[]> {
+  const pdf = await PDFDocument.load(bytes);
+  const totalPages = pdf.getPageCount();
+  const chunks: Uint8Array[] = [];
+
+  for (let start = 0; start < totalPages; start += pagesPerChunk) {
+    const end = Math.min(start + pagesPerChunk, totalPages);
+    const chunk = await PDFDocument.create();
+    const indices = Array.from({ length: end - start }, (_, i) => start + i);
+    const copied = await chunk.copyPages(pdf, indices);
+    copied.forEach((p: import("pdf-lib").PDFPage) => chunk.addPage(p));
+    chunks.push(await chunk.save());
+  }
+
+  return chunks;
+}
+
+function toBase64(uint8: Uint8Array): string {
+  let binary = "";
+  const CHUNK = 8192;
+  for (let i = 0; i < uint8.length; i += CHUNK) {
+    binary += String.fromCharCode(...uint8.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
 }
 
 interface ParsedTransaction {
@@ -40,12 +65,11 @@ interface ParsedTransaction {
 function parseTsvLines(text: string): ParsedTransaction[] {
   const lines = text.trim().split("\n").filter((l) => l.trim());
   const transactions: ParsedTransaction[] = [];
-  // Skip header row if present
   const dataLines = lines[0]?.toLowerCase().startsWith("date") ? lines.slice(1) : lines;
 
   for (const line of dataLines) {
     const parts = line.split("\t").map((p) => p.trim());
-    if (parts.length < 5) continue; // need at least date,narration,ref,debit/credit,balance
+    if (parts.length < 5) continue;
     const [date, narration, ref_number, debitStr, creditStr, balanceStr] = parts;
     if (!date || !/\d/.test(date)) continue;
     if (!narration) continue;
@@ -54,42 +78,12 @@ function parseTsvLines(text: string): ParsedTransaction[] {
     const balanceNum = balanceStr ? parseFloat(balanceStr.replace(/[₹,\s]/g, "")) || null : null;
     if (debitNum !== null && debitNum < 0) { creditNum = Math.abs(debitNum); debitNum = null; }
     if (creditNum !== null && creditNum < 0) { debitNum = Math.abs(creditNum); creditNum = null; }
-    transactions.push({
-      date,
-      narration,
-      ref_number: ref_number || null,
-      debit: debitNum,
-      credit: creditNum,
-      balance: balanceNum,
-    });
+    transactions.push({ date, narration, ref_number: ref_number || null, debit: debitNum, credit: creditNum, balance: balanceNum });
   }
   return transactions;
 }
 
-interface PDFParseResult {
-  transactions: ParsedTransaction[];
-  tokensIn: number;
-  tokensOut: number;
-  rawSample: string;   // first 8 lines of Claude's raw output for debugging
-}
-
-async function parsePDFStatement(fileBytes: ArrayBuffer): Promise<PDFParseResult> {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error("ANTHROPIC_API_KEY is not set in Vercel environment variables.");
-  }
-
-  // Encode once, reuse across passes
-  const uint8 = new Uint8Array(fileBytes);
-  let binary = "";
-  const CHUNK = 8192;
-  for (let i = 0; i < uint8.length; i += CHUNK) {
-    binary += String.fromCharCode(...uint8.subarray(i, i + CHUNK));
-  }
-  const base64 = btoa(binary);
-
-  // TSV (tab-separated) avoids ALL comma ambiguity — narration and balance values
-  // can contain commas freely; tabs never appear in bank statement text.
-  const TSV_PROMPT = `Extract bank transactions from this statement. Return ONLY tab-separated values (TSV), no markdown, no explanation, no code block.
+const TSV_PROMPT = `Extract bank transactions from this statement. Return ONLY tab-separated values (TSV), no markdown, no explanation, no code block.
 
 Exact header line: date\tnarration\tref_number\tdebit\tcredit\tbalance
 Rules:
@@ -102,24 +96,33 @@ Rules:
 - Skip opening balance and closing balance summary rows
 - Separate every field with a TAB character, not a comma`;
 
+interface PDFParseResult {
+  transactions: ParsedTransaction[];
+  tokensIn: number;
+  tokensOut: number;
+  rawSample: string;
+  chunks: number;
+}
+
+async function parsePDFStatement(fileBytes: ArrayBuffer): Promise<PDFParseResult> {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error("ANTHROPIC_API_KEY is not set in Vercel environment variables.");
+  }
+
+  // Split into 25-page chunks. A 360-page PDF sent whole = ~108k input tokens,
+  // which exceeds the 50k/min rate limit in a single call. 25 pages ≈ 7.5k tokens.
+  const uint8 = new Uint8Array(fileBytes);
+  const chunks = await splitPdfIntoChunks(uint8, 25);
+
   const allTransactions: ParsedTransaction[] = [];
-  let afterCursor: { date: string; narration: string } | null = null;
   let totalTokensIn = 0;
   let totalTokensOut = 0;
   let rawSample = "";
 
-  for (let pass = 0; pass < 2; pass++) {
-    if (pass > 0) await sleep(20000);
-    const promptText = pass === 0
-      ? TSV_PROMPT
-      : `${TSV_PROMPT}
+  for (let i = 0; i < chunks.length; i++) {
+    if (i > 0) await sleep(2000);
 
-IMPORTANT: Only extract transactions that appear AFTER this transaction in the statement:
-Date: ${afterCursor!.date}
-Narration starts with: ${afterCursor!.narration.slice(0, 60)}
-
-Skip all transactions up to and including that one. Continue from the next transaction onwards.`;
-
+    const base64 = toBase64(chunks[i]);
     const response = await callWithRetry(() => anthropic.messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 8192,
@@ -127,7 +130,7 @@ Skip all transactions up to and including that one. Continue from the next trans
         role: "user",
         content: [
           { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-          { type: "text", text: promptText },
+          { type: "text", text: TSV_PROMPT },
         ],
       }],
     }));
@@ -136,20 +139,11 @@ Skip all transactions up to and including that one. Continue from the next trans
     totalTokensOut += response.usage.output_tokens;
 
     const text = response.content[0].type === "text" ? response.content[0].text : "";
-    if (pass === 0) rawSample = text.split("\n").slice(0, 8).join("\n");
-
-    const batch = parseTsvLines(text);
-
-    if (batch.length === 0) break;
-    allTransactions.push(...batch);
-
-    if (response.stop_reason !== "max_tokens") break;
-
-    const last = batch[batch.length - 1];
-    afterCursor = { date: last.date, narration: last.narration };
+    if (i === 0) rawSample = text.split("\n").slice(0, 8).join("\n");
+    allTransactions.push(...parseTsvLines(text));
   }
 
-  return { transactions: allTransactions, tokensIn: totalTokensIn, tokensOut: totalTokensOut, rawSample };
+  return { transactions: allTransactions, tokensIn: totalTokensIn, tokensOut: totalTokensOut, rawSample, chunks: chunks.length };
 }
 
 // Tell Vercel this route needs more than the default 10s timeout
