@@ -34,7 +34,7 @@ export async function POST(
       return NextResponse.json({ error: "AI rule suggestion is disabled" }, { status: 403 });
     }
     const suggestionModel = (aiConfig?.rule_suggestion_model as string | undefined) ?? "claude-haiku-4-5-20251001";
-    const maxPatterns = (aiConfig?.rule_suggestion_max_patterns as number | undefined) ?? 100;
+    const maxPatterns = (aiConfig?.rule_suggestion_max_patterns as number | undefined) ?? 50;
 
     // Fetch unmapped transactions (debit + credit)
     const { data: txns } = await supabase
@@ -150,7 +150,7 @@ RULES:
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const response = await anthropic.messages.create({
       model: suggestionModel,
-      max_tokens: 2000,
+      max_tokens: 8192,
       temperature: 0.1,
       messages: [{ role: "user", content: prompt }],
     });
