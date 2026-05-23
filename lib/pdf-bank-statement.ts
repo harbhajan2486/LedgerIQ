@@ -11,7 +11,7 @@ const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 // Retry on 429 rate-limit errors. Reads the Retry-After header when present,
 // otherwise uses exponential backoff (20s, 40s, 60s …).
 async function callWithRetry(fn: () => Promise<Anthropic.Message>): Promise<Anthropic.Message> {
-  for (let attempt = 0; attempt < 5; attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
       return await fn();
     } catch (err) {
@@ -19,14 +19,14 @@ async function callWithRetry(fn: () => Promise<Anthropic.Message>): Promise<Anth
         const retryAfterHeader = err.headers?.get?.("retry-after") ?? (err.headers as unknown as Record<string, string>)?.["retry-after"];
         const waitSec = retryAfterHeader
           ? Math.ceil(parseFloat(retryAfterHeader))
-          : Math.min(60, 20 * (attempt + 1));
+          : 15 * (attempt + 1);
         await sleep(waitSec * 1000);
         continue;
       }
       throw err;
     }
   }
-  throw new Error("PDF extraction rate-limited after 5 retries. Please try again in a few minutes.");
+  throw new Error("Rate limit exceeded — please try again in a minute, or use a CSV/Excel export instead.");
 }
 
 /** Convert DD/MM/YYYY or DD-MM-YYYY to YYYY-MM-DD. Returns null if unparseable. */
@@ -113,7 +113,7 @@ export async function extractStatementFromPdf(fileBytes: ArrayBuffer): Promise<P
     // Space passes apart to stay under the 50k tokens/min rate limit.
     // Each pass sends the full PDF (~12–15k input tokens), so back-to-back
     // passes quickly exhaust the per-minute budget.
-    if (pass > 0) await sleep(5000);
+    if (pass > 0) await sleep(20000);
 
     const promptText = pass === 0
       ? TSV_PROMPT
