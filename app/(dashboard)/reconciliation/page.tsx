@@ -154,7 +154,7 @@ function ReconciliationPageInner() {
     setUploading(true);
     setUploadMsg(null);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 4 * 60 * 1000);
+    const timer = setTimeout(() => controller.abort(), 6 * 60 * 1000);
     try {
       const formData = new FormData();
       formData.append("file", file);

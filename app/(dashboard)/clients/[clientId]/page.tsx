@@ -78,6 +78,8 @@ interface BankSummary {
   unmatched: number;
   ledger_mapped: number;
   flag_count: number;
+  rules_confirmed: number;
+  rules_from_history: number;
 }
 
 interface ReconDoc {
@@ -286,46 +288,131 @@ export default function ClientDetailPage() {
   const bbFileRef = useRef<HTMLInputElement>(null);
   const stmtFileRef = useRef<HTMLInputElement>(null);
   const [bbFileObj, setBbFileObj] = useState<File | null>(null);
-  const [stmtFileObj, setStmtFileObj] = useState<File | null>(null);
+  const [stmtFileObjs, setStmtFileObjs] = useState<File[]>([]);
+  const [bbUploadProgress, setBbUploadProgress] = useState("");
 
   function bbReset() {
     setBbStep("upload"); setBbResult(null); setBbColsNeeded(null);
     setBbAmbiguousSelections({}); setBbConflictOverrides({});
     setBbColDate(""); setBbColParticulars(""); setBbColDebit(""); setBbColCredit("");
     setStmtColDate(""); setStmtColNarration(""); setStmtColDebit(""); setStmtColCredit("");
-    setBbFileObj(null); setStmtFileObj(null);
+    setBbFileObj(null); setStmtFileObjs([]); setBbUploadProgress("");
   }
 
   async function submitBbFiles(colOverrides?: {
     bb_date?: string; bb_particulars?: string; bb_debit?: string; bb_credit?: string;
     stmt_date?: string; stmt_narration?: string; stmt_debit?: string; stmt_credit?: string;
   }) {
-    if (!bbFileObj || !stmtFileObj) return;
+    if (!bbFileObj || !stmtFileObjs.length) return;
     setBbUploading(true);
-    const fd = new FormData();
-    fd.append("bankbook_file", bbFileObj);
-    fd.append("statement_file", stmtFileObj);
-    if (colOverrides?.bb_date)        fd.append("bb_column_date", colOverrides.bb_date);
-    if (colOverrides?.bb_particulars) fd.append("bb_column_particulars", colOverrides.bb_particulars);
-    if (colOverrides?.bb_debit)       fd.append("bb_column_debit", colOverrides.bb_debit);
-    if (colOverrides?.bb_credit)      fd.append("bb_column_credit", colOverrides.bb_credit);
-    if (colOverrides?.stmt_date)      fd.append("stmt_column_date", colOverrides.stmt_date);
-    if (colOverrides?.stmt_narration) fd.append("stmt_column_narration", colOverrides.stmt_narration);
-    if (colOverrides?.stmt_debit)     fd.append("stmt_column_debit", colOverrides.stmt_debit);
-    if (colOverrides?.stmt_credit)    fd.append("stmt_column_credit", colOverrides.stmt_credit);
+    setBbUploadProgress("");
+
+    const isMultiPdf = stmtFileObjs.length > 1 && stmtFileObjs.every(f => f.name.toLowerCase().endsWith(".pdf"));
+
+    let wakeLock: WakeLockSentinel | null = null;
     try {
-      const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: fd });
-      const d = await res.json();
-      if (!res.ok) { toast.error(d.error ?? "Import failed"); return; }
-      if (d.needs_column_mapping) {
-        setBbColsNeeded(d as BbColsNeeded);
+      if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen").catch(() => null);
+    } catch { /* wake lock not supported, continue anyway */ }
+
+    try {
+      let resultData: Record<string, unknown>;
+
+      if (isMultiPdf) {
+        // ── Multi-PDF: extract each chunk separately, then match ────────────
+        type StmtRow = { date: string; narration: string; debit: number | null; credit: number | null };
+        const allStmtRows: StmtRow[] = [];
+
+        const cacheKey = (f: File) => `bb_extract_${clientId}_${f.name}_${f.size}`;
+        let lastApiCallAt = 0;
+
+        for (let i = 0; i < stmtFileObjs.length; i++) {
+          const file = stmtFileObjs[i];
+          const key = cacheKey(file);
+
+          // Resume from cache if available
+          const cached = localStorage.getItem(key);
+          if (cached) {
+            setBbUploadProgress(`File ${i + 1} of ${stmtFileObjs.length} — already extracted, resuming…`);
+            allStmtRows.push(...(JSON.parse(cached) as StmtRow[]));
+            continue;
+          }
+
+          // Pace API calls to stay under Anthropic rate limit
+          const elapsed = Date.now() - lastApiCallAt;
+          if (lastApiCallAt > 0 && elapsed < 12000) await new Promise(r => setTimeout(r, 12000 - elapsed));
+
+          const remaining = stmtFileObjs.slice(i).filter(f => !localStorage.getItem(cacheKey(f))).length;
+          setBbUploadProgress(`Extracting file ${i + 1} of ${stmtFileObjs.length} via AI… (est. ${Math.ceil(remaining * 12 / 60)} min left)`);
+
+          const extractFd = new FormData();
+          extractFd.append("mode", "extract_only");
+          extractFd.append("statement_file", file);
+          const extractRes = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: extractFd });
+          lastApiCallAt = Date.now();
+          const extractData = await extractRes.json();
+          if (!extractRes.ok) throw new Error(`File ${i + 1} of ${stmtFileObjs.length} (${file.name}): ${extractData.error ?? "extraction failed"}`);
+
+          const rows: StmtRow[] = extractData.rows ?? [];
+          localStorage.setItem(key, JSON.stringify(rows));
+          allStmtRows.push(...rows);
+        }
+
+        // Deduplicate rows by date+narration+debit+credit (overlapping pages in split PDFs)
+        const seen = new Set<string>();
+        const dedupedRows = allStmtRows.filter(r => {
+          const sig = `${r.date}|${r.narration}|${r.debit ?? ""}|${r.credit ?? ""}`;
+          if (seen.has(sig)) return false;
+          seen.add(sig);
+          return true;
+        });
+
+        // Clear cache after successful full extraction
+        stmtFileObjs.forEach(f => localStorage.removeItem(cacheKey(f)));
+
+        setBbUploadProgress("Matching with bank book…");
+        const matchFd = new FormData();
+        matchFd.append("mode", "match_with_rows");
+        matchFd.append("bankbook_file", bbFileObj);
+        matchFd.append("stmt_rows_json", JSON.stringify(dedupedRows));
+        if (colOverrides?.bb_date)        matchFd.append("bb_column_date", colOverrides.bb_date);
+        if (colOverrides?.bb_particulars) matchFd.append("bb_column_particulars", colOverrides.bb_particulars);
+        if (colOverrides?.bb_debit)       matchFd.append("bb_column_debit", colOverrides.bb_debit);
+        if (colOverrides?.bb_credit)      matchFd.append("bb_column_credit", colOverrides.bb_credit);
+        const matchRes = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: matchFd });
+        resultData = await matchRes.json();
+        if (!matchRes.ok) throw new Error((resultData.error as string) ?? "Matching failed");
+      } else {
+        // ── Single file (PDF or CSV/Excel): existing single-request flow ────
+        setBbUploadProgress(stmtFileObjs[0]?.name.toLowerCase().endsWith(".pdf") ? "Extracting via AI…" : "Analysing…");
+        const fd = new FormData();
+        fd.append("bankbook_file", bbFileObj);
+        for (const f of stmtFileObjs) fd.append("statement_file", f);
+        if (colOverrides?.bb_date)        fd.append("bb_column_date", colOverrides.bb_date);
+        if (colOverrides?.bb_particulars) fd.append("bb_column_particulars", colOverrides.bb_particulars);
+        if (colOverrides?.bb_debit)       fd.append("bb_column_debit", colOverrides.bb_debit);
+        if (colOverrides?.bb_credit)      fd.append("bb_column_credit", colOverrides.bb_credit);
+        if (colOverrides?.stmt_date)      fd.append("stmt_column_date", colOverrides.stmt_date);
+        if (colOverrides?.stmt_narration) fd.append("stmt_column_narration", colOverrides.stmt_narration);
+        if (colOverrides?.stmt_debit)     fd.append("stmt_column_debit", colOverrides.stmt_debit);
+        if (colOverrides?.stmt_credit)    fd.append("stmt_column_credit", colOverrides.stmt_credit);
+        const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: fd });
+        resultData = await res.json();
+        if (!res.ok) throw new Error((resultData.error as string) ?? "Import failed");
+      }
+
+      if (resultData.needs_column_mapping) {
+        setBbColsNeeded(resultData as BbColsNeeded);
         setBbStep("columns");
       } else {
-        setBbResult(d as BbMatchResult);
+        setBbResult(resultData as BbMatchResult);
         setBbStep("review");
       }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Upload failed", { duration: Infinity });
     } finally {
+      wakeLock?.release().catch(() => null);
       setBbUploading(false);
+      setBbUploadProgress("");
     }
   }
 
@@ -683,7 +770,7 @@ export default function ClientDetailPage() {
     setBankUploading(true);
     setBankUploadMsg(null);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 4 * 60 * 1000);
+    const timer = setTimeout(() => controller.abort(), 6 * 60 * 1000);
     try {
       const formData = new FormData();
       formData.append("file", file);
@@ -692,7 +779,7 @@ export default function ClientDetailPage() {
       const res = await fetch("/api/v1/reconciliation/upload-statement", {
         method: "POST", body: formData, signal: controller.signal,
       });
-      const d = await res.json();
+      const d = await res.json().catch(() => ({}));
       if (res.ok) {
         setBankUploadMsg({ type: "success", text: `Done — ${d.count ?? d.inserted ?? 0} new transactions added.` });
         if (bankUploadRef.current) bankUploadRef.current.value = "";
@@ -700,8 +787,9 @@ export default function ClientDetailPage() {
       } else {
         setBankUploadMsg({ type: "error", text: d.error ?? "Upload failed" });
       }
-    } catch {
-      setBankUploadMsg({ type: "error", text: "Upload timed out or failed. Try a smaller file." });
+    } catch (err) {
+      const isTimeout = err instanceof Error && err.name === "AbortError";
+      setBankUploadMsg({ type: "error", text: isTimeout ? "PDF is taking too long — try a CSV/Excel export instead, or split the PDF into smaller files." : "Upload failed. Check your connection and try again." });
     } finally {
       clearTimeout(timer);
       setBankUploading(false);
@@ -2379,7 +2467,15 @@ export default function ClientDetailPage() {
                     <div className={`h-full rounded-full transition-all ${mappedPct === 100 ? "bg-green-500" : mappedPct >= 70 ? "bg-blue-500" : "bg-amber-500"}`}
                       style={{ width: `${mappedPct}%` }} />
                   </div>
-                  <p className="text-[10px] text-gray-400 mt-1">{bankSummary.ledger_mapped}/{bankSummary.total} mapped</p>
+                  <p className="text-[10px] text-gray-400 mt-1">{bankSummary.ledger_mapped}/{bankSummary.total} txns mapped</p>
+                  {bankSummary.rules_confirmed > 0 && (
+                    <p className="text-[10px] text-gray-400 mt-0.5">
+                      {bankSummary.rules_confirmed} rules
+                      {bankSummary.rules_from_history > 0 && (
+                        <span className="text-blue-500"> · {bankSummary.rules_from_history} from history</span>
+                      )}
+                    </p>
+                  )}
                 </CardContent></Card>
               </div>
             );
@@ -3367,6 +3463,28 @@ export default function ClientDetailPage() {
                     <li>• <strong className="text-gray-600">Bank statement</strong> — CSV/Excel from your bank portal (has messy narrations like NEFT/REF/…)</li>
                     <li>• <strong className="text-gray-600">Bank book</strong> — Tally export (has clean Particulars like "Reliance Steel Works")</li>
                   </ul>
+                  {clientMappingRules.length > 0 && (() => {
+                    const confirmed = clientMappingRules.filter(r => r.confirmed);
+                    const fromHistory = confirmed.filter(r => r.source === "bank_book_import");
+                    const fromLearning = confirmed.filter(r => r.source !== "bank_book_import");
+                    return (
+                      <div className="mt-3 flex items-center gap-3 flex-wrap">
+                        <span className="inline-flex items-center gap-1 text-[11px] bg-purple-50 text-purple-700 border border-purple-200 rounded-full px-2.5 py-0.5">
+                          {confirmed.length} rules confirmed
+                        </span>
+                        {fromHistory.length > 0 && (
+                          <span className="inline-flex items-center gap-1 text-[11px] bg-blue-50 text-blue-700 border border-blue-200 rounded-full px-2.5 py-0.5">
+                            {fromHistory.length} from historic import
+                          </span>
+                        )}
+                        {fromLearning.length > 0 && (
+                          <span className="inline-flex items-center gap-1 text-[11px] bg-green-50 text-green-700 border border-green-200 rounded-full px-2.5 py-0.5">
+                            {fromLearning.length} learned live
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
                 <button
                   onClick={() => { setBbImportOpen(true); bbReset(); }}
@@ -4407,16 +4525,27 @@ export default function ClientDetailPage() {
                     <div className="border rounded-lg p-4 space-y-2">
                       <p className="text-xs font-semibold text-gray-700">1. Bank Statement <span className="text-gray-400 font-normal">(from bank portal)</span></p>
                       <p className="text-[11px] text-gray-400">Has: Date, Narration (bank text), Debit, Credit</p>
-                      <input ref={stmtFileRef} type="file" accept=".xlsx,.xls,.csv,.pdf"
+                      <p className="text-[11px] text-gray-400">PDF split into chunks? Select all chunks at once.</p>
+                      <input ref={stmtFileRef} type="file" accept=".xlsx,.xls,.csv,.pdf" multiple
                         className="block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border file:border-gray-200 file:text-xs file:bg-white hover:file:bg-gray-50"
-                        onChange={e => setStmtFileObj(e.target.files?.[0] ?? null)} />
-                      {stmtFileObj && (
-                        <p className="text-[11px] text-purple-600">
-                          {stmtFileObj.name}
-                          {stmtFileObj.name.toLowerCase().endsWith(".pdf") && (
-                            <span className="ml-1 text-amber-600">(AI extraction — may take ~30s)</span>
+                        onChange={e => setStmtFileObjs(Array.from(e.target.files ?? []))} />
+                      {stmtFileObjs.length > 0 && (
+                        <div className="text-[11px] text-purple-600 space-y-0.5">
+                          {stmtFileObjs.length > 1 && (
+                            <p className="font-medium">{stmtFileObjs.length} files selected
+                              {stmtFileObjs.every(f => f.name.toLowerCase().endsWith(".pdf")) && (
+                                <span className="ml-1 text-amber-600">(AI extraction — ~{Math.ceil(stmtFileObjs.length * 12 / 60)} min)</span>
+                              )}
+                            </p>
                           )}
-                        </p>
+                          {stmtFileObjs.length === 1 && (
+                            <p>{stmtFileObjs[0].name}
+                              {stmtFileObjs[0].name.toLowerCase().endsWith(".pdf") && (
+                                <span className="ml-1 text-amber-600">(AI extraction — may take ~30s)</span>
+                              )}
+                            </p>
+                          )}
+                        </div>
                       )}
                     </div>
                     {/* Bank book */}
@@ -4430,9 +4559,9 @@ export default function ClientDetailPage() {
                     </div>
                   </div>
 
-                  <button disabled={!bbFileObj || !stmtFileObj || bbUploading} onClick={() => submitBbFiles()}
+                  <button disabled={!bbFileObj || !stmtFileObjs.length || bbUploading} onClick={() => submitBbFiles()}
                     className="px-5 py-2 rounded-md bg-purple-600 text-white text-sm font-medium hover:bg-purple-700 disabled:opacity-50 inline-flex items-center gap-2">
-                    {bbUploading ? <><Loader2 size={14} className="animate-spin" /> Matching transactions…</> : `Analyse FY ${bbFinancialYear}`}
+                    {bbUploading ? <><Loader2 size={14} className="animate-spin" /> {bbUploadProgress || "Matching transactions…"}</> : `Analyse FY ${bbFinancialYear}`}
                   </button>
                 </div>
               )}
@@ -4495,7 +4624,7 @@ export default function ClientDetailPage() {
                     disabled={bbUploading}
                     onClick={() => submitBbFiles({ bb_date: bbColDate||undefined, bb_particulars: bbColParticulars||undefined, bb_debit: bbColDebit||undefined, bb_credit: bbColCredit||undefined, stmt_date: stmtColDate||undefined, stmt_narration: stmtColNarration||undefined, stmt_debit: stmtColDebit||undefined, stmt_credit: stmtColCredit||undefined })}
                     className="px-4 py-2 rounded-md bg-purple-600 text-white text-sm font-medium hover:bg-purple-700 disabled:opacity-50 inline-flex items-center gap-2">
-                    {bbUploading ? <><Loader2 size={14} className="animate-spin" /> Re-analysing…</> : "Analyse with these columns"}
+                    {bbUploading ? <><Loader2 size={14} className="animate-spin" /> {bbUploadProgress || "Re-analysing…"}</> : "Analyse with these columns"}
                   </button>
                 </div>
               )}
