@@ -62,6 +62,53 @@ interface ParsedTransaction {
   balance: number | null;
 }
 
+const MONTHS: Record<string, string> = {
+  jan:"01",feb:"02",mar:"03",apr:"04",may:"05",jun:"06",
+  jul:"07",aug:"08",sep:"09",oct:"10",nov:"11",dec:"12",
+};
+
+// Normalise any date string → YYYY-MM-DD. Returns null if truly unparseable.
+function normDateToIso(raw: string): string | null {
+  const s = raw.trim();
+  if (!s) return null;
+  // Already ISO
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
+  if (/^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4}$/.test(s)) {
+    const [dd, mm, yyyy] = s.split(/[\/\-\.]/);
+    return `${yyyy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
+  }
+  // DD/MM/YY — 00-30 → 2000s, 31-99 → 1900s
+  if (/^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2}$/.test(s)) {
+    const [dd, mm, yy] = s.split(/[\/\-\.]/);
+    const yr = parseInt(yy, 10);
+    const yyyy = yr <= 30 ? 2000 + yr : 1900 + yr;
+    return `${yyyy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
+  }
+  // YYYY/MM/DD
+  if (/^\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2}$/.test(s)) {
+    const [yyyy, mm, dd] = s.split(/[\/\-\.]/);
+    return `${yyyy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
+  }
+  // DD-Mon-YYYY or DD Mon YYYY (e.g. 30-Apr-2024)
+  const m4 = s.match(/^(\d{1,2})[\s\-\/]([A-Za-z]{3,9})[\s\-\/](\d{4})$/);
+  if (m4) {
+    const mm = MONTHS[m4[2].slice(0,3).toLowerCase()];
+    if (mm) return `${m4[3]}-${mm}-${m4[1].padStart(2,"0")}`;
+  }
+  // DD-Mon-YY (e.g. 30-Apr-24)
+  const m2 = s.match(/^(\d{1,2})[\s\-\/]([A-Za-z]{3,9})[\s\-\/](\d{2})$/);
+  if (m2) {
+    const mm = MONTHS[m2[2].slice(0,3).toLowerCase()];
+    if (mm) {
+      const yr = parseInt(m2[3], 10);
+      const yyyy = yr <= 30 ? 2000 + yr : 1900 + yr;
+      return `${yyyy}-${mm}-${m2[1].padStart(2,"0")}`;
+    }
+  }
+  return null;
+}
+
 function parseTsvLines(text: string): ParsedTransaction[] {
   const lines = text.trim().split("\n").filter((l) => l.trim());
   const transactions: ParsedTransaction[] = [];
@@ -70,9 +117,12 @@ function parseTsvLines(text: string): ParsedTransaction[] {
   for (const line of dataLines) {
     const parts = line.split("\t").map((p) => p.trim());
     if (parts.length < 5) continue;
-    const [date, narration, ref_number, debitStr, creditStr, balanceStr] = parts;
-    if (!date || !/\d/.test(date)) continue;
+    const [rawDate, narration, ref_number, debitStr, creditStr, balanceStr] = parts;
+    if (!rawDate || !/\d/.test(rawDate)) continue;
     if (!narration) continue;
+    // Normalise date at extraction time so cached data is always ISO format
+    const date = normDateToIso(rawDate);
+    if (!date) continue;
     let debitNum = debitStr ? parseFloat(debitStr.replace(/[₹,\s]/g, "")) || null : null;
     let creditNum = creditStr ? parseFloat(creditStr.replace(/[₹,\s]/g, "")) || null : null;
     const balanceNum = balanceStr ? parseFloat(balanceStr.replace(/[₹,\s]/g, "")) || null : null;
@@ -141,43 +191,6 @@ async function parsePDFStatement(fileBytes: ArrayBuffer): Promise<{ transactions
 
 // ── Save helper — shared by regular upload and save_rows mode ─────────────────
 
-const MONTHS: Record<string, string> = {
-  jan:"01",feb:"02",mar:"03",apr:"04",may:"05",jun:"06",
-  jul:"07",aug:"08",sep:"09",oct:"10",nov:"11",dec:"12",
-};
-
-function toISODate(d: string): string {
-  if (!d) return d;
-  const s = d.trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  if (/^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4}$/.test(s)) {
-    const [dd, mm, yyyy] = s.split(/[\/\-\.]/);
-    return `${yyyy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
-  }
-  // DD/MM/YY — treat 00-30 as 2000s, 31-99 as 1900s
-  if (/^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2}$/.test(s)) {
-    const [dd, mm, yy] = s.split(/[\/\-\.]/);
-    const yr = parseInt(yy, 10);
-    const yyyy = yr <= 30 ? 2000 + yr : 1900 + yr;
-    return `${yyyy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
-  }
-  if (/^\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2}$/.test(s)) {
-    const [yyyy, mm, dd] = s.split(/[\/\-\.]/);
-    return `${yyyy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
-  }
-  const monMatch = s.match(/^(\d{1,2})[\s\-\/]([A-Za-z]{3})[\s\-\/](\d{4})$/);
-  if (monMatch) {
-    const mm = MONTHS[monMatch[2].toLowerCase()];
-    if (mm) return `${monMatch[3]}-${mm}-${monMatch[1].padStart(2,"0")}`;
-  }
-  const longMonMatch = s.match(/^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/);
-  if (longMonMatch) {
-    const mm = MONTHS[longMonMatch[2].slice(0,3).toLowerCase()];
-    if (mm) return `${longMonMatch[3]}-${mm}-${longMonMatch[1].padStart(2,"0")}`;
-  }
-  return s;
-}
-
 function categoryFromLedger(ledgerName: string | null, narration: string, isDebit: boolean): { category: string; voucher_type: string } {
   if (ledgerName) {
     const meta = ledgerToMeta(ledgerName);
@@ -237,9 +250,11 @@ async function saveTransactionsToDb(
   const rowsToInsert: Record<string, unknown>[] = [];
   const allHashes: string[] = [];
   let minDate = "9999-12-31", maxDate = "0000-01-01";
+  let skippedDates = 0;
 
   for (const txn of transactions) {
-    const isoDate = toISODate(txn.date);
+    const isoDate = normDateToIso(txn.date);
+    if (!isoDate) { skippedDates++; continue; }
     const isDebit = !!txn.debit;
     const pattern = extractPattern(txn.narration ?? "");
     const ledger_name = clientRules.get(pattern) ?? industryRules.get(pattern) ?? suggestLedger(txn.narration ?? "") ?? null;
@@ -355,7 +370,7 @@ async function saveTransactionsToDb(
     ? `${newlyAdded} transactions imported (replaced ${alreadyPresent} previous rows for this period).`
     : `${newlyAdded} transactions imported successfully.`;
 
-  return NextResponse.json({ success: true, count: newlyAdded, already_present: alreadyPresent, total_in_file: total, message });
+  return NextResponse.json({ success: true, count: newlyAdded, already_present: alreadyPresent, total_in_file: total, skipped_dates: skippedDates, message });
 }
 
 // ── Route ─────────────────────────────────────────────────────────────────────
