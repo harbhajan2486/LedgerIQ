@@ -6,6 +6,28 @@ import { suggestLedger, extractPattern, ledgerToMeta } from "@/lib/ledger-rules"
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
+const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+async function callWithRetry(fn: () => Promise<Anthropic.Message>): Promise<Anthropic.Message> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err instanceof Anthropic.RateLimitError) {
+        const headers = err.headers as unknown as Record<string, string> | undefined;
+        const retryAfterHeader = headers?.["retry-after"];
+        const waitSec = retryAfterHeader
+          ? Math.ceil(parseFloat(retryAfterHeader))
+          : Math.min(60, 20 * (attempt + 1));
+        await sleep(waitSec * 1000);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("PDF extraction rate-limited after 5 retries. Please try again in a few minutes.");
+}
+
 interface ParsedTransaction {
   date: string;
   narration: string;
@@ -87,6 +109,7 @@ Rules:
   let rawSample = "";
 
   for (let pass = 0; pass < 4; pass++) {
+    if (pass > 0) await sleep(5000);
     const promptText = pass === 0
       ? TSV_PROMPT
       : `${TSV_PROMPT}
@@ -97,7 +120,7 @@ Narration starts with: ${afterCursor!.narration.slice(0, 60)}
 
 Skip all transactions up to and including that one. Continue from the next transaction onwards.`;
 
-    const response = await anthropic.messages.create({
+    const response = await callWithRetry(() => anthropic.messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 8192,
       messages: [{
@@ -107,7 +130,7 @@ Skip all transactions up to and including that one. Continue from the next trans
           { type: "text", text: promptText },
         ],
       }],
-    });
+    }));
 
     totalTokensIn += response.usage.input_tokens;
     totalTokensOut += response.usage.output_tokens;
