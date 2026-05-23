@@ -154,6 +154,13 @@ function toISODate(d: string): string {
     const [dd, mm, yyyy] = s.split(/[\/\-\.]/);
     return `${yyyy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
   }
+  // DD/MM/YY — treat 00-30 as 2000s, 31-99 as 1900s
+  if (/^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2}$/.test(s)) {
+    const [dd, mm, yy] = s.split(/[\/\-\.]/);
+    const yr = parseInt(yy, 10);
+    const yyyy = yr <= 30 ? 2000 + yr : 1900 + yr;
+    return `${yyyy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
+  }
   if (/^\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2}$/.test(s)) {
     const [yyyy, mm, dd] = s.split(/[\/\-\.]/);
     return `${yyyy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
