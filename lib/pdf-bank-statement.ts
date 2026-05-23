@@ -109,7 +109,7 @@ export async function extractStatementFromPdf(fileBytes: ArrayBuffer): Promise<P
   let totalIn = 0;
   let totalOut = 0;
 
-  for (let pass = 0; pass < 4; pass++) {
+  for (let pass = 0; pass < 2; pass++) {
     // Space passes apart to stay under the 50k tokens/min rate limit.
     // Each pass sends the full PDF (~12–15k input tokens), so back-to-back
     // passes quickly exhaust the per-minute budget.

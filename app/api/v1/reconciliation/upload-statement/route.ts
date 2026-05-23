@@ -108,7 +108,7 @@ Rules:
   let totalTokensOut = 0;
   let rawSample = "";
 
-  for (let pass = 0; pass < 4; pass++) {
+  for (let pass = 0; pass < 2; pass++) {
     if (pass > 0) await sleep(20000);
     const promptText = pass === 0
       ? TSV_PROMPT
