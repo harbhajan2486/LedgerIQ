@@ -1104,21 +1104,18 @@ export default function ClientDetailPage() {
 
   async function fetchSuggestions() {
     setSuggestLoading(true);
-    setSuggestOpen(true);
-    setSuggestions([]);
-    setSuggestionOverrides({});
     try {
       const res = await fetch(`/api/v1/clients/${clientId}/suggest-rules`, { method: "POST" });
       const d = await res.json();
       if (res.ok) {
-        setSuggestions(d.suggestions ?? []);
-        if ((d.suggestions ?? []).length === 0) {
-          toast.info(d.message ?? "No new suggestions — all transactions already mapped");
-          setSuggestOpen(false);
+        if (d.saved > 0) {
+          toast.success(`${d.saved} suggestion${d.saved !== 1 ? "s" : ""} saved — review in Pending Review below`);
+          loadMappingRules();
+        } else {
+          toast.info(d.message ?? "No new suggestions");
         }
       } else {
         toast.error(d.error ?? "Failed to get suggestions");
-        setSuggestOpen(false);
       }
     } finally {
       setSuggestLoading(false);
@@ -3957,77 +3954,67 @@ export default function ClientDetailPage() {
               </Card>
             </div>
 
-            {/* AI suggestion review panel */}
-            {suggestOpen && suggestions.length > 0 && (
-              <Card className="mb-3 border-purple-200">
-                <CardHeader className="pb-2 pt-3">
-                  <CardTitle className="text-sm font-medium text-purple-800 flex items-center justify-between">
-                    <span>✦ AI Suggestions — {suggestions.length} pattern{suggestions.length !== 1 ? "s" : ""} found</span>
-                    <button onClick={() => setSuggestOpen(false)} className="text-xs text-gray-400 hover:text-gray-600 font-normal">Dismiss</button>
-                  </CardTitle>
-                  <p className="text-xs text-gray-500">Review each suggestion. Edit the ledger if needed, then Accept. Skip anything you&apos;re unsure about.</p>
-                </CardHeader>
-                <CardContent className="p-0">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="border-b bg-purple-50 text-gray-500">
-                        <th className="text-left px-5 py-2 font-medium">Pattern</th>
-                        <th className="text-left px-4 py-2 font-medium">Example narration</th>
-                        <th className="text-left px-4 py-2 font-medium">Suggested ledger</th>
-                        <th className="text-left px-4 py-2 font-medium">Reason</th>
-                        <th className="text-center px-4 py-2 font-medium">Confidence</th>
-                        <th className="px-4 py-2" />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {suggestions.map(s => {
-                        const ledger = suggestionOverrides[s.pattern] ?? s.suggested_ledger;
-                        return (
-                          <tr key={s.pattern} className="border-b last:border-0 hover:bg-gray-50/50">
-                            <td className="px-5 py-2 font-mono text-gray-700">{s.pattern}</td>
-                            <td className="px-4 py-2 text-gray-500 max-w-[180px] truncate" title={s.example_narration}>{s.example_narration}</td>
+            {/* Persistent Pending Review — AI suggestions + ambiguous bank book matches */}
+            {(() => {
+              const pending = clientMappingRules.filter(r => !r.confirmed && (r.source === "ai_suggest" || r.source === "pending_bb"));
+              if (!pending.length) return null;
+              return (
+                <Card className="mb-3 border-purple-200 bg-purple-50/30">
+                  <CardHeader className="pb-2 pt-3">
+                    <CardTitle className="text-sm font-medium text-purple-800">
+                      ✦ Pending Review — {pending.length} rule{pending.length !== 1 ? "s" : ""} waiting
+                    </CardTitle>
+                    <p className="text-xs text-gray-500">Confirm to activate, or reject to remove. These persist until actioned.</p>
+                  </CardHeader>
+                  <CardContent className="p-0">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b bg-purple-100/60 text-gray-500">
+                          <th className="text-left px-4 py-2 font-medium">Pattern</th>
+                          <th className="text-left px-4 py-2 font-medium">Suggested ledger</th>
+                          <th className="text-left px-4 py-2 font-medium">Source</th>
+                          <th className="px-4 py-2" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pending.sort((a, b) => a.pattern.localeCompare(b.pattern)).map(r => (
+                          <tr key={r.id} className="border-b last:border-0 hover:bg-purple-50/60">
+                            <td className="px-4 py-2 font-mono text-gray-700">{r.pattern}</td>
+                            <td className="px-4 py-2 text-gray-800">{r.ledger_name}</td>
                             <td className="px-4 py-2">
-                              <input
-                                value={ledger}
-                                onChange={e => setSuggestionOverrides(prev => ({ ...prev, [s.pattern]: e.target.value }))}
-                                className="w-full h-7 px-2 rounded border border-gray-200 text-xs focus:outline-none focus:ring-1 focus:ring-purple-400"
-                              />
-                            </td>
-                            <td className="px-4 py-2 text-gray-500 max-w-[200px] italic" title={s.reason}>{s.reason || "—"}</td>
-                            <td className="px-4 py-2 text-center">
-                              <span className={`text-xs font-medium ${s.confidence >= 80 ? "text-green-600" : s.confidence >= 60 ? "text-amber-600" : "text-gray-400"}`}>
-                                {s.confidence}%
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${r.source === "ai_suggest" ? "bg-purple-100 text-purple-700" : "bg-amber-100 text-amber-700"}`}>
+                                {r.source === "ai_suggest" ? "AI Suggest" : "Bank Book"}
                               </span>
                             </td>
                             <td className="px-4 py-2 text-right">
                               <div className="flex items-center justify-end gap-1.5">
                                 <button
-                                  onClick={() => acceptSuggestion(s.pattern, ledger)}
-                                  disabled={acceptingPatterns.has(s.pattern) || !ledger}
-                                  className="text-xs px-2.5 py-1 rounded bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50"
+                                  onClick={async () => { await toggleRuleConfirmed(r.id, false); }}
+                                  className="text-xs px-2.5 py-1 rounded bg-purple-600 text-white hover:bg-purple-700"
                                 >
-                                  {acceptingPatterns.has(s.pattern) ? <Loader2 size={10} className="animate-spin" /> : "Accept"}
+                                  Confirm
                                 </button>
                                 <button
-                                  onClick={() => setSuggestions(prev => prev.filter(x => x.pattern !== s.pattern))}
-                                  className="text-xs px-2 py-1 rounded border border-gray-200 text-gray-400 hover:text-gray-600"
+                                  onClick={() => deleteMappingRule(r.id)}
+                                  className="text-xs px-2 py-1 rounded border border-gray-200 text-gray-400 hover:text-red-500"
                                 >
-                                  Skip
+                                  Reject
                                 </button>
                               </div>
                             </td>
                           </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </CardContent>
-              </Card>
-            )}
+                        ))}
+                      </tbody>
+                    </table>
+                  </CardContent>
+                </Card>
+              );
+            })()}
 
             {/* Rules columns */}
             {(() => {
-              const draftRules  = clientMappingRules.filter(r => !r.confirmed);
+              const isPending = (r: MappingRule) => !r.confirmed && (r.source === "ai_suggest" || r.source === "pending_bb");
+              const draftRules  = clientMappingRules.filter(r => !r.confirmed && !isPending(r));
               const activeRules = clientMappingRules.filter(r => r.confirmed);
               const q = ruleSearch.toLowerCase();
               const filterRule = (r: MappingRule) =>

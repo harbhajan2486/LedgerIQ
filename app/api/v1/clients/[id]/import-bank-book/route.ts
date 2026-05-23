@@ -6,9 +6,32 @@ import {
   type ColumnMapping,
   type BankBookRow,
 } from "@/lib/bank-book-parser";
-import { parseStatementCsv, type StatementColumnMapping } from "@/lib/bank-statement-parser";
-import { matchBankBookToStatement, buildRuleCandidates } from "@/lib/bank-book-matcher";
+import { parseStatementCsv, type StatementColumnMapping, type StatementRow } from "@/lib/bank-statement-parser";
+import { matchBankBookToStatement, buildRuleCandidates, type AmbiguousPair } from "@/lib/bank-book-matcher";
 import { extractStatementFromPdf } from "@/lib/pdf-bank-statement";
+import { extractPattern } from "@/lib/ledger-rules";
+
+// Save ambiguous bank book matches as pending draft rules so users can action them later
+// from the Mapping Rules tab (source='pending_bb', confirmed=false).
+// Uses ignoreDuplicates so existing confirmed rules are never overwritten.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function savePendingBbRules(ambiguous: AmbiguousPair[], supabase: any, tenantId: string, clientId: string) {
+  if (!ambiguous.length) return;
+  const rows = ambiguous
+    .map(a => ({
+      tenant_id: tenantId,
+      client_id: clientId,
+      pattern: extractPattern(a.bbRow.particulars),
+      ledger_name: a.bbRow.particulars,
+      match_count: 0,
+      confirmed: false,
+      source: "pending_bb",
+    }))
+    .filter(r => r.pattern.length >= 3 && r.ledger_name.length >= 2);
+  if (!rows.length) return;
+  await supabase.from("ledger_mapping_rules")
+    .upsert(rows, { onConflict: "tenant_id,client_id,pattern", ignoreDuplicates: true });
+}
 
 // POST /api/v1/clients/[id]/import-bank-book
 //
@@ -126,7 +149,12 @@ function reparseWithOverrides(
     const parsedDate = parseDateInline(row[dateIdx]);
     if (!parsedDate) continue;
 
-    const particulars = String(row[particIdx] ?? "").trim();
+    let particulars = String(row[particIdx] ?? "").trim();
+    if (/^(to|by)$/i.test(particulars)) {
+      particulars = String(row[particIdx + 1] ?? "").trim();
+    } else {
+      particulars = particulars.replace(/^(to|by)\s+/i, "").trim();
+    }
     if (!particulars || SKIP.test(particulars)) continue;
 
     const debit = debitIdx >= 0 ? parseAmountInline(row[debitIdx]) : null;
@@ -299,15 +327,89 @@ export async function POST(
 
     // ── Mode A: file upload (multipart/form-data) ──────────────────────────
     const formData = await request.formData();
+    const mode = (formData.get("mode") as string | null) ?? "";
+
+    // ── Mode: extract_only — extract a single PDF, return rows (no matching) ──
+    // Used by the client when processing split PDF chunks one at a time.
+    if (mode === "extract_only") {
+      const stmtFile = formData.get("statement_file") as File | null;
+      if (!stmtFile) return NextResponse.json({ error: "statement_file required" }, { status: 400 });
+      const buf = await stmtFile.arrayBuffer();
+      try {
+        const pdfResult = await extractStatementFromPdf(buf);
+        const costUsd = (pdfResult.tokensIn / 1_000_000) * 0.80 + (pdfResult.tokensOut / 1_000_000) * 4.00;
+        supabase.from("ai_usage").insert({ tenant_id: tenantId, model: "claude-haiku-4-5-20251001", tokens_in: pdfResult.tokensIn, tokens_out: pdfResult.tokensOut, cost_usd: costUsd }).then();
+        return NextResponse.json({ rows: pdfResult.rows });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return NextResponse.json({ error: `PDF extraction failed: ${msg}` }, { status: 422 });
+      }
+    }
+
+    // ── Mode: match_with_rows — accept pre-extracted rows + bank book, return matches ──
+    // Used after all PDF chunks have been extracted client-side.
+    if (mode === "match_with_rows") {
+      const bbFile = formData.get("bankbook_file") as File | null;
+      const stmtRowsJson = formData.get("stmt_rows_json") as string | null;
+      if (!bbFile) return NextResponse.json({ error: "bankbook_file required" }, { status: 400 });
+      if (!stmtRowsJson) return NextResponse.json({ error: "stmt_rows_json required" }, { status: 400 });
+
+      const bbBuffer = await bbFile.arrayBuffer();
+      let bbResult = parseTallyBankBook(bbBuffer, bbFile.name);
+
+      const bbColDate = (formData.get("bb_column_date") as string | null)?.trim() || null;
+      const bbColParticulars = (formData.get("bb_column_particulars") as string | null)?.trim() || null;
+      const bbColDebit = (formData.get("bb_column_debit") as string | null)?.trim() || null;
+      const bbColCredit = (formData.get("bb_column_credit") as string | null)?.trim() || null;
+      if (bbColDate || bbColParticulars || bbColDebit || bbColCredit) {
+        const overrideMapping: ColumnMapping = {
+          date: bbColDate ?? bbResult.columnMapping.date,
+          particulars: bbColParticulars ?? bbResult.columnMapping.particulars,
+          debit: bbColDebit ?? bbResult.columnMapping.debit,
+          credit: bbColCredit ?? bbResult.columnMapping.credit,
+          voucher_type: bbResult.columnMapping.voucher_type,
+        };
+        bbResult = { rows: reparseWithOverrides(bbBuffer, bbFile.name, overrideMapping, bbResult), columnMapping: overrideMapping, preview: bbResult.preview, detectionConfident: true, rawHeaders: bbResult.rawHeaders };
+      }
+
+      if (!bbResult.detectionConfident) {
+        return NextResponse.json({
+          needs_column_mapping: true,
+          bankbook: { raw_headers: bbResult.rawHeaders, preview: bbResult.preview, detection_confident: false },
+          statement: { raw_headers: [], preview: [], detection_confident: true },
+        });
+      }
+
+      let stmtRows: StatementRow[];
+      try { stmtRows = JSON.parse(stmtRowsJson); } catch {
+        return NextResponse.json({ error: "Invalid stmt_rows_json" }, { status: 400 });
+      }
+
+      stmtRows.sort((a, b) => a.date.localeCompare(b.date));
+      const matchResult = matchBankBookToStatement(bbResult.rows, stmtRows);
+      const ruleCandidates = buildRuleCandidates(matchResult.matched);
+      savePendingBbRules(matchResult.ambiguous, supabase, tenantId, clientId).catch(() => {});
+      return NextResponse.json({
+        needs_column_mapping: false,
+        total_bb_rows: bbResult.rows.length,
+        total_stmt_rows: stmtRows.length,
+        matched_count: matchResult.matched.length,
+        ambiguous_count: matchResult.ambiguous.length,
+        unmatched_count: matchResult.unmatchedBb.length,
+        rule_candidates: ruleCandidates,
+        ambiguous: matchResult.ambiguous.map(a => ({ bb_row: a.bbRow, candidates: a.candidates })),
+        unmatched_bb: matchResult.unmatchedBb.slice(0, 20),
+      });
+    }
 
     const bbFile = formData.get("bankbook_file") as File | null;
-    const stmtFile = formData.get("statement_file") as File | null;
+    // Accept multiple statement files (for split PDFs) via getAll
+    const stmtFiles = formData.getAll("statement_file") as File[];
 
     if (!bbFile) return NextResponse.json({ error: "bankbook_file is required" }, { status: 400 });
-    if (!stmtFile) return NextResponse.json({ error: "statement_file is required" }, { status: 400 });
+    if (!stmtFiles.length) return NextResponse.json({ error: "statement_file is required" }, { status: 400 });
 
     const bbBuffer = await bbFile.arrayBuffer();
-    const stmtBuffer = await stmtFile.arrayBuffer();
 
     // ── Parse bank book ──────────────────────────────────────────────────
     let bbResult = parseTallyBankBook(bbBuffer, bbFile.name);
@@ -335,52 +437,71 @@ export async function POST(
       };
     }
 
-    // ── Parse bank statement (CSV/Excel/PDF) ─────────────────────────────
-    const stmtNameLower = stmtFile.name.toLowerCase();
-    const isPdf = stmtNameLower.endsWith(".pdf");
+    // ── Parse bank statement(s) ──────────────────────────────────────────
+    // If all files are PDFs: extract each via Claude, merge rows, skip column-mapping step.
+    // If any file is CSV/Excel: use the first non-PDF file for the column-mapping flow (single file).
+    const allPdfs = stmtFiles.every(f => f.name.toLowerCase().endsWith(".pdf"));
 
-    // PDF path: use Claude Haiku vision extraction — returns StatementRow[] directly
-    // (no column mapping needed, no confidence flag)
-    if (isPdf) {
-      let pdfRows;
-      try {
-        const pdfResult = await extractStatementFromPdf(stmtBuffer);
-        pdfRows = pdfResult.rows;
-        // Log AI cost in background
-        const costUsd = (pdfResult.tokensIn / 1_000_000) * 0.80 + (pdfResult.tokensOut / 1_000_000) * 4.00;
-        supabase.from("ai_usage").insert({
-          tenant_id: tenantId,
-          model: "claude-haiku-4-5-20251001",
-          tokens_in: pdfResult.tokensIn,
-          tokens_out: pdfResult.tokensOut,
-          cost_usd: costUsd,
-        }).then();
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return NextResponse.json({ error: `PDF extraction failed: ${msg}` }, { status: 422 });
+    if (allPdfs) {
+      // Process each PDF chunk sequentially and merge all extracted rows
+      const allPdfRows: StatementRow[] = [];
+      let totalTokensIn = 0;
+      let totalTokensOut = 0;
+
+      for (let i = 0; i < stmtFiles.length; i++) {
+        const file = stmtFiles[i];
+        const buf = await file.arrayBuffer();
+        try {
+          const pdfResult = await extractStatementFromPdf(buf);
+          allPdfRows.push(...pdfResult.rows);
+          totalTokensIn += pdfResult.tokensIn;
+          totalTokensOut += pdfResult.tokensOut;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return NextResponse.json(
+            { error: `PDF extraction failed on file ${i + 1} of ${stmtFiles.length} (${file.name}): ${msg}` },
+            { status: 422 }
+          );
+        }
       }
 
-      if (pdfRows.length === 0) {
-        return NextResponse.json({ error: "Could not extract any transactions from the PDF. Try a CSV or Excel export instead." }, { status: 422 });
+      // Log total AI cost in background
+      const costUsd = (totalTokensIn / 1_000_000) * 0.80 + (totalTokensOut / 1_000_000) * 4.00;
+      supabase.from("ai_usage").insert({
+        tenant_id: tenantId,
+        model: "claude-haiku-4-5-20251001",
+        tokens_in: totalTokensIn,
+        tokens_out: totalTokensOut,
+        cost_usd: costUsd,
+      }).then();
+
+      if (allPdfRows.length === 0) {
+        return NextResponse.json({ error: "Could not extract any transactions from the PDF(s). Try a CSV or Excel export instead." }, { status: 422 });
       }
 
-      // Skip column-mapping step — go straight to match
-      const matchResult = matchBankBookToStatement(bbResult.rows, pdfRows);
+      // Sort merged rows by date so matching is deterministic
+      allPdfRows.sort((a, b) => a.date.localeCompare(b.date));
+
+      const matchResult = matchBankBookToStatement(bbResult.rows, allPdfRows);
       const ruleCandidates = buildRuleCandidates(matchResult.matched);
+      savePendingBbRules(matchResult.ambiguous, supabase, tenantId, clientId).catch(() => {});
       return NextResponse.json({
         needs_column_mapping: false,
         total_bb_rows: bbResult.rows.length,
-        total_stmt_rows: pdfRows.length,
+        total_stmt_rows: allPdfRows.length,
+        pdf_files_processed: stmtFiles.length,
         matched_count: matchResult.matched.length,
         ambiguous_count: matchResult.ambiguous.length,
         unmatched_count: matchResult.unmatchedBb.length,
         rule_candidates: ruleCandidates,
-        ambiguous: matchResult.ambiguous,
+        ambiguous: matchResult.ambiguous.map(a => ({ bb_row: a.bbRow, candidates: a.candidates })),
         unmatched_bb: matchResult.unmatchedBb.slice(0, 20),
       });
     }
 
-    // CSV / Excel path
+    // CSV / Excel path — use first file only (column-mapping flow unchanged)
+    const stmtFile = stmtFiles[0];
+    const stmtBuffer = await stmtFile.arrayBuffer();
     let stmtResult = parseStatementCsv(stmtBuffer, stmtFile.name);
 
     const stmtColDate = (formData.get("stmt_column_date") as string | null)?.trim() || null;
@@ -427,6 +548,7 @@ export async function POST(
     // ── Match and build rule candidates ───────────────────────────────────
     const matchResult = matchBankBookToStatement(bbResult.rows, stmtResult.rows);
     const ruleCandidates = buildRuleCandidates(matchResult.matched);
+    savePendingBbRules(matchResult.ambiguous, supabase, tenantId, clientId).catch(() => {});
 
     return NextResponse.json({
       needs_column_mapping: false,
@@ -436,7 +558,7 @@ export async function POST(
       ambiguous_count: matchResult.ambiguous.length,
       unmatched_count: matchResult.unmatchedBb.length,
       rule_candidates: ruleCandidates,
-      ambiguous: matchResult.ambiguous,
+      ambiguous: matchResult.ambiguous.map(a => ({ bb_row: a.bbRow, candidates: a.candidates })),
       unmatched_bb: matchResult.unmatchedBb.slice(0, 20),
     });
   } catch (err) {

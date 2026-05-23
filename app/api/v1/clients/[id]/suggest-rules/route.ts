@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import Anthropic from "@anthropic-ai/sdk";
-import { extractPattern, suggestLedger, COMMON_LEDGERS } from "@/lib/ledger-rules";
+import { extractPattern, COMMON_LEDGERS } from "@/lib/ledger-rules";
 
 // POST /api/v1/clients/[id]/suggest-rules
-// AI bulk suggestion: scan unrecognised bank narrations and suggest ledger mappings
-// Only processes narrations where ALL 3 rule layers returned no match (suggested_ledger IS NULL)
+// AI bulk suggestion: scan unrecognised bank narrations → suggest ledger mappings → save as pending rules
+// Saves to ledger_mapping_rules (source='ai_suggest', confirmed=false) so suggestions persist across sessions.
 
 export async function POST(
   _request: NextRequest,
@@ -22,13 +22,11 @@ export async function POST(
 
     const { id: clientId } = await params;
 
-    // Verify client belongs to this tenant
     const { data: clientRow } = await supabase
       .from("clients").select("id, client_name, industry_name")
       .eq("id", clientId).eq("tenant_id", profile.tenant_id).single();
     if (!clientRow) return NextResponse.json({ error: "Client not found" }, { status: 404 });
 
-    // Check rule_suggestion_enabled from ai_settings
     const { data: aiSettings } = await supabase
       .from("ai_settings").select("config").eq("id", "global").maybeSingle();
     const aiConfig = aiSettings?.config as Record<string, unknown> | null;
@@ -38,20 +36,22 @@ export async function POST(
     const suggestionModel = (aiConfig?.rule_suggestion_model as string | undefined) ?? "claude-haiku-4-5-20251001";
     const maxPatterns = (aiConfig?.rule_suggestion_max_patterns as number | undefined) ?? 100;
 
-    // Fetch all transactions (debit + credit) with no ledger assigned
+    // Fetch unmapped transactions (debit + credit)
     const { data: txns } = await supabase
       .from("bank_transactions")
-      .select("narration, debit_amount, credit_amount")
+      .select("narration")
       .eq("tenant_id", profile.tenant_id)
       .eq("client_id", clientId)
       .is("ledger_name", null)
       .not("narration", "is", null)
       .limit(500);
 
-    if (!txns?.length) return NextResponse.json({ suggestions: [], message: "No unmapped transactions found for this client. Transactions may have been uploaded without a client selected, or all are already mapped." });
+    if (!txns?.length) {
+      return NextResponse.json({ saved: 0, already_pending: 0, message: "No unmapped transactions found. Transactions may have been uploaded without a client selected, or all are already mapped." });
+    }
 
-    // Extract + deduplicate patterns
-    const patternMap = new Map<string, string>(); // pattern → example narration
+    // Build pattern → example narration map
+    const patternMap = new Map<string, string>();
     for (const txn of txns) {
       if (!txn.narration) continue;
       const pat = extractPattern(txn.narration);
@@ -59,60 +59,93 @@ export async function POST(
       if (!patternMap.has(pat)) patternMap.set(pat, txn.narration);
     }
 
-    if (patternMap.size === 0) return NextResponse.json({ suggestions: [], message: `Found ${txns.length} unmapped transactions but all narration patterns were too short to classify.` });
+    if (patternMap.size === 0) {
+      return NextResponse.json({ saved: 0, already_pending: 0, message: `Found ${txns.length} unmapped transactions but narration patterns were too short to classify.` });
+    }
 
-    // Get existing client rules to pass as context (avoid re-suggesting what's already mapped)
-    const { data: existingRules } = await supabase
+    // Fetch already-pending ai_suggest rules — skip re-generating these
+    const { data: pendingAi } = await supabase
+      .from("ledger_mapping_rules")
+      .select("pattern")
+      .eq("tenant_id", profile.tenant_id)
+      .eq("client_id", clientId)
+      .eq("source", "ai_suggest")
+      .eq("confirmed", false);
+    const pendingPatterns = new Set((pendingAi ?? []).map((r: { pattern: string }) => r.pattern));
+
+    // Fetch existing confirmed rules — skip suggesting these too
+    const { data: confirmedRules } = await supabase
       .from("ledger_mapping_rules")
       .select("pattern, ledger_name")
       .eq("tenant_id", profile.tenant_id)
       .eq("client_id", clientId)
-      .eq("confirmed", true)
-      .limit(50);
+      .eq("confirmed", true);
+    const confirmedPatterns = new Set((confirmedRules ?? []).map((r: { pattern: string }) => r.pattern));
 
-    // Fetch trial balance ledgers for this client (prefer these over generic names)
-    const { data: clientLedgers } = await supabase
-      .from("ledger_masters")
-      .select("ledger_name, ledger_type")
+    const patternsToSend = [...patternMap.entries()]
+      .filter(([p]) => !pendingPatterns.has(p) && !confirmedPatterns.has(p))
+      .slice(0, maxPatterns);
+
+    if (patternsToSend.length === 0) {
+      const msg = pendingPatterns.size > 0
+        ? `${pendingPatterns.size} suggestion${pendingPatterns.size !== 1 ? "s" : ""} already waiting in Pending Review — check your Mapping Rules tab`
+        : "All patterns already have rules — nothing new to suggest";
+      return NextResponse.json({ saved: 0, already_pending: pendingPatterns.size, message: msg });
+    }
+
+    // Fetch already-mapped narrations as examples → gives Claude context on this client's mapping style
+    const { data: mappedExamples } = await supabase
+      .from("bank_transactions")
+      .select("narration, ledger_name")
       .eq("tenant_id", profile.tenant_id)
       .eq("client_id", clientId)
-      .in("ledger_type", ["expense", "liability", "asset", "bank", "income"]);
+      .not("ledger_name", "is", null)
+      .limit(80);
 
-    const clientLedgerNames = (clientLedgers ?? []).map(l => l.ledger_name);
+    const seenNarrations = new Set<string>();
+    const exampleLines: string[] = [];
+    for (const ex of mappedExamples ?? []) {
+      if (!ex.narration || !ex.ledger_name || seenNarrations.has(ex.narration)) continue;
+      seenNarrations.add(ex.narration);
+      exampleLines.push(`  "${ex.narration}" → ${ex.ledger_name}`);
+      if (exampleLines.length >= 30) break;
+    }
 
-    // Vocabulary: client trial balance ledgers first (most specific), then generic fallback
+    // Fetch trial balance ledgers (preferred vocabulary)
+    const { data: clientLedgers } = await supabase
+      .from("ledger_masters")
+      .select("ledger_name")
+      .eq("tenant_id", profile.tenant_id)
+      .eq("client_id", clientId);
+
+    const clientLedgerNames = (clientLedgers ?? []).map((l: { ledger_name: string }) => l.ledger_name);
+    const fallbackLedgers = COMMON_LEDGERS.map(l => l.ledger_name).filter(n => !clientLedgerNames.includes(n));
     const ledgerVocabulary = clientLedgerNames.length > 0
-      ? [...clientLedgerNames, ...COMMON_LEDGERS.map(l => l.ledger_name).filter(n => !clientLedgerNames.includes(n))]
+      ? [...clientLedgerNames, ...fallbackLedgers]
       : COMMON_LEDGERS.map(l => l.ledger_name);
 
-    // Limit patterns to maxPatterns
-    const patternsToSend = [...patternMap.entries()].slice(0, maxPatterns);
+    const prompt = `You are an expert Indian business accountant. For each bank narration pattern, suggest the most appropriate ledger name.
 
-    const prompt = `You are an expert Indian business accountant. For each bank narration pattern below, suggest the most appropriate accounting ledger name.
+CLIENT: ${clientRow.client_name}${clientRow.industry_name ? ` (${clientRow.industry_name})` : ""}
 
-CONTEXT:
-- Client: ${clientRow.client_name}${clientRow.industry_name ? ` (${clientRow.industry_name})` : ""}
-- These are debit and credit transactions from an Indian business bank account
-- PREFER ledger names from the client's own chart of accounts (listed first below) over generic names
-- Patterns are extracted narration keywords (payment prefixes and reference numbers already removed)
+HOW THIS CLIENT ALREADY MAPS TRANSACTIONS (use as your style guide — prefer the same ledger names):
+${exampleLines.length > 0 ? exampleLines.join("\n") : "  (no existing mappings yet — use your best judgement)"}
 
-ALLOWED LEDGER NAMES (use these exact names, or null if truly unsure):
-${clientLedgerNames.length > 0 ? `[Client's own Tally ledgers — prefer these]\n${clientLedgerNames.map(l => `  - ${l}`).join("\n")}\n\n[Generic fallback ledgers — use only if no client ledger fits]\n${COMMON_LEDGERS.map(l => l.ledger_name).filter(n => !clientLedgerNames.includes(n)).map(l => `  - ${l}`).join("\n")}` : ledgerVocabulary.map(l => `  - ${l}`).join("\n")}
+ALLOWED LEDGER NAMES (use exact names from this list, prefer client ledgers over generic ones):
+${clientLedgerNames.length > 0
+  ? `[Client's Tally ledgers]\n${clientLedgerNames.map(l => `  - ${l}`).join("\n")}\n\n[Generic fallback]\n${fallbackLedgers.slice(0, 40).map(l => `  - ${l}`).join("\n")}`
+  : ledgerVocabulary.map(l => `  - ${l}`).join("\n")}
 
-EXISTING RULES FOR THIS CLIENT (do NOT re-suggest these):
-${(existingRules ?? []).map(r => `  ${r.pattern} → ${r.ledger_name}`).join("\n") || "  (none yet)"}
-
-PATTERNS TO CLASSIFY (JSON array of {pattern, example} objects):
+PATTERNS TO CLASSIFY:
 ${JSON.stringify(patternsToSend.map(([pattern, example]) => ({ pattern, example })), null, 2)}
 
 RULES:
-1. Return ONLY a JSON array, no markdown, no explanation
+1. Return ONLY a JSON array — no markdown, no explanation
 2. Each item: {"pattern": "...", "suggested_ledger": "...", "confidence": 0.0-1.0, "reason": "one short sentence"}
-3. Use confidence < 0.6 for ambiguous patterns (person names, generic codes)
-4. If you cannot determine a ledger confidently, set suggested_ledger to null
-5. Common mappings: salary/wages→Salary Expenses, rent→Rent, jio/airtel→Telephone/Internet, epfo→PF/ESI, electricity boards→Electricity Expenses
-6. Person name payments are often salary or professional fees — use confidence 0.5 unless context is clear
-7. reason should be a short explanation e.g. "Person name + SALAR suffix suggests salary payment" or "Jio is a telecom provider"`;
+3. suggested_ledger must be exactly one of the allowed ledger names, or null if truly unsure
+4. Use confidence < 0.6 for ambiguous patterns (person names, generic reference codes)
+5. Person names without context → professional fees or salary at 0.5 confidence
+6. Use mapped examples above to match the client's naming style exactly`;
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const response = await anthropic.messages.create({
@@ -122,35 +155,55 @@ RULES:
       messages: [{ role: "user", content: prompt }],
     });
 
+    // Track AI usage
+    supabase.from("ai_usage").insert({
+      tenant_id: profile.tenant_id,
+      model: suggestionModel,
+      tokens_in: response.usage.input_tokens,
+      tokens_out: response.usage.output_tokens,
+      cost_usd: (response.usage.input_tokens / 1_000_000) * 0.80 + (response.usage.output_tokens / 1_000_000) * 4.00,
+    }).then();
+
     const raw = response.content[0].type === "text" ? response.content[0].text.trim() : "[]";
 
-    // Parse AI response — extract JSON array even if wrapped in markdown or prose
     let aiSuggestions: Array<{ pattern: string; suggested_ledger: string | null; confidence: number; reason?: string }> = [];
     try {
-      // Find the first '[' and last ']' — extract that substring to handle markdown/prose wrapping
       const start = raw.indexOf("[");
       const end = raw.lastIndexOf("]");
       const jsonStr = start !== -1 && end !== -1 ? raw.slice(start, end + 1) : raw;
-      const parsed = JSON.parse(jsonStr);
-      aiSuggestions = Array.isArray(parsed) ? parsed : [];
+      aiSuggestions = Array.isArray(JSON.parse(jsonStr)) ? JSON.parse(jsonStr) : [];
     } catch {
-      // Return empty suggestions rather than an error — don't block the UI
-      return NextResponse.json({ suggestions: [], total_patterns: patternMap.size });
+      return NextResponse.json({ saved: 0, already_pending: pendingPatterns.size, message: "AI returned an unexpected response — try again" });
     }
 
-    // Filter: only return suggestions where AI has a ledger, confidence >= 0.5, and ledger is in vocabulary
     const ledgerSet = new Set(ledgerVocabulary);
-    const suggestions = aiSuggestions
-      .filter(s => s.suggested_ledger && ledgerSet.has(s.suggested_ledger) && s.confidence >= 0.5)
-      .map(s => ({
-        pattern: s.pattern,
-        example_narration: patternMap.get(s.pattern) ?? s.pattern,
-        suggested_ledger: s.suggested_ledger!,
-        confidence: Math.round(s.confidence * 100),
-        reason: s.reason ?? "",
-      }));
+    const valid = aiSuggestions.filter(s => s.suggested_ledger && ledgerSet.has(s.suggested_ledger) && s.confidence >= 0.5);
 
-    return NextResponse.json({ suggestions, total_patterns: patternMap.size });
+    if (valid.length === 0) {
+      return NextResponse.json({ saved: 0, already_pending: pendingPatterns.size, message: "AI could not confidently map any patterns — try uploading a Trial Balance first so it has your ledger names" });
+    }
+
+    // Save to ledger_mapping_rules as pending (confirmed=false, source='ai_suggest')
+    // ignoreDuplicates=true so we never overwrite an existing confirmed rule
+    const toInsert = valid.map(s => ({
+      tenant_id: profile.tenant_id,
+      client_id: clientId,
+      pattern: s.pattern,
+      ledger_name: s.suggested_ledger!,
+      match_count: 0,
+      confirmed: false,
+      source: "ai_suggest",
+    }));
+
+    await supabase.from("ledger_mapping_rules")
+      .upsert(toInsert, { onConflict: "tenant_id,client_id,pattern", ignoreDuplicates: true });
+
+    return NextResponse.json({
+      saved: valid.length,
+      already_pending: pendingPatterns.size,
+      total_patterns: patternMap.size,
+      message: `${valid.length} suggestion${valid.length !== 1 ? "s" : ""} saved to Pending Review in the Mapping Rules tab`,
+    });
   } catch (err) {
     console.error("[suggest-rules POST]", err);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
