@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import Anthropic from "@anthropic-ai/sdk";
-import { extractPattern, COMMON_LEDGERS } from "@/lib/ledger-rules";
+import { extractPattern } from "@/lib/ledger-rules";
 
 // POST /api/v1/clients/[id]/suggest-rules
 // AI bulk suggestion: scan unrecognised bank narrations → suggest ledger mappings → save as pending rules
@@ -111,7 +111,7 @@ export async function POST(
       if (exampleLines.length >= 30) break;
     }
 
-    // Fetch trial balance ledgers (preferred vocabulary)
+    // Fetch trial balance ledgers (preferred vocabulary — exact Tally names)
     const { data: clientLedgers } = await supabase
       .from("ledger_masters")
       .select("ledger_name")
@@ -119,22 +119,24 @@ export async function POST(
       .eq("client_id", clientId);
 
     const clientLedgerNames = (clientLedgers ?? []).map((l: { ledger_name: string }) => l.ledger_name);
-    const fallbackLedgers = COMMON_LEDGERS.map(l => l.ledger_name).filter(n => !clientLedgerNames.includes(n));
-    const ledgerVocabulary = clientLedgerNames.length > 0
-      ? [...clientLedgerNames, ...fallbackLedgers]
-      : COMMON_LEDGERS.map(l => l.ledger_name);
+    const hasClientLedgers = clientLedgerNames.length > 0;
 
-    const prompt = `You are an expert Indian business accountant. For each bank narration pattern, suggest the most appropriate ledger name.
+    // Build prompt differently depending on whether we have a trial balance
+    const ledgerSection = hasClientLedgers
+      ? `USE THESE EXACT LEDGER NAMES (from client's Tally chart of accounts):
+${clientLedgerNames.map(l => `  - ${l}`).join("\n")}
+
+If no client ledger fits, fall back to standard names like: Salary Expenses, Rent, Bank Charges, Insurance Expenses, Professional Fees, Travelling Expenses, Miscellaneous Expenses, Sales Account, Other Income, Interest Income.`
+      : `Suggest standard Indian accounting ledger names (Tally-style). Examples: Salary Expenses, Rent, Bank Charges, Electricity Expenses, Insurance Expenses, Professional Fees, Petrol / Vehicle Expenses, Telephone / Internet Expenses, Travelling Expenses, PF / ESI Contributions, Advertising & Marketing, Loan Repayment, GST Cash Ledger, TDS Payable, Sales Account, Other Income, Interest Income, Miscellaneous Expenses. You are not limited to this list — use any appropriate standard ledger name.`;
+
+    const prompt = `You are an expert Indian business accountant. For each bank narration pattern, suggest the most appropriate Tally ledger name.
 
 CLIENT: ${clientRow.client_name}${clientRow.industry_name ? ` (${clientRow.industry_name})` : ""}
 
-HOW THIS CLIENT ALREADY MAPS TRANSACTIONS (use as your style guide — prefer the same ledger names):
-${exampleLines.length > 0 ? exampleLines.join("\n") : "  (no existing mappings yet — use your best judgement)"}
+HOW THIS CLIENT ALREADY MAPS TRANSACTIONS (mirror this naming style exactly):
+${exampleLines.length > 0 ? exampleLines.join("\n") : "  (no existing mappings yet — use standard Tally ledger names)"}
 
-ALLOWED LEDGER NAMES (use exact names from this list, prefer client ledgers over generic ones):
-${clientLedgerNames.length > 0
-  ? `[Client's Tally ledgers]\n${clientLedgerNames.map(l => `  - ${l}`).join("\n")}\n\n[Generic fallback]\n${fallbackLedgers.slice(0, 40).map(l => `  - ${l}`).join("\n")}`
-  : ledgerVocabulary.map(l => `  - ${l}`).join("\n")}
+${ledgerSection}
 
 PATTERNS TO CLASSIFY:
 ${JSON.stringify(patternsToSend.map(([pattern, example]) => ({ pattern, example })), null, 2)}
@@ -142,10 +144,9 @@ ${JSON.stringify(patternsToSend.map(([pattern, example]) => ({ pattern, example 
 RULES:
 1. Return ONLY a JSON array — no markdown, no explanation
 2. Each item: {"pattern": "...", "suggested_ledger": "...", "confidence": 0.0-1.0, "reason": "one short sentence"}
-3. suggested_ledger must be exactly one of the allowed ledger names, or null if truly unsure
-4. Use confidence < 0.6 for ambiguous patterns (person names, generic reference codes)
-5. Person names without context → professional fees or salary at 0.5 confidence
-6. Use mapped examples above to match the client's naming style exactly`;
+3. confidence < 0.6 for ambiguous patterns (person names, generic codes like RTGS/NEFT with no payee info)
+4. Set suggested_ledger to null only if you truly cannot determine the category
+5. Person names without context → "Professional Fees" or "Salary Expenses" at 0.5 confidence`;
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const response = await anthropic.messages.create({
@@ -176,8 +177,14 @@ RULES:
       return NextResponse.json({ saved: 0, already_pending: pendingPatterns.size, message: "AI returned an unexpected response — try again" });
     }
 
-    const ledgerSet = new Set(ledgerVocabulary);
-    const valid = aiSuggestions.filter(s => s.suggested_ledger && ledgerSet.has(s.suggested_ledger) && s.confidence >= 0.5);
+    // When client has a trial balance, enforce exact name match so we only use real Tally ledgers.
+    // When no trial balance exists, trust Claude's judgement — just filter by confidence.
+    const ledgerSet = new Set(clientLedgerNames);
+    const valid = aiSuggestions.filter(s =>
+      s.suggested_ledger &&
+      s.confidence >= 0.5 &&
+      (!hasClientLedgers || ledgerSet.has(s.suggested_ledger))
+    );
 
     if (valid.length === 0) {
       return NextResponse.json({ saved: 0, already_pending: pendingPatterns.size, message: "AI could not confidently map any patterns — try uploading a Trial Balance first so it has your ledger names" });
