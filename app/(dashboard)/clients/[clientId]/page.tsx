@@ -1149,6 +1149,12 @@ export default function ClientDetailPage() {
       body: JSON.stringify({ confirmed: !current }),
     });
     loadMappingRules();
+    // When confirming (draft → active), reapply all rules to existing transactions immediately
+    if (!current) {
+      fetch(`/api/v1/clients/${clientId}/reapply-ledger-rules`, { method: "POST" })
+        .then(() => loadBankTxns())
+        .catch(() => {});
+    }
   }
 
   async function promoteToIndustry(ruleId: string) {
@@ -3961,10 +3967,30 @@ export default function ClientDetailPage() {
               return (
                 <Card className="mb-3 border-purple-200 bg-purple-50/30">
                   <CardHeader className="pb-2 pt-3">
-                    <CardTitle className="text-sm font-medium text-purple-800">
-                      ✦ Pending Review — {pending.length} rule{pending.length !== 1 ? "s" : ""} waiting
-                    </CardTitle>
-                    <p className="text-xs text-gray-500">Confirm to activate, or reject to remove. These persist until actioned.</p>
+                    <div className="flex items-center justify-between">
+                      <CardTitle className="text-sm font-medium text-purple-800">
+                        ✦ Pending Review — {pending.length} rule{pending.length !== 1 ? "s" : ""} waiting
+                      </CardTitle>
+                      <button
+                        onClick={async () => {
+                          for (const r of pending) {
+                            await fetch(`/api/v1/ledger-rules/${r.id}`, {
+                              method: "PATCH",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ confirmed: true }),
+                            });
+                          }
+                          await fetch(`/api/v1/clients/${clientId}/reapply-ledger-rules`, { method: "POST" });
+                          loadMappingRules();
+                          loadBankTxns();
+                          toast.success(`${pending.length} rules confirmed and applied to existing transactions`);
+                        }}
+                        className="text-xs px-3 py-1 rounded bg-purple-600 text-white hover:bg-purple-700"
+                      >
+                        Confirm all
+                      </button>
+                    </div>
+                    <p className="text-xs text-gray-500">Confirm to activate and apply to all existing transactions, or reject to remove.</p>
                   </CardHeader>
                   <CardContent className="p-0">
                     <table className="w-full text-xs">
