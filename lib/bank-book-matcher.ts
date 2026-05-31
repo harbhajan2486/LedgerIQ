@@ -92,7 +92,7 @@ export function matchBankBookToStatement(
       if (!dirOk) continue;
       const sAmt = dir === "debit" ? (s.credit ?? 0) : (s.debit ?? 0);
       if (Math.abs(sAmt - amt) > 1) continue;
-      if (dateDiffDays(s.date, bbRow.date) > 2) continue;
+      if (dateDiffDays(s.date, bbRow.date) > 0) continue;
       candidates.push({ row: s, idx: si });
     }
     return candidates;

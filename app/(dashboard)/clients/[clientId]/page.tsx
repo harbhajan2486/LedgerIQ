@@ -5501,14 +5501,16 @@ export default function ClientDetailPage() {
                     // BB debit (money in) ↔ Stmt credit; BB credit (money out) ↔ Stmt debit
                     function matchPct(bb: BbSplitBbRow, stmt: BbSplitStmtRow): number {
                       const dateDiff = Math.abs(new Date(bb.date).getTime() - new Date(stmt.date).getTime()) / 86400000;
+                      if (dateDiff > 0) return 0; // date must match exactly
                       const bbAmt = bb.debit ?? bb.credit ?? 0;
                       const dirOk = (bb.debit != null && stmt.credit != null) || (bb.credit != null && stmt.debit != null);
                       const stAmt = dirOk ? (bb.debit != null ? (stmt.credit ?? 0) : (stmt.debit ?? 0)) : 0;
                       const amtDiff = dirOk ? Math.abs(bbAmt - stAmt) : Infinity;
-                      let s = 0;
-                      if (dateDiff === 0) s += 50; else if (dateDiff <= 1) s += 30; else if (dateDiff <= 2) s += 15;
-                      if (amtDiff < 0.01) s += 50; else if (amtDiff <= 1) s += 45; else if (amtDiff <= 50) s += 25; else if (amtDiff <= 500) s += 10;
-                      return Math.min(s, 99);
+                      if (amtDiff < 0.01) return 99;
+                      if (amtDiff <= 1) return 95;
+                      if (amtDiff <= 50) return 70;
+                      if (amtDiff <= 500) return 40;
+                      return 0;
                     }
 
                     // Build near-match suggestions: for unmatched BB rows, find same-date unmatched stmt rows
@@ -5584,18 +5586,23 @@ export default function ClientDetailPage() {
                       if (diag.dirSwapFound) return { text: "Direction?", tip: "Match found if debit/credit is swapped — check column mapping", cls: "text-orange-600 bg-orange-50 border-orange-200" };
                       if (diag.reason === "date") return { text: `Date off${diag.closestDateDiff != null ? ` (${diag.closestDateDiff.toFixed(0)}d)` : ""}`, tip: "Amount matches but date is >2 days apart", cls: "text-amber-600 bg-amber-50 border-amber-200" };
                       if (diag.reason === "amount") return { text: `Amt off${diag.closestAmtDiff != null ? ` (₹${diag.closestAmtDiff.toFixed(0)})` : ""}`, tip: "Date is close but amounts differ", cls: "text-amber-600 bg-amber-50 border-amber-200" };
-                      return { text: "No match", tip: "No statement row with matching direction, amount, and date ±2d", cls: "text-red-500 bg-red-50 border-red-200" };
+                      return { text: "No match", tip: "No statement row with matching direction, amount, and exact date", cls: "text-red-500 bg-red-50 border-red-200" };
                     };
 
                     // Search filter
-                    const q = bbSplitSearch.toLowerCase();
+                    const q = bbSplitSearch.toLowerCase().replace(/[,₹\s]/g, "");
                     const filteredPairs = q
-                      ? pairs.filter(p =>
-                          p.bb?.particulars.toLowerCase().includes(q) ||
-                          p.bb?.date.includes(q) ||
-                          p.stmt?.narration.toLowerCase().includes(q) ||
-                          p.stmt?.date.includes(q)
-                        )
+                      ? pairs.filter(p => {
+                          const bbAmt = String(p.bb?.debit ?? p.bb?.credit ?? "").replace(/[,₹\s]/g, "");
+                          const stAmt = String(p.stmt?.debit ?? p.stmt?.credit ?? "").replace(/[,₹\s]/g, "");
+                          return (
+                            p.bb?.particulars.toLowerCase().includes(q) ||
+                            p.bb?.date.includes(q) ||
+                            p.stmt?.narration.toLowerCase().includes(q) ||
+                            p.stmt?.date.includes(q) ||
+                            (q.length >= 3 && (bbAmt.includes(q) || stAmt.includes(q)))
+                          );
+                        })
                       : pairs;
 
                     return (
@@ -5607,7 +5614,7 @@ export default function ClientDetailPage() {
                             type="text"
                             value={bbSplitSearch}
                             onChange={e => setBbSplitSearch(e.target.value)}
-                            placeholder="Search ledger name or narration…"
+                            placeholder="Search by name, narration, amount or date…"
                             className="w-full pl-7 pr-3 py-1.5 text-xs border border-gray-200 rounded-md focus:outline-none focus:ring-1 focus:ring-purple-400"
                           />
                           {bbSplitSearch && (

@@ -210,6 +210,14 @@ export function extractPattern(narration: string): string {
     .replace(/^\d{10,}\s+/, "")      // strip leading reference numbers (10+ digits)
     .trim();
 
+  // Strip leading CR / DR direction marker left behind after payment method removal
+  // e.g. "NEFT CR-ICIC...-VENDOR" → after method strip → "cr icic..." → strip "cr "
+  n = n.replace(/^(cr|dr)\s+/i, "").trim();
+
+  // Strip IFSC codes: 4 alpha + 1 digit + 6 alphanumeric = exactly 11 chars
+  // e.g. icic0000011, fdrl0001805, utib0003581, icic0sf0002
+  n = n.replace(/\b[a-z]{4}[0-9][a-z0-9]{6}\b/g, " ").replace(/\s+/g, " ").trim();
+
   // Strip embedded reference numbers: sequences of 6+ digits anywhere in the string.
   // UPI/NEFT reference numbers are 10-12 digits and change every transaction — removing them
   // makes the pattern stable across months for the same vendor.
