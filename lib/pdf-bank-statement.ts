@@ -77,24 +77,54 @@ function parseTsvLines(text: string): StatementRow[] {
   const rows: StatementRow[] = [];
   const dataLines = lines[0]?.toLowerCase().startsWith("date") ? lines.slice(1) : lines;
 
-  for (const line of dataLines) {
-    const parts = line.split("\t").map((p) => p.trim());
-    if (parts.length < 4) continue;
-    const [rawDate, narration, , debitStr, creditStr] = parts;
-    if (!rawDate || !/\d/.test(rawDate)) continue;
-    if (!narration) continue;
+  // Pending partial row: accumulates continuation lines until we see a new date line
+  interface PendingRow { date: string; narration: string; debitStr: string; creditStr: string }
+  let pending: PendingRow | null = null;
 
-    const date = normaliseDateToIso(rawDate);
-    if (!date) continue;
-
-    let debit = debitStr ? parseFloat(debitStr.replace(/[₹,\s]/g, "")) || null : null;
-    let credit = creditStr ? parseFloat(creditStr.replace(/[₹,\s]/g, "")) || null : null;
+  function commitPending() {
+    if (!pending) return;
+    let debit = pending.debitStr ? parseFloat(pending.debitStr.replace(/[₹,\s]/g, "")) || null : null;
+    let credit = pending.creditStr ? parseFloat(pending.creditStr.replace(/[₹,\s]/g, "")) || null : null;
+    // If a "debit" value looks like a date (e.g. value-date column landed in debit slot), clear it
+    if (pending.debitStr && /^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$/.test(pending.debitStr.trim())) debit = null;
     if (debit !== null && debit < 0) { credit = Math.abs(debit); debit = null; }
     if (credit !== null && credit < 0) { debit = Math.abs(credit); credit = null; }
-    if (debit === null && credit === null) continue;
-
-    rows.push({ date, narration, debit, credit });
+    if (debit !== null || credit !== null) {
+      rows.push({ date: pending.date, narration: pending.narration, debit, credit });
+    }
+    pending = null;
   }
+
+  for (const line of dataLines) {
+    const parts = line.split("\t").map((p) => p.trim());
+    const firstField = parts[0] ?? "";
+
+    // Check if this line starts with a valid date → new transaction row
+    const date = normaliseDateToIso(firstField);
+    if (date) {
+      commitPending();
+      if (parts.length < 4) continue;
+      const narration = parts[1] ?? "";
+      if (!narration) continue;
+      // parts: date | narration | ref | debit | credit | balance
+      // Guard: if parts[3] looks like a date (value-date column), shift right
+      let debitStr = parts[3] ?? "";
+      let creditStr = parts[4] ?? "";
+      if (debitStr && /^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$/.test(debitStr)) {
+        debitStr = parts[4] ?? "";
+        creditStr = parts[5] ?? "";
+      }
+      pending = { date, narration, debitStr, creditStr };
+    } else {
+      // No valid date → continuation line; append text to previous row's narration
+      if (pending) {
+        const continuation = parts.join(" ").trim();
+        if (continuation) pending.narration += " " + continuation;
+      }
+      // else: orphaned continuation with no parent row — skip
+    }
+  }
+  commitPending();
   return rows;
 }
 
@@ -103,11 +133,12 @@ const TSV_PROMPT = `Extract bank transactions from this statement. Return ONLY t
 Exact header line: date\tnarration\tref_number\tdebit\tcredit\tbalance
 Rules:
 - date: DD/MM/YYYY
-- narration: full text exactly as printed, keep any commas as-is
-- ref_number: UTR/cheque/ref number or leave empty
+- narration: full text of the description/particulars field only — do NOT include value-date or cheque-number columns in the narration. If the narration wraps across multiple printed lines, join all continuation lines with a space into ONE TSV row.
+- ref_number: UTR/cheque/ref number or leave empty. If the statement has a separate "Value Date" column, put it in ref_number or leave empty — never put it in debit or credit.
 - debit: withdrawal amount as positive number or empty
 - credit: deposit amount as positive number or empty
 - balance: closing balance as number or empty
+- Each transaction = exactly ONE TSV row. Never emit a row without a date.
 - Skip opening balance and closing balance summary rows
 - Separate every field with a TAB character, not a comma`;
 
