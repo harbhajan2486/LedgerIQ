@@ -335,6 +335,7 @@ export default function ClientDetailPage() {
     setBbRowEdits({}); setStmtRowEdits({}); setExpandedSubRows(new Set());
     setBbReviewTab("split"); setBbRowEdits({}); setStmtRowEdits({}); setExpandedSubRows(new Set());
     setBbConfirmed(false); setBbSavedSession(null); setBbSessionLoading(false);
+    setBbFailedChunks([]);
   }
 
   async function submitBbFiles(colOverrides?: {
@@ -511,8 +512,10 @@ export default function ClientDetailPage() {
               }
             }
             if (chunkFailed) {
-              toast.warning(`Chunk ${ci + 1}/${numChunks} failed after 3 attempts — skipping, pages ${ci * 25 + 1}–${Math.min((ci + 1) * 25, totalPages)} may be missing`);
-              localStorage.setItem(cacheKey, JSON.stringify([])); // cache as empty so it's not retried
+              const ps = ci * CHUNK_SIZE + 1, pe = Math.min((ci + 1) * CHUNK_SIZE, totalPages);
+              toast.warning(`Chunk ${ci + 1}/${numChunks} failed — pages ${ps}–${pe} skipped`);
+              localStorage.setItem(cacheKey, JSON.stringify([]));
+              setBbFailedChunks(prev => [...prev, { fileName: singleFile.name, cacheKey, pageStart: ps, pageEnd: pe }]);
             } else {
               localStorage.setItem(cacheKey, JSON.stringify(rows));
             }
@@ -709,6 +712,8 @@ export default function ClientDetailPage() {
   const bbAddStmtRef = useRef<HTMLInputElement>(null);
   const [bbReplacingBb, setBbReplacingBb] = useState(false);
   const bbReplaceBbRef = useRef<HTMLInputElement>(null);
+  type FailedChunk = { fileName: string; cacheKey: string; pageStart: number; pageEnd: number };
+  const [bbFailedChunks, setBbFailedChunks] = useState<FailedChunk[]>([]);
 
   async function addMoreStatements(files: File[]) {
     if (!bbResult || !files.length) return;
@@ -797,7 +802,11 @@ export default function ClientDetailPage() {
                 if (attempt === 2) { failed = true; break; }
               }
             }
-            if (failed) toast.warning(`Chunk ${ci + 1}/${numChunks} of ${file.name} failed — skipping`);
+            if (failed) {
+              const ps = ci * CHUNK_SIZE + 1, pe = Math.min((ci + 1) * CHUNK_SIZE, totalPages);
+              toast.warning(`${file.name} chunk ${ci + 1}/${numChunks} failed — pages ${ps}–${pe} skipped`);
+              setBbFailedChunks(prev => [...prev, { fileName: file.name, cacheKey, pageStart: ps, pageEnd: pe }]);
+            }
             localStorage.setItem(cacheKey, JSON.stringify(rows));
             newRows.push(...rows);
           }
@@ -5408,6 +5417,39 @@ export default function ClientDetailPage() {
                       </button>
                     )}
                   </div>
+
+                  {/* Failed chunks banner */}
+                  {bbFailedChunks.length > 0 && (
+                    <div className="px-3 py-2 bg-orange-50 border border-orange-200 rounded-lg text-xs text-orange-800 space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="flex items-center gap-1.5 font-medium">
+                          <AlertTriangle size={13} className="flex-shrink-0" />
+                          {bbFailedChunks.length} chunk{bbFailedChunks.length !== 1 ? "s" : ""} failed — rows from these pages are missing:
+                        </span>
+                        <button
+                          onClick={() => {
+                            bbFailedChunks.forEach(c => localStorage.removeItem(c.cacheKey));
+                            setBbFailedChunks([]);
+                            toast.success("Failed chunk cache cleared — re-upload the same files to retry only those pages");
+                          }}
+                          className="text-orange-600 underline hover:text-orange-800 whitespace-nowrap">
+                          Clear &amp; retry
+                        </button>
+                      </div>
+                      <ul className="ml-5 space-y-0.5">
+                        {Object.entries(
+                          bbFailedChunks.reduce<Record<string, string[]>>((acc, c) => {
+                            (acc[c.fileName] ??= []).push(`pp. ${c.pageStart}–${c.pageEnd}`);
+                            return acc;
+                          }, {})
+                        ).map(([fname, ranges]) => (
+                          <li key={fname} className="list-disc">
+                            <span className="font-medium">{fname}</span>: {ranges.join(", ")}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
 
                   {/* Coverage gap banner */}
                   {coverageGaps.length > 0 && (
