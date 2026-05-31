@@ -9,7 +9,7 @@ import {
   Link2, Link2Off, X, Pencil, BookOpen, Download, Plus, Trash2,
   ShoppingCart, Receipt, Wallet, CreditCard, FolderOpen, ScrollText,
   BarChart3, ChevronDown, ChevronRight, ExternalLink, Search,
-  Filter, ArrowUp, ArrowDown, Info
+  Filter, ArrowUp, ArrowDown, Info, Play, Pause
 } from "lucide-react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
@@ -703,20 +703,38 @@ export default function ClientDetailPage() {
 
   const [bbAddingStmt, setBbAddingStmt] = useState(false);
   const [bbAddStmtProgress, setBbAddStmtProgress] = useState("");
+  const [bbAddStmtPaused, setBbAddStmtPaused] = useState(false);
+  const bbAddStmtPausedRef = useRef(false);
+  const bbAddStmtAbortRef = useRef<AbortController | null>(null);
   const bbAddStmtRef = useRef<HTMLInputElement>(null);
   const [bbReplacingBb, setBbReplacingBb] = useState(false);
   const bbReplaceBbRef = useRef<HTMLInputElement>(null);
 
   async function addMoreStatements(files: File[]) {
     if (!bbResult || !files.length) return;
+    const abort = new AbortController();
+    bbAddStmtAbortRef.current = abort;
+    bbAddStmtPausedRef.current = false;
+    setBbAddStmtPaused(false);
     setBbAddingStmt(true);
     setBbAddStmtProgress("");
     try {
       type StmtRow = { date: string; narration: string; debit: number | null; credit: number | null };
       const newRows: StmtRow[] = [];
       let lastApiCallAt = 0;
+      let stoppedEarly = false;
 
-      for (let i = 0; i < files.length; i++) {
+      // Wait while paused; throw if aborted
+      async function waitIfPaused() {
+        while (bbAddStmtPausedRef.current) {
+          if (abort.signal.aborted) throw new DOMException("Stopped", "AbortError");
+          await new Promise(r => setTimeout(r, 200));
+        }
+        if (abort.signal.aborted) throw new DOMException("Stopped", "AbortError");
+      }
+
+      try { for (let i = 0; i < files.length; i++) {
+        await waitIfPaused();
         const file = files[i];
         const isPdf = file.name.toLowerCase().endsWith(".pdf");
         if (isPdf) {
@@ -729,6 +747,7 @@ export default function ClientDetailPage() {
           const numChunks = Math.ceil(totalPages / CHUNK_SIZE);
 
           for (let ci = 0; ci < numChunks; ci++) {
+            await waitIfPaused();
             const cacheKey = `bb_chunk_${clientId}_${file.name}_${file.size}_c${ci}`;
             const cached = localStorage.getItem(cacheKey);
             if (cached) {
@@ -737,7 +756,14 @@ export default function ClientDetailPage() {
               continue;
             }
             const elapsed = Date.now() - lastApiCallAt;
-            if (lastApiCallAt > 0 && elapsed < 12000) await new Promise(r => setTimeout(r, 12000 - elapsed));
+            if (lastApiCallAt > 0 && elapsed < 12000) {
+              // Wait in small increments so abort/pause is checked promptly
+              const waitUntil = Date.now() + (12000 - elapsed);
+              while (Date.now() < waitUntil) {
+                await waitIfPaused();
+                await new Promise(r => setTimeout(r, 200));
+              }
+            }
             setBbAddStmtProgress(`${file.name} — extracting chunk ${ci + 1}/${numChunks} (pages ${ci * CHUNK_SIZE + 1}–${Math.min((ci + 1) * CHUNK_SIZE, totalPages)})…`);
 
             const chunkPdf = await PDFDocument.create();
@@ -751,15 +777,25 @@ export default function ClientDetailPage() {
             let rows: StmtRow[] = [];
             let failed = false;
             for (let attempt = 0; attempt < 3; attempt++) {
-              if (attempt > 0) { setBbAddStmtProgress(`${file.name} chunk ${ci + 1}/${numChunks} — retry ${attempt + 1}/3…`); await new Promise(r => setTimeout(r, 30000)); }
+              if (attempt > 0) {
+                setBbAddStmtProgress(`${file.name} chunk ${ci + 1}/${numChunks} — retry ${attempt + 1}/3…`);
+                const retryUntil = Date.now() + 30000;
+                while (Date.now() < retryUntil) {
+                  await waitIfPaused();
+                  await new Promise(r => setTimeout(r, 200));
+                }
+              }
               try {
                 const fd = new FormData(); fd.append("mode", "extract_only"); fd.append("statement_file", chunkFile);
-                const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: fd });
+                const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: fd, signal: abort.signal });
                 lastApiCallAt = Date.now();
                 const data = await res.json();
                 if (!res.ok) { if (attempt === 2) { failed = true; break; } continue; }
                 rows = data.rows ?? []; failed = false; break;
-              } catch { if (attempt === 2) { failed = true; break; } }
+              } catch (e) {
+                if ((e as Error).name === "AbortError") throw e;
+                if (attempt === 2) { failed = true; break; }
+              }
             }
             if (failed) toast.warning(`Chunk ${ci + 1}/${numChunks} of ${file.name} failed — skipping`);
             localStorage.setItem(cacheKey, JSON.stringify(rows));
@@ -770,14 +806,18 @@ export default function ClientDetailPage() {
           const fd = new FormData();
           fd.append("mode", "parse_stmt_only");
           fd.append("statement_file", file);
-          const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: fd });
+          const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: fd, signal: abort.signal });
           const data = await res.json();
           if (!res.ok) throw new Error(data.error ?? `Parse failed for ${file.name}`);
           newRows.push(...(data.rows ?? []));
         }
-      }
+      } } catch (e) { if ((e as Error).name !== "AbortError") throw e; stoppedEarly = true; }
 
-      if (newRows.length === 0) { toast.info("No transactions found in the uploaded file(s)"); return; }
+      if (newRows.length === 0) {
+        toast.info(stoppedEarly ? "Stopped — no rows extracted yet" : "No transactions found in the uploaded file(s)");
+        return;
+      }
+      if (stoppedEarly) toast.info(`Stopped — using ${newRows.length} rows extracted so far`);
 
       // Filter new rows to gap months only (months BB has rows for but stmt has none)
       const bbMonthSet = new Set((bbResult.all_bb_rows ?? []).map(r => r.date?.slice(0, 7)).filter(Boolean) as string[]);
@@ -822,8 +862,13 @@ export default function ClientDetailPage() {
       const skipNote = skippedByMonth > 0 ? ` · ${skippedByMonth} rows from already-covered months skipped` : "";
       toast.success(`Added ${rowsToAdd.length} rows from gap months${skipNote} · ${d.matched_count} total matches now`);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to add statements");
+      if ((err as Error).name !== "AbortError") {
+        toast.error(err instanceof Error ? err.message : "Failed to add statements");
+      }
     } finally {
+      bbAddStmtAbortRef.current = null;
+      bbAddStmtPausedRef.current = false;
+      setBbAddStmtPaused(false);
       setBbAddingStmt(false);
       setBbAddStmtProgress("");
       if (bbAddStmtRef.current) bbAddStmtRef.current.value = "";
@@ -5305,10 +5350,38 @@ export default function ClientDetailPage() {
                       onChange={e => { const files = Array.from(e.target.files ?? []); if (files.length) addMoreStatements(files); }} />
                     <input ref={bbReplaceBbRef} type="file" accept=".xls,.xlsx,.csv" className="hidden"
                       onChange={e => { const f = e.target.files?.[0]; if (f) replaceBankBook(f); }} />
-                    <button onClick={() => bbAddStmtRef.current?.click()} disabled={bbAddingStmt || bbReplacingBb}
-                      className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-purple-200 text-purple-700 bg-purple-50 hover:bg-purple-100 disabled:opacity-50">
-                      {bbAddingStmt ? <><Loader2 size={12} className="animate-spin" /> {bbAddStmtProgress || "Adding…"}</> : <><Plus size={12} /> Add more statements</>}
-                    </button>
+                    {/* Add more statements trigger / progress label */}
+                    {!bbAddingStmt ? (
+                      <button onClick={() => bbAddStmtRef.current?.click()} disabled={bbReplacingBb}
+                        className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-purple-200 text-purple-700 bg-purple-50 hover:bg-purple-100 disabled:opacity-50">
+                        <Plus size={12} /> Add more statements
+                      </button>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-purple-200 text-purple-700 bg-purple-50">
+                        <Loader2 size={12} className="animate-spin" />
+                        {bbAddStmtProgress || "Adding…"}
+                      </span>
+                    )}
+                    {/* Pause / Resume */}
+                    {bbAddingStmt && (
+                      <button
+                        onClick={() => {
+                          const next = !bbAddStmtPausedRef.current;
+                          bbAddStmtPausedRef.current = next;
+                          setBbAddStmtPaused(next);
+                        }}
+                        className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg border border-amber-300 text-amber-700 bg-amber-50 hover:bg-amber-100">
+                        {bbAddStmtPaused ? <><Play size={11} /> Resume</> : <><Pause size={11} /> Pause</>}
+                      </button>
+                    )}
+                    {/* Stop */}
+                    {bbAddingStmt && (
+                      <button
+                        onClick={() => bbAddStmtAbortRef.current?.abort()}
+                        className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg border border-red-300 text-red-600 bg-red-50 hover:bg-red-100">
+                        <X size={11} /> Stop
+                      </button>
+                    )}
                     <button onClick={() => bbReplaceBbRef.current?.click()} disabled={bbAddingStmt || bbReplacingBb}
                       className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-orange-200 text-orange-700 bg-orange-50 hover:bg-orange-100 disabled:opacity-50">
                       {bbReplacingBb ? <><Loader2 size={12} className="animate-spin" /> Replacing…</> : <><RefreshCw size={12} /> Replace bank book</>}
