@@ -101,10 +101,10 @@ function parseLedgerList(
     return cell?.s?.font?.bold === true;
   }
 
-  // Find data start: scan first 15 rows for a "Name" header, start after it.
+  // Find data start: scan first 30 rows for a "Name" header, start after it.
   // If no header found, start from row 0 (plain export with no title rows).
   let dataStart = 0;
-  for (let i = 0; i < Math.min(rawRows.length, 15); i++) {
+  for (let i = 0; i < Math.min(rawRows.length, 30); i++) {
     const cell = String(rawRows[i][0] ?? "").trim();
     if (/^(name|ledger\s*name?|particulars|account\s*name?)$/i.test(cell)) {
       dataStart = i + 1;

@@ -33,7 +33,7 @@ export async function GET(
       supabase.from("ledger_mapping_rules").select("pattern, ledger_name, industry_name")
         .eq("tenant_id", profile.tenant_id).is("client_id", null).eq("confirmed", true),
       // Load all client rules including unconfirmed, for Learning (X/3) progress display
-      supabase.from("ledger_mapping_rules").select("pattern, match_count, confirmed")
+      supabase.from("ledger_mapping_rules").select("pattern, match_count, confirmed, source")
         .eq("client_id", clientId).eq("tenant_id", profile.tenant_id),
       // Load ledger masters for taxation flag computation
       supabase.from("ledger_masters").select("ledger_name, ledger_type")
@@ -65,8 +65,14 @@ export async function GET(
     }
     // Map for Learning (X/3) progress: pattern → {count, confirmed}
     const ruleProgressMap: Record<string, { count: number; confirmed: boolean }> = {};
+    let rulesConfirmedTotal = 0;
+    let rulesFromHistory = 0;
     for (const r of allClientRulesResult.data ?? []) {
       ruleProgressMap[r.pattern] = { count: r.match_count ?? 1, confirmed: r.confirmed ?? false };
+      if (r.confirmed) {
+        rulesConfirmedTotal++;
+        if (r.source === "bank_book_import") rulesFromHistory++;
+      }
     }
 
     function deriveLedgerSource(narration: string, ledgerName: string | null): string | null {
@@ -319,6 +325,8 @@ export async function GET(
         unmatched,
         ledger_mapped: ledgerMapped,
         flag_count: flagCount,
+        rules_confirmed: rulesConfirmedTotal,
+        rules_from_history: rulesFromHistory,
       },
     });
   } catch (err) {

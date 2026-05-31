@@ -258,8 +258,18 @@ export default function ClientDetailPage() {
 
   // Bank book import state — two-file flow: bank statement + bank book → match → rules
   type BbRuleCandidate = { pattern: string; ledger_name: string; occurrences: number; sample_narration: string; sample_date: string; amount: number; direction: "debit"|"credit"; status: "auto"|"conflicted"; conflict_ledgers?: string[] };
-  type BbAmbiguous = { bb_row: { date: string; particulars: string; debit: number|null; credit: number|null }; candidates: { date: string; narration: string; debit: number|null; credit: number|null }[] };
-  type BbMatchResult = { total_bb_rows: number; total_stmt_rows: number; matched_count: number; ambiguous_count: number; unmatched_count: number; rule_candidates: BbRuleCandidate[]; ambiguous: BbAmbiguous[]; unmatched_bb: { date: string; particulars: string; debit: number|null; credit: number|null }[] };
+  type BbAmbiguous = { bb_row: { date: string; particulars: string; debit: number|null; credit: number|null }; bb_row_idx?: number; candidates: { date: string; narration: string; debit: number|null; credit: number|null }[] };
+  type BbSubRow = { particulars: string; debit: number|null; credit: number|null; voucher_type: string|null };
+  type NoMatchDiag = { bbRowIdx: number; reason: "direction"|"date"|"amount"|"none"; closestAmtDiff?: number; closestDateDiff?: number; dirSwapFound?: boolean };
+  type BbSplitBbRow = { row_index: number; date: string; particulars: string; debit: number|null; credit: number|null; sub_rows: BbSubRow[]; match_status: "matched"|"ambiguous"|"unmatched"; matched_stmt_idx?: number; match_confidence?: "exact"|"near"; no_match_diag?: NoMatchDiag; is_ambiguous?: boolean };
+  type BbSplitStmtRow = { row_index: number; date: string; narration: string; debit: number|null; credit: number|null; match_status: "matched"|"ambiguous"|"unmatched"; matched_bb_idx?: number };
+  type BbMatchResult = {
+    total_bb_rows: number; total_stmt_rows: number; matched_count: number; ambiguous_count: number; unmatched_count: number;
+    rule_candidates: BbRuleCandidate[]; ambiguous: BbAmbiguous[];
+    unmatched_bb: { date: string; particulars: string; debit: number|null; credit: number|null }[];
+    all_bb_rows: BbSplitBbRow[];
+    all_stmt_rows: BbSplitStmtRow[];
+  };
   type BbColsNeeded = { needs_column_mapping: true; bb_raw_headers: string[]; bb_preview: Record<string,string>[]; stmt_raw_headers: string[]; stmt_preview: Record<string,string>[]; bb_confident: boolean; stmt_confident: boolean };
 
   const [bbImportOpen, setBbImportOpen] = useState(false);
@@ -290,6 +300,30 @@ export default function ClientDetailPage() {
   const [bbFileObj, setBbFileObj] = useState<File | null>(null);
   const [stmtFileObjs, setStmtFileObjs] = useState<File[]>([]);
   const [bbUploadProgress, setBbUploadProgress] = useState("");
+  const bbAbortRef = useRef<AbortController | null>(null);
+  const [bbStmtCacheInfo, setBbStmtCacheInfo] = useState<{ cached: number; total: number } | null>(null);
+  // Split-screen view state
+  const [bbReviewTab, setBbReviewTab] = useState<"split"|"rules">("split");
+  // Row edit actions: "remove" = exclude from re-match; "sub" = treat as sub-row
+  const [bbRowEdits, setBbRowEdits] = useState<Record<number, "remove"|"sub">>({});
+  const [stmtRowEdits, setStmtRowEdits] = useState<Record<number, "remove">>({});
+  const [rematching, setRematching] = useState(false);
+  // Sub-row expand/collapse: set of BB row indices whose sub-rows are expanded
+  const [expandedSubRows, setExpandedSubRows] = useState<Set<number>>(new Set());
+  // Split-view search
+  const [bbSplitSearch, setBbSplitSearch] = useState("");
+  // User-confirmed near-match suggestions: bbRowIdx → stmtRowIdx
+  const [confirmedSuggestions, setConfirmedSuggestions] = useState<Record<number, number>>({});
+  // Sub-row ledger override: bbRowIdx → sub-row particulars to use as rule ledger instead of parent
+  const [bbSubRowLedger, setBbSubRowLedger] = useState<Record<number, string>>({});
+  // Rows manually excluded from bulk-confirm (toggled per row in split view)
+  const [bbConfirmExcluded, setBbConfirmExcluded] = useState<Set<number>>(new Set());
+  // True after rules have been successfully confirmed — keeps review visible instead of resetting
+  const [bbConfirmed, setBbConfirmed] = useState(false);
+  // Saved session info fetched from DB when dialog opens
+  const [bbSavedSession, setBbSavedSession] = useState<{ bb_filename?: string; stmt_filenames?: string[]; confirmed_at?: string; updated_at?: string } | null>(null);
+  // True while checking DB for a saved session (prevents flash of upload step)
+  const [bbSessionLoading, setBbSessionLoading] = useState(false);
 
   function bbReset() {
     setBbStep("upload"); setBbResult(null); setBbColsNeeded(null);
@@ -297,6 +331,10 @@ export default function ClientDetailPage() {
     setBbColDate(""); setBbColParticulars(""); setBbColDebit(""); setBbColCredit("");
     setStmtColDate(""); setStmtColNarration(""); setStmtColDebit(""); setStmtColCredit("");
     setBbFileObj(null); setStmtFileObjs([]); setBbUploadProgress("");
+    setBbSplitSearch(""); setConfirmedSuggestions({}); setBbSubRowLedger({}); setBbConfirmExcluded(new Set());
+    setBbRowEdits({}); setStmtRowEdits({}); setExpandedSubRows(new Set());
+    setBbReviewTab("split"); setBbRowEdits({}); setStmtRowEdits({}); setExpandedSubRows(new Set());
+    setBbConfirmed(false); setBbSavedSession(null); setBbSessionLoading(false);
   }
 
   async function submitBbFiles(colOverrides?: {
@@ -306,6 +344,8 @@ export default function ClientDetailPage() {
     if (!bbFileObj || !stmtFileObjs.length) return;
     setBbUploading(true);
     setBbUploadProgress("");
+    const abort = new AbortController();
+    bbAbortRef.current = abort;
 
     const isMultiPdf = stmtFileObjs.length > 1 && stmtFileObjs.every(f => f.name.toLowerCase().endsWith(".pdf"));
 
@@ -344,16 +384,35 @@ export default function ClientDetailPage() {
           const remaining = stmtFileObjs.slice(i).filter(f => !localStorage.getItem(cacheKey(f))).length;
           setBbUploadProgress(`Extracting file ${i + 1} of ${stmtFileObjs.length} via AI… (est. ${Math.ceil(remaining * 12 / 60)} min left)`);
 
-          const extractFd = new FormData();
-          extractFd.append("mode", "extract_only");
-          extractFd.append("statement_file", file);
-          const extractRes = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: extractFd });
-          lastApiCallAt = Date.now();
-          const extractData = await extractRes.json();
-          if (!extractRes.ok) throw new Error(`File ${i + 1} of ${stmtFileObjs.length} (${file.name}): ${extractData.error ?? "extraction failed"}`);
-
-          const rows: StmtRow[] = extractData.rows ?? [];
-          localStorage.setItem(key, JSON.stringify(rows));
+          let rows: StmtRow[] = [];
+          let fileFailed = false;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            if (attempt > 0) {
+              setBbUploadProgress(`File ${i + 1}/${stmtFileObjs.length} — retrying (attempt ${attempt + 1}/3)…`);
+              await new Promise(r => setTimeout(r, 30000));
+            }
+            const extractFd = new FormData();
+            extractFd.append("mode", "extract_only");
+            extractFd.append("statement_file", file);
+            try {
+              const extractRes = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: extractFd, signal: abort.signal });
+              lastApiCallAt = Date.now();
+              const extractData = await extractRes.json();
+              if (!extractRes.ok) { if (attempt === 2) { fileFailed = true; break; } continue; }
+              rows = extractData.rows ?? [];
+              fileFailed = false;
+              break;
+            } catch (err) {
+              if (err instanceof DOMException && err.name === "AbortError") throw err;
+              if (attempt === 2) { fileFailed = true; break; }
+            }
+          }
+          if (fileFailed) {
+            toast.warning(`${file.name} failed after 3 attempts — skipping, those transactions may be missing`);
+            localStorage.setItem(key, JSON.stringify([]));
+          } else {
+            localStorage.setItem(key, JSON.stringify(rows));
+          }
           allStmtRows.push(...rows);
         }
 
@@ -366,38 +425,140 @@ export default function ClientDetailPage() {
           return true;
         });
 
-        // Clear cache after successful full extraction
-        stmtFileObjs.forEach(f => localStorage.removeItem(cacheKey(f)));
-
         setBbUploadProgress("Matching with bank book…");
         const matchFd = new FormData();
         matchFd.append("mode", "match_with_rows");
         matchFd.append("bankbook_file", bbFileObj);
         matchFd.append("stmt_rows_json", JSON.stringify(dedupedRows));
+        matchFd.append("financial_year", bbFinancialYear);
         if (colOverrides?.bb_date)        matchFd.append("bb_column_date", colOverrides.bb_date);
         if (colOverrides?.bb_particulars) matchFd.append("bb_column_particulars", colOverrides.bb_particulars);
         if (colOverrides?.bb_debit)       matchFd.append("bb_column_debit", colOverrides.bb_debit);
         if (colOverrides?.bb_credit)      matchFd.append("bb_column_credit", colOverrides.bb_credit);
-        const matchRes = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: matchFd });
+        const matchRes = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: matchFd, signal: abort.signal });
         resultData = await matchRes.json();
         if (!matchRes.ok) throw new Error((resultData.error as string) ?? "Matching failed");
       } else {
-        // ── Single file (PDF or CSV/Excel): existing single-request flow ────
-        setBbUploadProgress(stmtFileObjs[0]?.name.toLowerCase().endsWith(".pdf") ? "Extracting via AI…" : "Analysing…");
-        const fd = new FormData();
-        fd.append("bankbook_file", bbFileObj);
-        for (const f of stmtFileObjs) fd.append("statement_file", f);
-        if (colOverrides?.bb_date)        fd.append("bb_column_date", colOverrides.bb_date);
-        if (colOverrides?.bb_particulars) fd.append("bb_column_particulars", colOverrides.bb_particulars);
-        if (colOverrides?.bb_debit)       fd.append("bb_column_debit", colOverrides.bb_debit);
-        if (colOverrides?.bb_credit)      fd.append("bb_column_credit", colOverrides.bb_credit);
-        if (colOverrides?.stmt_date)      fd.append("stmt_column_date", colOverrides.stmt_date);
-        if (colOverrides?.stmt_narration) fd.append("stmt_column_narration", colOverrides.stmt_narration);
-        if (colOverrides?.stmt_debit)     fd.append("stmt_column_debit", colOverrides.stmt_debit);
-        if (colOverrides?.stmt_credit)    fd.append("stmt_column_credit", colOverrides.stmt_credit);
-        const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: fd });
-        resultData = await res.json();
-        if (!res.ok) throw new Error((resultData.error as string) ?? "Import failed");
+        const singleFile = stmtFileObjs[0];
+        const isSinglePdf = singleFile.name.toLowerCase().endsWith(".pdf");
+
+        if (isSinglePdf) {
+          // ── Single PDF: chunk client-side with pdf-lib, cache per chunk ─
+          const { PDFDocument } = await import("pdf-lib");
+          const rawBuf = await singleFile.arrayBuffer();
+          const srcPdf = await PDFDocument.load(rawBuf);
+          const totalPages = srcPdf.getPageCount();
+          const CHUNK_SIZE = 25;
+          const numChunks = Math.ceil(totalPages / CHUNK_SIZE);
+
+          type StmtRow = { date: string; narration: string; debit: number | null; credit: number | null };
+          const allStmtRows: StmtRow[] = [];
+          let lastApiCallAt = 0;
+
+          for (let ci = 0; ci < numChunks; ci++) {
+            const cacheKey = `bb_chunk_${clientId}_${singleFile.name}_${singleFile.size}_c${ci}`;
+            const cached = localStorage.getItem(cacheKey);
+
+            if (cached) {
+              setBbUploadProgress(`Chunk ${ci + 1}/${numChunks} — already extracted, resuming…`);
+              allStmtRows.push(...(JSON.parse(cached) as StmtRow[]));
+              continue;
+            }
+
+            // Pace to stay under Anthropic rate limit
+            const elapsed = Date.now() - lastApiCallAt;
+            if (lastApiCallAt > 0 && elapsed < 12000) await new Promise(r => setTimeout(r, 12000 - elapsed));
+
+            const remaining = numChunks - ci - allStmtRows.reduce((acc, _, i) => {
+              const k = `bb_chunk_${clientId}_${singleFile.name}_${singleFile.size}_c${i}`;
+              return acc + (localStorage.getItem(k) ? 1 : 0);
+            }, 0);
+            setBbUploadProgress(`Extracting chunk ${ci + 1} of ${numChunks} (pages ${ci * CHUNK_SIZE + 1}–${Math.min((ci + 1) * CHUNK_SIZE, totalPages)})… est. ${Math.ceil(remaining * 12 / 60)} min`);
+
+            // Build chunk PDF
+            const chunkPdf = await PDFDocument.create();
+            const start = ci * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, totalPages);
+            const pageIdxs = Array.from({ length: end - start }, (_, k) => start + k);
+            const copiedPages = await chunkPdf.copyPages(srcPdf, pageIdxs);
+            copiedPages.forEach(p => chunkPdf.addPage(p));
+            const chunkBytes = await chunkPdf.save();
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const chunkBlob = new Blob([chunkBytes as any], { type: "application/pdf" });
+            const chunkFile = new File([chunkBlob], `${singleFile.name}_chunk${ci}.pdf`, { type: "application/pdf" });
+
+            let rows: StmtRow[] = [];
+            let chunkFailed = false;
+            for (let attempt = 0; attempt < 3; attempt++) {
+              if (attempt > 0) {
+                setBbUploadProgress(`Chunk ${ci + 1}/${numChunks} — retrying (attempt ${attempt + 1}/3)…`);
+                await new Promise(r => setTimeout(r, 30000));
+              }
+              const extractFd = new FormData();
+              extractFd.append("mode", "extract_only");
+              extractFd.append("statement_file", chunkFile);
+              try {
+                const extractRes = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: extractFd, signal: abort.signal });
+                lastApiCallAt = Date.now();
+                const extractData = await extractRes.json();
+                if (!extractRes.ok) { if (attempt === 2) { chunkFailed = true; break; } continue; }
+                rows = extractData.rows ?? [];
+                chunkFailed = false;
+                break;
+              } catch (err) {
+                if (err instanceof DOMException && err.name === "AbortError") throw err; // re-throw Stop
+                if (attempt === 2) { chunkFailed = true; break; }
+              }
+            }
+            if (chunkFailed) {
+              toast.warning(`Chunk ${ci + 1}/${numChunks} failed after 3 attempts — skipping, pages ${ci * 25 + 1}–${Math.min((ci + 1) * 25, totalPages)} may be missing`);
+              localStorage.setItem(cacheKey, JSON.stringify([])); // cache as empty so it's not retried
+            } else {
+              localStorage.setItem(cacheKey, JSON.stringify(rows));
+            }
+            allStmtRows.push(...rows);
+          }
+
+          // Deduplicate rows
+          const seen = new Set<string>();
+          const dedupedRows = allStmtRows.filter(r => {
+            const sig = `${r.date}|${r.narration}|${r.debit ?? ""}|${r.credit ?? ""}`;
+            if (seen.has(sig)) return false;
+            seen.add(sig); return true;
+          });
+
+          setBbUploadProgress("Matching with bank book…");
+          const matchFd = new FormData();
+          matchFd.append("mode", "match_with_rows");
+          matchFd.append("bankbook_file", bbFileObj);
+          matchFd.append("stmt_rows_json", JSON.stringify(dedupedRows));
+          matchFd.append("financial_year", bbFinancialYear);
+          if (colOverrides?.bb_date)        matchFd.append("bb_column_date", colOverrides.bb_date);
+          if (colOverrides?.bb_particulars) matchFd.append("bb_column_particulars", colOverrides.bb_particulars);
+          if (colOverrides?.bb_debit)       matchFd.append("bb_column_debit", colOverrides.bb_debit);
+          if (colOverrides?.bb_credit)      matchFd.append("bb_column_credit", colOverrides.bb_credit);
+          const matchRes = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: matchFd, signal: abort.signal });
+          resultData = await matchRes.json();
+          if (!matchRes.ok) throw new Error((resultData.error as string) ?? "Matching failed");
+        } else {
+          // ── CSV/Excel single file: existing single-request flow ─────────
+          setBbUploadProgress("Analysing…");
+          const fd = new FormData();
+          fd.append("bankbook_file", bbFileObj);
+          fd.append("statement_file", singleFile);
+          fd.append("financial_year", bbFinancialYear);
+          if (colOverrides?.bb_date)        fd.append("bb_column_date", colOverrides.bb_date);
+          if (colOverrides?.bb_particulars) fd.append("bb_column_particulars", colOverrides.bb_particulars);
+          if (colOverrides?.bb_debit)       fd.append("bb_column_debit", colOverrides.bb_debit);
+          if (colOverrides?.bb_credit)      fd.append("bb_column_credit", colOverrides.bb_credit);
+          if (colOverrides?.stmt_date)      fd.append("stmt_column_date", colOverrides.stmt_date);
+          if (colOverrides?.stmt_narration) fd.append("stmt_column_narration", colOverrides.stmt_narration);
+          if (colOverrides?.stmt_debit)     fd.append("stmt_column_debit", colOverrides.stmt_debit);
+          if (colOverrides?.stmt_credit)    fd.append("stmt_column_credit", colOverrides.stmt_credit);
+          const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: fd, signal: abort.signal });
+          resultData = await res.json();
+          if (!res.ok) throw new Error((resultData.error as string) ?? "Import failed");
+        }
       }
 
       if (resultData.needs_column_mapping) {
@@ -408,9 +569,14 @@ export default function ClientDetailPage() {
         setBbStep("review");
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Upload failed", { duration: Infinity });
+      if (err instanceof DOMException && err.name === "AbortError") {
+        toast.info("Extraction stopped — extracted chunks are saved and will resume next time.");
+      } else {
+        toast.error(err instanceof Error ? err.message : "Upload failed", { duration: Infinity });
+      }
     } finally {
       wakeLock?.release().catch(() => null);
+      bbAbortRef.current = null;
       setBbUploading(false);
       setBbUploadProgress("");
     }
@@ -418,9 +584,22 @@ export default function ClientDetailPage() {
 
   async function confirmBbRules() {
     if (!bbResult) return;
+    setBbConfirmed(false);
     setBbConfirming(true);
+    // Build a set of stmt narration patterns whose matched BB rows are excluded from bulk-confirm
+    const excludedPatterns = new Set<string>();
+    if (bbConfirmExcluded.size > 0) {
+      for (const bb of (bbResult.all_bb_rows ?? [])) {
+        if (!bbConfirmExcluded.has(bb.row_index)) continue;
+        const stmtIdx = bb.matched_stmt_idx;
+        if (stmtIdx == null) continue;
+        const stmt = bbResult.all_stmt_rows?.[stmtIdx];
+        if (!stmt) continue;
+        excludedPatterns.add(extractPattern(stmt.narration));
+      }
+    }
     const autoRules = bbResult.rule_candidates
-      .filter(c => c.status === "auto")
+      .filter(c => c.status === "auto" && !excludedPatterns.has(c.pattern))
       .map(c => ({ pattern: c.pattern, ledger_name: c.ledger_name }));
     const conflictRules = bbResult.rule_candidates
       .filter(c => c.status === "conflicted" && bbConflictOverrides[c.pattern])
@@ -429,12 +608,43 @@ export default function ClientDetailPage() {
     const ambigRules = bbResult.ambiguous
       .filter(amb => bbAmbiguousSelections[amb.bb_row.particulars + amb.bb_row.date])
       .map(amb => ({ pattern: bbAmbiguousSelections[amb.bb_row.particulars + amb.bb_row.date], ledger_name: amb.bb_row.particulars, _isNarration: true }));
-    const rules = [
+    // User-confirmed near-match suggestions → extract pattern from narration → rule
+    const suggestionRules = Object.entries(confirmedSuggestions).flatMap(([bbIdxStr, stmtIdx]) => {
+      const bb = bbResult.all_bb_rows?.[Number(bbIdxStr)];
+      const stmt = bbResult.all_stmt_rows?.[stmtIdx];
+      if (!bb || !stmt) return [];
+      const pat = extractPattern(stmt.narration);
+      if (!pat || pat.length < 3) return [];
+      const ledger = bbSubRowLedger[Number(bbIdxStr)] || bb.particulars;
+      return [{ pattern: pat, ledger_name: ledger }];
+    });
+
+    // Sub-row ledger overrides: user picked a sub-row's particulars for the rule ledger
+    // (instead of parent's possibly-generic name like "As per details")
+    const subRowOverrideRules = Object.entries(bbSubRowLedger).flatMap(([bbIdxStr, ledger]) => {
+      if (!ledger) return [];
+      const bbIdx = Number(bbIdxStr);
+      const bb = bbResult.all_bb_rows?.[bbIdx];
+      if (!bb) return [];
+      const stmtIdx = bb.matched_stmt_idx ?? confirmedSuggestions[bbIdx];
+      if (stmtIdx == null) return [];
+      const stmt = bbResult.all_stmt_rows?.[stmtIdx];
+      if (!stmt) return [];
+      const pat = extractPattern(stmt.narration);
+      if (!pat || pat.length < 3) return [];
+      return [{ pattern: pat, ledger_name: ledger }];
+    });
+    const rulesRaw = [
       ...autoRules,
       ...conflictRules,
-      // For ambiguous, pattern is already computed server-side in candidates; we send narration and let server extract
       ...ambigRules.map(r => ({ pattern: r.pattern, ledger_name: r.ledger_name })),
+      ...suggestionRules,
+      ...subRowOverrideRules,
     ];
+    // Deduplicate by pattern (last entry wins) to avoid Postgres "cannot affect row a second time"
+    const dedup = new Map<string, { pattern: string; ledger_name: string }>();
+    for (const r of rulesRaw) dedup.set(r.pattern, r);
+    const rules = Array.from(dedup.values());
     if (rules.length === 0) { toast.info("No rules to create"); setBbConfirming(false); return; }
     try {
       const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, {
@@ -448,14 +658,208 @@ export default function ClientDetailPage() {
           ? ` (${d.cross_year_conflicts.length} rule${d.cross_year_conflicts.length > 1 ? "s" : ""} updated from a prior year)`
           : "";
         toast.success(`${d.created} ledger rule${d.created !== 1 ? "s" : ""} saved for FY ${bbFinancialYear}${conflictNote}`);
-        setBbImportOpen(false);
-        bbReset();
+        setBbConfirmed(true);
         loadBankTxns();
       } else {
         toast.error(d.error ?? "Failed to save rules");
       }
     } finally {
       setBbConfirming(false);
+    }
+  }
+
+  // Re-match after user edits (mark as sub-row / remove rows)
+  async function rematchRows() {
+    if (!bbResult) return;
+    setRematching(true);
+    try {
+      // Filter: "remove" edits are excluded; "sub" BB edits become sub-rows of the preceding row
+      const filteredBbRows = (bbResult.all_bb_rows ?? [])
+        .filter(r => bbRowEdits[r.row_index] !== "remove" && bbRowEdits[r.row_index] !== "sub")
+        .map(r => ({ date: r.date, particulars: r.particulars, debit: r.debit, credit: r.credit, voucher_type: null, subRows: r.sub_rows ?? [] }));
+      const filteredStmtRows = (bbResult.all_stmt_rows ?? [])
+        .filter(r => stmtRowEdits[r.row_index] !== "remove")
+        .map(r => ({ date: r.date, narration: r.narration, debit: r.debit, credit: r.credit }));
+
+      const fd = new FormData();
+      fd.append("mode", "rematch_json");
+      fd.append("bb_rows_json", JSON.stringify(filteredBbRows));
+      fd.append("stmt_rows_json", JSON.stringify(filteredStmtRows));
+      fd.append("financial_year", bbFinancialYear);
+      const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: fd });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error ?? "Re-match failed");
+      setBbResult(d);
+      setBbRowEdits({});
+      setStmtRowEdits({});
+      setBbReviewTab("split");
+      toast.success(`Re-matched: ${d.matched_count} matched, ${d.ambiguous_count} ambiguous`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Re-match failed");
+    } finally {
+      setRematching(false);
+    }
+  }
+
+  const [bbAddingStmt, setBbAddingStmt] = useState(false);
+  const [bbAddStmtProgress, setBbAddStmtProgress] = useState("");
+  const bbAddStmtRef = useRef<HTMLInputElement>(null);
+  const [bbReplacingBb, setBbReplacingBb] = useState(false);
+  const bbReplaceBbRef = useRef<HTMLInputElement>(null);
+
+  async function addMoreStatements(files: File[]) {
+    if (!bbResult || !files.length) return;
+    setBbAddingStmt(true);
+    setBbAddStmtProgress("");
+    try {
+      type StmtRow = { date: string; narration: string; debit: number | null; credit: number | null };
+      const newRows: StmtRow[] = [];
+      let lastApiCallAt = 0;
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const isPdf = file.name.toLowerCase().endsWith(".pdf");
+        if (isPdf) {
+          // Client-side chunk the PDF (same as main flow) so each chunk is cached individually
+          const { PDFDocument } = await import("pdf-lib");
+          const rawBuf = await file.arrayBuffer();
+          const srcPdf = await PDFDocument.load(rawBuf);
+          const totalPages = srcPdf.getPageCount();
+          const CHUNK_SIZE = 25;
+          const numChunks = Math.ceil(totalPages / CHUNK_SIZE);
+
+          for (let ci = 0; ci < numChunks; ci++) {
+            const cacheKey = `bb_chunk_${clientId}_${file.name}_${file.size}_c${ci}`;
+            const cached = localStorage.getItem(cacheKey);
+            if (cached) {
+              setBbAddStmtProgress(`${file.name} — chunk ${ci + 1}/${numChunks} cached ✓`);
+              newRows.push(...(JSON.parse(cached) as StmtRow[]));
+              continue;
+            }
+            const elapsed = Date.now() - lastApiCallAt;
+            if (lastApiCallAt > 0 && elapsed < 12000) await new Promise(r => setTimeout(r, 12000 - elapsed));
+            setBbAddStmtProgress(`${file.name} — extracting chunk ${ci + 1}/${numChunks} (pages ${ci * CHUNK_SIZE + 1}–${Math.min((ci + 1) * CHUNK_SIZE, totalPages)})…`);
+
+            const chunkPdf = await PDFDocument.create();
+            const pageIdxs = Array.from({ length: Math.min(CHUNK_SIZE, totalPages - ci * CHUNK_SIZE) }, (_, k) => ci * CHUNK_SIZE + k);
+            const copied = await chunkPdf.copyPages(srcPdf, pageIdxs);
+            copied.forEach(p => chunkPdf.addPage(p));
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const chunkBlob = new Blob([await chunkPdf.save() as any], { type: "application/pdf" });
+            const chunkFile = new File([chunkBlob], `${file.name}_chunk${ci}.pdf`, { type: "application/pdf" });
+
+            let rows: StmtRow[] = [];
+            let failed = false;
+            for (let attempt = 0; attempt < 3; attempt++) {
+              if (attempt > 0) { setBbAddStmtProgress(`${file.name} chunk ${ci + 1}/${numChunks} — retry ${attempt + 1}/3…`); await new Promise(r => setTimeout(r, 30000)); }
+              try {
+                const fd = new FormData(); fd.append("mode", "extract_only"); fd.append("statement_file", chunkFile);
+                const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: fd });
+                lastApiCallAt = Date.now();
+                const data = await res.json();
+                if (!res.ok) { if (attempt === 2) { failed = true; break; } continue; }
+                rows = data.rows ?? []; failed = false; break;
+              } catch { if (attempt === 2) { failed = true; break; } }
+            }
+            if (failed) toast.warning(`Chunk ${ci + 1}/${numChunks} of ${file.name} failed — skipping`);
+            localStorage.setItem(cacheKey, JSON.stringify(rows));
+            newRows.push(...rows);
+          }
+        } else {
+          setBbAddStmtProgress(`${file.name} — parsing…`);
+          const fd = new FormData();
+          fd.append("mode", "parse_stmt_only");
+          fd.append("statement_file", file);
+          const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: fd });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error ?? `Parse failed for ${file.name}`);
+          newRows.push(...(data.rows ?? []));
+        }
+      }
+
+      if (newRows.length === 0) { toast.info("No transactions found in the uploaded file(s)"); return; }
+
+      // Filter new rows to gap months only (months BB has rows for but stmt has none)
+      const bbMonthSet = new Set((bbResult.all_bb_rows ?? []).map(r => r.date?.slice(0, 7)).filter(Boolean) as string[]);
+      const existingStmtMonthSet = new Set((bbResult.all_stmt_rows ?? []).map(r => r.date?.slice(0, 7)).filter(Boolean) as string[]);
+      const gapMonthsSet = new Set(Array.from(bbMonthSet).filter(m => !existingStmtMonthSet.has(m)));
+      let rowsToAdd = newRows;
+      let skippedByMonth = 0;
+      if (gapMonthsSet.size > 0) {
+        rowsToAdd = newRows.filter(r => r.date && gapMonthsSet.has(r.date.slice(0, 7)));
+        skippedByMonth = newRows.length - rowsToAdd.length;
+      }
+      if (rowsToAdd.length === 0) {
+        toast.info(`All ${newRows.length} extracted rows are from months already covered — nothing new to add`);
+        return;
+      }
+
+      setBbAddStmtProgress("Merging and re-matching…");
+      // Merge with existing stmt rows and dedup
+      const existing = (bbResult.all_stmt_rows ?? []).map(r => ({ date: r.date, narration: r.narration, debit: r.debit, credit: r.credit }));
+      const seen = new Set<string>();
+      const merged = [...existing, ...rowsToAdd].filter(r => {
+        const sig = `${r.date}|${r.narration}|${r.debit ?? ""}|${r.credit ?? ""}`;
+        if (seen.has(sig)) return false;
+        seen.add(sig); return true;
+      });
+
+      const bbRows = (bbResult.all_bb_rows ?? []).map(r => ({
+        date: r.date, particulars: r.particulars, debit: r.debit, credit: r.credit,
+        voucher_type: null, subRows: r.sub_rows ?? [],
+      }));
+
+      const fd = new FormData();
+      fd.append("mode", "rematch_json");
+      fd.append("bb_rows_json", JSON.stringify(bbRows));
+      fd.append("stmt_rows_json", JSON.stringify(merged));
+      fd.append("financial_year", bbFinancialYear);
+      const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: fd });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error ?? "Re-match failed");
+      setBbResult(d);
+      setBbConfirmed(false);
+      const skipNote = skippedByMonth > 0 ? ` · ${skippedByMonth} rows from already-covered months skipped` : "";
+      toast.success(`Added ${rowsToAdd.length} rows from gap months${skipNote} · ${d.matched_count} total matches now`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to add statements");
+    } finally {
+      setBbAddingStmt(false);
+      setBbAddStmtProgress("");
+      if (bbAddStmtRef.current) bbAddStmtRef.current.value = "";
+    }
+  }
+
+  async function replaceBankBook(file: File) {
+    if (!bbResult) return;
+    setBbReplacingBb(true);
+    try {
+      const stmtRows = (bbResult.all_stmt_rows ?? []).map(r => ({
+        date: r.date, narration: r.narration, debit: r.debit, credit: r.credit,
+      }));
+      const fd = new FormData();
+      fd.append("mode", "match_with_rows");
+      fd.append("bankbook_file", file);
+      fd.append("stmt_rows_json", JSON.stringify(stmtRows));
+      fd.append("financial_year", bbFinancialYear);
+      const res = await fetch(`/api/v1/clients/${clientId}/import-bank-book`, { method: "POST", body: fd });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error ?? "Re-match failed");
+      if (d.needs_column_mapping) {
+        setBbColsNeeded(d); setBbStep("columns");
+        toast.info("Column mapping needed for the new bank book");
+        return;
+      }
+      setBbResult(d);
+      setBbConfirmed(false);
+      setConfirmedSuggestions({}); setBbSubRowLedger({}); setBbConfirmExcluded(new Set());
+      setBbRowEdits({}); setStmtRowEdits({});
+      toast.success(`Bank book replaced · ${d.matched_count} matches with existing statement rows`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to replace bank book");
+    } finally {
+      setBbReplacingBb(false);
+      if (bbReplaceBbRef.current) bbReplaceBbRef.current.value = "";
     }
   }
 
@@ -1311,6 +1715,44 @@ export default function ClientDetailPage() {
   useEffect(() => { if (activeTab === "mapping") { loadMappingRules(); if (ledgers.length === 0) loadLedgers(); } }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "gst") loadGstData(); }, [activeTab, clientId, gstPeriodFrom, gstPeriodTo]);
   useEffect(() => { if (activeTab === "expected") loadExpected(); }, [activeTab, clientId]);
+
+  // Check localStorage cache for selected statement files (PDF only)
+  // Load saved BB session from DB when dialog opens (restores review state across refreshes)
+  useEffect(() => {
+    if (!bbImportOpen || bbResult) return; // skip if already has data in memory
+    setBbSessionLoading(true);
+    fetch(`/api/v1/clients/${clientId}/import-bank-book?financial_year=${encodeURIComponent(bbFinancialYear)}`)
+      .then(r => r.json())
+      .then((d: { session: { result_json: unknown; bb_filename?: string; stmt_filenames?: string[]; confirmed_at?: string; updated_at?: string } | null }) => {
+        if (d.session?.result_json) {
+          setBbResult(d.session.result_json as BbMatchResult);
+          setBbStep("review");
+          setBbSavedSession({ bb_filename: d.session.bb_filename, stmt_filenames: d.session.stmt_filenames, confirmed_at: d.session.confirmed_at, updated_at: d.session.updated_at });
+          if (d.session.confirmed_at) setBbConfirmed(true);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setBbSessionLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bbImportOpen]);
+
+  useEffect(() => {
+    if (!stmtFileObjs.length) { setBbStmtCacheInfo(null); return; }
+    const isPdf = (f: File) => f.name.toLowerCase().endsWith(".pdf");
+    if (!stmtFileObjs.every(isPdf)) { setBbStmtCacheInfo(null); return; }
+    let cached = 0; let total = 0;
+    if (stmtFileObjs.length > 1) {
+      total = stmtFileObjs.length;
+      cached = stmtFileObjs.filter(f => !!localStorage.getItem(`bb_extract_${clientId}_${f.name}_${f.size}`)).length;
+    } else {
+      // Single PDF — check chunk 0 as proxy; report chunks found
+      const f = stmtFileObjs[0];
+      let ci = 0;
+      while (localStorage.getItem(`bb_chunk_${clientId}_${f.name}_${f.size}_c${ci}`)) ci++;
+      cached = ci; total = ci > 0 ? ci : 0; // total unknown until PDF loads, show what's cached
+    }
+    setBbStmtCacheInfo(cached > 0 ? { cached, total } : null);
+  }, [stmtFileObjs, clientId]);
 
   // Poll status for any documents currently extracting/queued
   useEffect(() => {
@@ -3585,7 +4027,7 @@ export default function ClientDetailPage() {
                   })()}
                 </div>
                 <button
-                  onClick={() => { setBbImportOpen(true); bbReset(); }}
+                  onClick={() => setBbImportOpen(true)}
                   className="flex-shrink-0 px-4 py-2 rounded-md bg-purple-600 text-white text-sm font-medium hover:bg-purple-700 inline-flex items-center gap-2"
                 >
                   <Upload size={13} /> Import bank book
@@ -4568,7 +5010,7 @@ export default function ClientDetailPage() {
       {/* Bank book import modal — two-file matching flow */}
       {bbImportOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 flex flex-col max-h-[90vh]">
+          <div className={`bg-white rounded-xl shadow-2xl w-full ${bbStep === "review" ? "max-w-6xl" : "max-w-2xl"} mx-4 flex flex-col max-h-[90vh]`}>
             {/* Header */}
             <div className="flex items-center justify-between px-6 py-4 border-b flex-shrink-0">
               <div>
@@ -4592,8 +5034,16 @@ export default function ClientDetailPage() {
 
             <div className="flex-1 overflow-y-auto px-6 py-5">
 
+              {/* ── Session loading spinner ── */}
+              {bbSessionLoading && (
+                <div className="flex flex-col items-center justify-center py-20 gap-3 text-gray-400">
+                  <Loader2 size={28} className="animate-spin" />
+                  <span className="text-sm">Loading previous session…</span>
+                </div>
+              )}
+
               {/* ── Step 1: upload ── */}
-              {bbStep === "upload" && (
+              {!bbSessionLoading && bbStep === "upload" && (
                 <div className="space-y-5">
                   <div className="p-4 bg-purple-50 rounded-lg border border-purple-100 text-xs text-purple-800 space-y-1">
                     <p className="font-semibold text-sm text-purple-900">How this works</p>
@@ -4653,6 +5103,24 @@ export default function ClientDetailPage() {
                               )}
                             </p>
                           )}
+                          {bbStmtCacheInfo && (
+                            <p className="text-green-600 flex items-center gap-1">
+                              <CheckCircle2 size={11} />
+                              {bbStmtCacheInfo.cached} chunk{bbStmtCacheInfo.cached !== 1 ? "s" : ""} cached — will skip re-extraction
+                              <button className="ml-1 text-gray-400 underline hover:text-red-500" onClick={() => {
+                                stmtFileObjs.forEach(f => {
+                                  localStorage.removeItem(`bb_extract_${clientId}_${f.name}_${f.size}`);
+                                  let ci = 0;
+                                  while (localStorage.getItem(`bb_chunk_${clientId}_${f.name}_${f.size}_c${ci}`) !== null) {
+                                    localStorage.removeItem(`bb_chunk_${clientId}_${f.name}_${f.size}_c${ci}`);
+                                    ci++;
+                                  }
+                                });
+                                setBbStmtCacheInfo(null);
+                                toast.success("Cache cleared — next run will re-extract from AI");
+                              }}>Clear cache</button>
+                            </p>
+                          )}
                         </div>
                       )}
                     </div>
@@ -4667,15 +5135,23 @@ export default function ClientDetailPage() {
                     </div>
                   </div>
 
-                  <button disabled={!bbFileObj || !stmtFileObjs.length || bbUploading} onClick={() => submitBbFiles()}
-                    className="px-5 py-2 rounded-md bg-purple-600 text-white text-sm font-medium hover:bg-purple-700 disabled:opacity-50 inline-flex items-center gap-2">
-                    {bbUploading ? <><Loader2 size={14} className="animate-spin" /> {bbUploadProgress || "Matching transactions…"}</> : `Analyse FY ${bbFinancialYear}`}
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button disabled={!bbFileObj || !stmtFileObjs.length || bbUploading} onClick={() => submitBbFiles()}
+                      className="px-5 py-2 rounded-md bg-purple-600 text-white text-sm font-medium hover:bg-purple-700 disabled:opacity-50 inline-flex items-center gap-2">
+                      {bbUploading ? <><Loader2 size={14} className="animate-spin" /> {bbUploadProgress || "Matching transactions…"}</> : `Analyse FY ${bbFinancialYear}`}
+                    </button>
+                    {bbUploading && (
+                      <button onClick={() => bbAbortRef.current?.abort()}
+                        className="px-4 py-2 rounded-md border border-red-300 text-red-600 text-sm font-medium hover:bg-red-50 inline-flex items-center gap-1.5">
+                        <X size={13} /> Stop
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
 
               {/* ── Step 2: column mapping ── */}
-              {bbStep === "columns" && bbColsNeeded && (
+              {!bbSessionLoading && bbStep === "columns" && bbColsNeeded && (
                 <div className="space-y-5">
                   <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
                     <AlertTriangle size={12} className="inline mr-1" />
@@ -4738,153 +5214,649 @@ export default function ClientDetailPage() {
               )}
 
               {/* ── Step 3: review ── */}
-              {bbStep === "review" && bbResult && (
-                <div className="space-y-5">
+              {!bbSessionLoading && bbStep === "review" && bbResult && (() => {
+                const autoRules = bbResult.rule_candidates.filter(c => c.status === "auto");
+                const conflictedRules = bbResult.rule_candidates.filter(c => c.status === "conflicted");
+                const exactMatchCount = (bbResult.all_bb_rows ?? []).filter(r =>
+                  r.match_confidence === "exact" && (r.sub_rows ?? []).length === 0 && !bbConfirmExcluded.has(r.row_index)
+                ).length;
+                const exactPct = bbResult.total_bb_rows > 0 ? Math.round(exactMatchCount / bbResult.total_bb_rows * 100) : 0;
+                const editCount = Object.keys(bbRowEdits).length + Object.keys(stmtRowEdits).length;
+                const bbDateRows = (bbResult.all_bb_rows ?? []).filter(r => bbRowEdits[r.row_index] !== "remove" && bbRowEdits[r.row_index] !== "sub");
+                const stmtDateRows = (bbResult.all_stmt_rows ?? []).filter(r => stmtRowEdits[r.row_index] !== "remove");
+                const rowCountMismatch = bbDateRows.length !== stmtDateRows.length;
+
+                // Find first index where statuses diverge (after filtering)
+                let firstDiscrepancyRow: number | null = null;
+                if (rowCountMismatch && bbResult.all_bb_rows && bbResult.all_stmt_rows) {
+                  const bbActive = bbResult.all_bb_rows.filter(r => bbRowEdits[r.row_index] !== "remove" && bbRowEdits[r.row_index] !== "sub");
+                  const stmtActive = bbResult.all_stmt_rows.filter(r => stmtRowEdits[r.row_index] !== "remove");
+                  for (let i = 0; i < Math.min(bbActive.length, stmtActive.length); i++) {
+                    if (bbActive[i].match_status !== "matched" || stmtActive[i].match_status !== "matched") {
+                      firstDiscrepancyRow = i + 1; break;
+                    }
+                  }
+                }
+
+                // Coverage gap: months present in BB but absent in stmt
+                const bbMonthCounts = new Map<string, number>();
+                for (const r of (bbResult.all_bb_rows ?? [])) {
+                  if (r.date) { const ym = r.date.slice(0, 7); bbMonthCounts.set(ym, (bbMonthCounts.get(ym) ?? 0) + 1); }
+                }
+                const stmtMonths = new Set<string>();
+                for (const r of (bbResult.all_stmt_rows ?? [])) {
+                  if (r.date) stmtMonths.add(r.date.slice(0, 7));
+                }
+                const coverageGaps = Array.from(bbMonthCounts.entries())
+                  .filter(([ym]) => !stmtMonths.has(ym))
+                  .sort(([a], [b]) => a.localeCompare(b))
+                  .map(([ym, count]) => {
+                    const [y, m] = ym.split("-");
+                    const label = new Date(Number(y), Number(m) - 1).toLocaleString("en-IN", { month: "short", year: "numeric" });
+                    return `${label} (${count})`;
+                  });
+
+                return (
+                <div className="space-y-3">
+                  {/* Saved session banner */}
+                  {bbSavedSession && (
+                    <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-700">
+                      <CheckCircle2 size={13} />
+                      <span>
+                        Loaded saved session — FY {bbFinancialYear}
+                        {bbSavedSession.bb_filename && ` · ${bbSavedSession.bb_filename}`}
+                        {bbSavedSession.confirmed_at && " · Previously confirmed"}
+                      </span>
+                    </div>
+                  )}
                   {/* Stats bar */}
-                  <div className="grid grid-cols-4 gap-3">
+                  <div className="grid grid-cols-6 gap-2 items-stretch">
                     {[
-                      { label: "Bank book rows", value: bbResult.total_bb_rows, cls: "text-gray-700" },
-                      { label: "Matched (rules)", value: bbResult.matched_count, cls: "text-green-700" },
-                      { label: "Needs attention", value: bbResult.ambiguous_count, cls: "text-amber-700" },
-                      { label: "No match", value: bbResult.unmatched_count, cls: "text-gray-400" },
+                      { label: "BB rows", value: bbResult.total_bb_rows, cls: "text-gray-700" },
+                      { label: "Stmt rows", value: bbResult.total_stmt_rows, cls: "text-gray-700" },
+                      { label: "Matched", value: bbResult.matched_count, cls: "text-green-700" },
+                      { label: "Ambiguous", value: bbResult.ambiguous_count, cls: "text-amber-700" },
+                      { label: "No match", value: bbResult.unmatched_count, cls: "text-red-500" },
                     ].map(({ label, value, cls }) => (
-                      <div key={label} className="bg-gray-50 rounded-lg px-3 py-2 text-center">
-                        <p className={`text-lg font-bold ${cls}`}>{value}</p>
-                        <p className="text-[11px] text-gray-400 mt-0.5">{label}</p>
+                      <div key={label} className="bg-gray-50 rounded-lg px-2 py-2 text-center">
+                        <p className={`text-base font-bold ${cls}`}>{value}</p>
+                        <p className="text-[10px] text-gray-400 mt-0.5">{label}</p>
                       </div>
+                    ))}
+                    {/* Exact match stat + bulk confirm */}
+                    <button
+                      onClick={confirmBbRules}
+                      disabled={bbConfirming || autoRules.length === 0}
+                      className="bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white rounded-lg px-2 py-2 text-center flex flex-col items-center justify-center gap-0.5 transition-colors"
+                      title="Confirm all auto-matched rules in one click"
+                    >
+                      {bbConfirming ? <Loader2 size={14} className="animate-spin" /> : (
+                        <>
+                          <p className="text-base font-bold leading-none">{exactMatchCount} <span className="text-xs font-normal">({exactPct}%)</span></p>
+                          <p className="text-[10px] mt-0.5 leading-tight">Confirm exact</p>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  {/* Add more statements + Replace bank book */}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <input ref={bbAddStmtRef} type="file" multiple accept=".csv,.xls,.xlsx,.pdf" className="hidden"
+                      onChange={e => { const files = Array.from(e.target.files ?? []); if (files.length) addMoreStatements(files); }} />
+                    <input ref={bbReplaceBbRef} type="file" accept=".xls,.xlsx,.csv" className="hidden"
+                      onChange={e => { const f = e.target.files?.[0]; if (f) replaceBankBook(f); }} />
+                    <button onClick={() => bbAddStmtRef.current?.click()} disabled={bbAddingStmt || bbReplacingBb}
+                      className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-purple-200 text-purple-700 bg-purple-50 hover:bg-purple-100 disabled:opacity-50">
+                      {bbAddingStmt ? <><Loader2 size={12} className="animate-spin" /> {bbAddStmtProgress || "Adding…"}</> : <><Plus size={12} /> Add more statements</>}
+                    </button>
+                    <button onClick={() => bbReplaceBbRef.current?.click()} disabled={bbAddingStmt || bbReplacingBb}
+                      className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-orange-200 text-orange-700 bg-orange-50 hover:bg-orange-100 disabled:opacity-50">
+                      {bbReplacingBb ? <><Loader2 size={12} className="animate-spin" /> Replacing…</> : <><RefreshCw size={12} /> Replace bank book</>}
+                    </button>
+                    {bbResult.unmatched_count > 0 && !bbAddingStmt && (
+                      <span className="text-xs text-gray-400">{bbResult.unmatched_count} unmatched BB rows</span>
+                    )}
+                  </div>
+
+                  {/* Coverage gap banner */}
+                  {coverageGaps.length > 0 && (
+                    <div className="flex items-start gap-2 px-3 py-2 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800">
+                      <AlertTriangle size={13} className="flex-shrink-0 mt-0.5" />
+                      <span>
+                        <strong>Possible extraction gaps:</strong>{" "}
+                        {coverageGaps.join(", ")} — BB has transactions but no statement rows found for these months. Use &quot;Add more statements&quot; to upload the missing months.
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Row count mismatch banner */}
+                  {rowCountMismatch && (
+                    <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
+                      <AlertTriangle size={13} className="flex-shrink-0" />
+                      <span>
+                        <strong>BS: {stmtDateRows.length} rows · BB: {bbDateRows.length} rows</strong>
+                        {firstDiscrepancyRow !== null && ` — first discrepancy around row ${firstDiscrepancyRow}`}
+                        {" "}Use Remove / Sub-row actions below to align, then Re-match.
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Edit notification */}
+                  {editCount > 0 && (
+                    <div className="flex items-center gap-3 px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg">
+                      <span className="text-xs text-blue-800 flex-1">{editCount} row edit{editCount !== 1 ? "s" : ""} pending — click Re-match to apply</span>
+                      <button onClick={rematchRows} disabled={rematching}
+                        className="text-xs px-3 py-1 bg-blue-600 text-white rounded font-medium hover:bg-blue-700 disabled:opacity-50 inline-flex items-center gap-1">
+                        {rematching ? <><Loader2 size={11} className="animate-spin" /> Re-matching…</> : "Re-match"}
+                      </button>
+                      <button onClick={() => { setBbRowEdits({}); setStmtRowEdits({}); }} className="text-xs text-gray-400 hover:text-gray-600">Reset</button>
+                    </div>
+                  )}
+
+                  {/* Sub-tabs: Split view | Rules */}
+                  <div className="flex border-b gap-4">
+                    {(["split", "rules"] as const).map(tab => (
+                      <button key={tab} onClick={() => setBbReviewTab(tab)}
+                        className={`text-xs py-1.5 border-b-2 -mb-px font-medium transition-colors ${bbReviewTab === tab ? "border-purple-600 text-purple-700" : "border-transparent text-gray-400 hover:text-gray-600"}`}>
+                        {tab === "split" ? "Split View (all rows)" : `Rules (${autoRules.length + conflictedRules.length})`}
+                      </button>
                     ))}
                   </div>
 
-                  {/* Auto rules — green */}
-                  {bbResult.rule_candidates.filter(c=>c.status==="auto").length > 0 && (
-                    <div>
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className="text-xs font-semibold text-green-700 bg-green-100 px-2 py-0.5 rounded-full">✓ Auto rules — {bbResult.rule_candidates.filter(c=>c.status==="auto").length}</span>
-                        <span className="text-xs text-gray-400">Created automatically — no action needed</span>
-                      </div>
-                      <div className="space-y-1 max-h-40 overflow-y-auto">
-                        {bbResult.rule_candidates.filter(c=>c.status==="auto").map(c => (
-                          <div key={c.pattern} className="flex items-center gap-2 text-xs px-3 py-1.5 bg-green-50 rounded border border-green-100">
-                            <span className="text-gray-500 truncate flex-1" title={c.sample_narration}>{c.sample_narration}</span>
-                            <span className="text-gray-300 flex-shrink-0">→</span>
-                            <span className="text-green-700 font-medium flex-shrink-0">{c.ledger_name}</span>
-                            <span className="text-gray-400 flex-shrink-0 ml-1">{c.occurrences}×</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
+                  {/* ── Paired Row View ── */}
+                  {bbReviewTab === "split" && (() => {
+                    // BB debit (money in) ↔ Stmt credit; BB credit (money out) ↔ Stmt debit
+                    function matchPct(bb: BbSplitBbRow, stmt: BbSplitStmtRow): number {
+                      const dateDiff = Math.abs(new Date(bb.date).getTime() - new Date(stmt.date).getTime()) / 86400000;
+                      const bbAmt = bb.debit ?? bb.credit ?? 0;
+                      const dirOk = (bb.debit != null && stmt.credit != null) || (bb.credit != null && stmt.debit != null);
+                      const stAmt = dirOk ? (bb.debit != null ? (stmt.credit ?? 0) : (stmt.debit ?? 0)) : 0;
+                      const amtDiff = dirOk ? Math.abs(bbAmt - stAmt) : Infinity;
+                      let s = 0;
+                      if (dateDiff === 0) s += 50; else if (dateDiff <= 1) s += 30; else if (dateDiff <= 2) s += 15;
+                      if (amtDiff < 0.01) s += 50; else if (amtDiff <= 1) s += 45; else if (amtDiff <= 50) s += 25; else if (amtDiff <= 500) s += 10;
+                      return Math.min(s, 99);
+                    }
 
-                  {/* Ambiguous — CA picks the correct statement row */}
-                  {bbResult.ambiguous.length > 0 && (
-                    <div>
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className="text-xs font-semibold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">⚠ Multiple matches — pick one for each</span>
-                      </div>
-                      <div className="space-y-3">
-                        {bbResult.ambiguous.map(amb => {
-                          const key = amb.bb_row.particulars + amb.bb_row.date;
-                          return (
-                            <div key={key} className="border border-amber-200 rounded-lg p-3 bg-amber-50/50">
-                              <div className="flex items-center gap-2 mb-2">
-                                <span className="text-xs font-medium text-gray-700">Bank book:</span>
-                                <span className="text-xs text-gray-800 font-semibold">{amb.bb_row.particulars}</span>
-                                <span className="text-xs text-gray-400">{amb.bb_row.date} · ₹{((amb.bb_row.debit ?? amb.bb_row.credit) ?? 0).toLocaleString("en-IN")}</span>
-                              </div>
-                              <p className="text-[11px] text-amber-700 mb-2">{amb.candidates.length} bank statement rows match by date &amp; amount — which one is this?</p>
-                              <div className="space-y-1">
-                                {amb.candidates.map((cand, ci) => (
-                                  <label key={ci} className="flex items-center gap-2 cursor-pointer text-xs px-2 py-1.5 rounded border border-transparent hover:border-amber-300 hover:bg-white">
-                                    <input type="radio" name={key} value={cand.narration}
-                                      checked={bbAmbiguousSelections[key] === cand.narration}
-                                      onChange={() => setBbAmbiguousSelections(prev => ({ ...prev, [key]: cand.narration }))}
-                                      className="flex-shrink-0" />
-                                    <span className="text-gray-700 truncate">{cand.narration}</span>
-                                    <span className="text-gray-400 flex-shrink-0 ml-auto">{cand.date}</span>
-                                  </label>
-                                ))}
-                                <label className="flex items-center gap-2 cursor-pointer text-xs px-2 py-1 rounded text-gray-400 hover:text-gray-600">
-                                  <input type="radio" name={key} value="__skip__"
-                                    checked={bbAmbiguousSelections[key] === "__skip__" || !bbAmbiguousSelections[key]}
-                                    onChange={() => setBbAmbiguousSelections(prev => ({ ...prev, [key]: "__skip__" }))}
-                                    className="flex-shrink-0" />
-                                  Skip this one
-                                </label>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
+                    // Build near-match suggestions: for unmatched BB rows, find same-date unmatched stmt rows
+                    const usedByConfirmed = new Set(Object.values(confirmedSuggestions));
+                    const unmatchedStmtByDate = new Map<string, BbSplitStmtRow[]>();
+                    for (const stmt of (bbResult.all_stmt_rows ?? [])) {
+                      if (stmt.match_status !== "matched" && !stmtRowEdits[stmt.row_index] && !usedByConfirmed.has(stmt.row_index)) {
+                        const arr = unmatchedStmtByDate.get(stmt.date) ?? [];
+                        arr.push(stmt);
+                        unmatchedStmtByDate.set(stmt.date, arr);
+                      }
+                    }
 
-                  {/* Conflicted — same narration pattern mapped to 2 different ledgers */}
-                  {bbResult.rule_candidates.filter(c=>c.status==="conflicted").length > 0 && (
-                    <div>
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className="text-xs font-semibold text-red-700 bg-red-100 px-2 py-0.5 rounded-full">⚑ Conflicted — pick one ledger</span>
-                        <span className="text-xs text-gray-400">Same narration pattern mapped to different ledgers in your bank book</span>
-                      </div>
+                    // usedStmtIdx: stmt rows consumed by matched pairs or confirmed suggestions
+                    // usedAsSuggestion: stmt rows already offered as a suggestion (each shown at most once)
+                    const usedStmtIdx = new Set<number>([...usedByConfirmed]);
+                    const usedAsSuggestion = new Set<number>();
+                    type PairRow = {
+                      bb: BbSplitBbRow | null;
+                      stmt: BbSplitStmtRow | null;
+                      kind: "matched" | "confirmed_suggestion" | "suggestion" | "ambiguous" | "bb_only" | "stmt_only";
+                      pct?: number;
+                    };
+                    const pairs: PairRow[] = [];
+
+                    for (const bb of (bbResult.all_bb_rows ?? [])) {
+                      if (bb.match_status === "matched" && bb.matched_stmt_idx !== undefined) {
+                        const stmt = (bbResult.all_stmt_rows ?? [])[bb.matched_stmt_idx];
+                        const hasSubRowsHere = (bb.sub_rows ?? []).length > 0;
+                        // Rows with sub-rows need ledger review — cap at 90% so bulk-confirm skips them
+                        const rawPct = bb.match_confidence === "exact" ? 100 : (stmt ? matchPct(bb, stmt) : 0);
+                        const pct = hasSubRowsHere && rawPct === 100 ? 90 : rawPct;
+                        pairs.push({ bb, stmt: stmt ?? null, kind: "matched", pct });
+                        usedStmtIdx.add(bb.matched_stmt_idx);
+                      } else if (confirmedSuggestions[bb.row_index] !== undefined) {
+                        const stmt = (bbResult.all_stmt_rows ?? [])[confirmedSuggestions[bb.row_index]];
+                        pairs.push({ bb, stmt: stmt ?? null, kind: "confirmed_suggestion", pct: stmt ? matchPct(bb, stmt) : 0 });
+                      } else if (bb.match_status === "ambiguous") {
+                        pairs.push({ bb, stmt: null, kind: "ambiguous" });
+                      } else {
+                        // Suggest the best same-date unmatched stmt row — each stmt row shown at most once
+                        const bestSugg = bbRowEdits[bb.row_index] !== "remove" && bbRowEdits[bb.row_index] !== "sub"
+                          ? (unmatchedStmtByDate.get(bb.date) ?? []).find(s => !usedStmtIdx.has(s.row_index) && !usedAsSuggestion.has(s.row_index)) ?? null
+                          : null;
+                        if (bestSugg) {
+                          pairs.push({ bb, stmt: bestSugg, kind: "suggestion", pct: matchPct(bb, bestSugg) });
+                          usedAsSuggestion.add(bestSugg.row_index);
+                        } else {
+                          pairs.push({ bb, stmt: null, kind: "bb_only" });
+                        }
+                      }
+                    }
+                    // Stmt rows not consumed by any match or suggestion float to the bottom
+                    for (const stmt of (bbResult.all_stmt_rows ?? [])) {
+                      if (!usedStmtIdx.has(stmt.row_index) && !usedAsSuggestion.has(stmt.row_index) && stmt.match_status !== "matched") {
+                        pairs.push({ bb: null, stmt, kind: "stmt_only" });
+                      }
+                    }
+
+                    // BB: debit = money received (+green), credit = money paid (−red)
+                    // Stmt: credit = money received (+green), debit = money paid (−red)
+                    const fmtBb = (debit: number | null, credit: number | null) => {
+                      const n = debit ?? credit ?? 0;
+                      return { sign: debit != null ? "+" : "−", cls: debit != null ? "text-green-600" : "text-red-600", val: n.toLocaleString("en-IN", { maximumFractionDigits: 0 }) };
+                    };
+                    const fmtStmt = (debit: number | null, credit: number | null) => {
+                      const n = debit ?? credit ?? 0;
+                      return { sign: debit != null ? "−" : "+", cls: debit != null ? "text-red-600" : "text-green-600", val: n.toLocaleString("en-IN", { maximumFractionDigits: 0 }) };
+                    };
+
+                    const diagLabel = (diag?: NoMatchDiag) => {
+                      if (!diag) return null;
+                      if (diag.dirSwapFound) return { text: "Direction?", tip: "Match found if debit/credit is swapped — check column mapping", cls: "text-orange-600 bg-orange-50 border-orange-200" };
+                      if (diag.reason === "date") return { text: `Date off${diag.closestDateDiff != null ? ` (${diag.closestDateDiff.toFixed(0)}d)` : ""}`, tip: "Amount matches but date is >2 days apart", cls: "text-amber-600 bg-amber-50 border-amber-200" };
+                      if (diag.reason === "amount") return { text: `Amt off${diag.closestAmtDiff != null ? ` (₹${diag.closestAmtDiff.toFixed(0)})` : ""}`, tip: "Date is close but amounts differ", cls: "text-amber-600 bg-amber-50 border-amber-200" };
+                      return { text: "No match", tip: "No statement row with matching direction, amount, and date ±2d", cls: "text-red-500 bg-red-50 border-red-200" };
+                    };
+
+                    // Search filter
+                    const q = bbSplitSearch.toLowerCase();
+                    const filteredPairs = q
+                      ? pairs.filter(p =>
+                          p.bb?.particulars.toLowerCase().includes(q) ||
+                          p.bb?.date.includes(q) ||
+                          p.stmt?.narration.toLowerCase().includes(q) ||
+                          p.stmt?.date.includes(q)
+                        )
+                      : pairs;
+
+                    return (
                       <div className="space-y-2">
-                        {bbResult.rule_candidates.filter(c=>c.status==="conflicted").map(c => (
-                          <div key={c.pattern} className="border border-red-200 rounded-lg px-3 py-2 bg-red-50/30">
-                            <p className="text-xs text-gray-600 mb-1.5 truncate" title={c.sample_narration}>{c.sample_narration}</p>
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs text-gray-500">Use ledger:</span>
-                              <select value={bbConflictOverrides[c.pattern] ?? ""}
-                                onChange={e => setBbConflictOverrides(prev => ({ ...prev, [c.pattern]: e.target.value }))}
-                                className="text-xs border border-red-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-red-400 flex-1">
-                                <option value="">— skip —</option>
-                                {(c.conflict_ledgers ?? []).map(l => <option key={l} value={l}>{l}</option>)}
-                              </select>
+                        {/* Search bar */}
+                        <div className="relative">
+                          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                          <input
+                            type="text"
+                            value={bbSplitSearch}
+                            onChange={e => setBbSplitSearch(e.target.value)}
+                            placeholder="Search ledger name or narration…"
+                            className="w-full pl-7 pr-3 py-1.5 text-xs border border-gray-200 rounded-md focus:outline-none focus:ring-1 focus:ring-purple-400"
+                          />
+                          {bbSplitSearch && (
+                            <button onClick={() => setBbSplitSearch("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                              <X size={12} />
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="border rounded-lg overflow-hidden" style={{ maxHeight: "55vh", overflowY: "auto" }}>
+                          {/* Column headers */}
+                          <div className="grid sticky top-0 z-10 bg-gray-100 border-b text-[10px] font-semibold text-gray-500 uppercase tracking-wide"
+                            style={{ gridTemplateColumns: "1fr 40px 1fr" }}>
+                            <div className="px-2 py-1.5 flex items-center gap-2">
+                              <span className="w-5 shrink-0 text-center">#</span>
+                              <span className="w-16 shrink-0">Date</span>
+                              <span className="w-20 shrink-0 text-right">Amount</span>
+                              <span>Bank Book — Tally Ledger</span>
+                            </div>
+                            <div className="flex items-center justify-center text-[9px] text-gray-400">%</div>
+                            <div className="px-2 py-1.5 flex items-center gap-2">
+                              <span className="w-5 shrink-0 text-center">#</span>
+                              <span className="w-16 shrink-0">Date</span>
+                              <span className="w-20 shrink-0 text-right">Amount</span>
+                              <span>Bank Statement — Narration</span>
                             </div>
                           </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
 
-                  {/* Unmatched — informational only */}
-                  {bbResult.unmatched_bb.length > 0 && (
-                    <details className="group">
-                      <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-600 flex items-center gap-1">
-                        <ChevronRight size={12} className="group-open:rotate-90 transition-transform" />
-                        {bbResult.unmatched_count} bank book rows had no matching statement row — skipped
-                      </summary>
-                      <div className="mt-2 space-y-0.5 pl-4">
-                        {bbResult.unmatched_bb.slice(0,10).map((row,i) => (
-                          <p key={i} className="text-[11px] text-gray-400">{row.date} · {row.particulars} · ₹{((row.debit ?? row.credit) ?? 0).toLocaleString("en-IN")}</p>
-                        ))}
-                        {bbResult.unmatched_count > 10 && <p className="text-[11px] text-gray-400">…and {bbResult.unmatched_count - 10} more</p>}
-                      </div>
-                    </details>
-                  )}
+                          {filteredPairs.map((pair, pi) => {
+                            const { bb, stmt, kind, pct } = pair;
+                            const bbEdit = bb ? bbRowEdits[bb.row_index] : undefined;
+                            const stmtEdit = stmt && kind !== "suggestion" ? stmtRowEdits[stmt.row_index] : undefined;
+                            const isRemovedBb = bbEdit === "remove" || bbEdit === "sub";
+                            const isRemovedStmt = stmtEdit === "remove";
 
-                  {bbResult.matched_count === 0 && bbResult.ambiguous_count === 0 && (
-                    <div className="text-center py-6 text-sm text-gray-400">
-                      No matches found. Check that both files are for the same account and period.
+                            const rowBg =
+                              kind === "matched" ? "bg-green-50" :
+                              kind === "confirmed_suggestion" ? "bg-teal-50" :
+                              kind === "suggestion" ? "bg-blue-50/60" :
+                              kind === "ambiguous" ? "bg-amber-50" :
+                              "bg-white";
+
+                            // Middle connector
+                            const pctColor = pct == null ? "" : pct === 100 ? "text-green-700" : pct >= 80 ? "text-green-500" : pct >= 50 ? "text-amber-500" : "text-red-400";
+                            const middleContent =
+                              kind === "matched" || kind === "confirmed_suggestion" ? (
+                                <div className="flex flex-col items-center leading-none gap-0.5">
+                                  <span className={`text-[9px] font-bold ${pctColor}`}>{pct}%</span>
+                                  <span className={`text-[8px] font-bold ${kind === "confirmed_suggestion" ? "text-teal-600" : "text-green-600"}`}>
+                                    {kind === "confirmed_suggestion" ? "✓" : pct === 100 ? "=" : "≈"}
+                                  </span>
+                                </div>
+                              ) : kind === "suggestion" ? (
+                                <div className="flex flex-col items-center leading-none gap-0.5">
+                                  <span className="text-[9px] font-bold text-blue-500">{pct}%</span>
+                                  <span className="text-[8px] text-blue-400">~</span>
+                                </div>
+                              ) : kind === "ambiguous" ? (
+                                <span className="text-[10px] text-amber-500 font-bold">?</span>
+                              ) : null;
+
+                            const bbAmt = bb ? fmtBb(bb.debit, bb.credit) : null;
+                            const stAmt = stmt ? fmtStmt(stmt.debit, stmt.credit) : null;
+                            const diag = (kind === "bb_only" || kind === "ambiguous") && bb?.no_match_diag ? diagLabel(bb.no_match_diag) : null;
+                            const hasSubRows = bb && (bb.sub_rows ?? []).length > 0;
+
+                            return (
+                              <div key={`${kind}-${bb?.row_index ?? "x"}-${stmt?.row_index ?? "x"}-${pi}`}>
+                                <div
+                                  className={`grid border-b border-gray-100 text-[11px] transition-colors hover:brightness-95 ${rowBg} ${isRemovedBb && (!stmt || isRemovedStmt) ? "opacity-30" : ""}`}
+                                  style={{ gridTemplateColumns: "1fr 40px 1fr" }}
+                                >
+                                  {/* BB side */}
+                                  <div className={`px-2 py-1.5 flex items-center gap-1.5 min-w-0 ${isRemovedBb ? "opacity-40 line-through" : ""}`}>
+                                    {bb ? (
+                                      <>
+                                        {/* Per-row confirm toggle — shown for matched/confirmed rows */}
+                                        {(kind === "matched" || kind === "confirmed_suggestion") && !isRemovedBb ? (
+                                          <button
+                                            onClick={() => setBbConfirmExcluded(p => {
+                                              const n = new Set(p);
+                                              n.has(bb.row_index) ? n.delete(bb.row_index) : n.add(bb.row_index);
+                                              return n;
+                                            })}
+                                            className={`w-4 h-4 shrink-0 rounded border flex items-center justify-center text-[9px] transition-colors ${
+                                              bbConfirmExcluded.has(bb.row_index)
+                                                ? "border-gray-300 bg-white text-gray-300"
+                                                : "border-green-500 bg-green-500 text-white"
+                                            }`}
+                                            title={bbConfirmExcluded.has(bb.row_index) ? "Excluded from bulk confirm — click to include" : "Included in bulk confirm — click to exclude"}
+                                          >✓</button>
+                                        ) : (
+                                          <span className="w-4 shrink-0" />
+                                        )}
+                                        <span className="w-5 text-center text-gray-400 shrink-0 text-[10px] font-mono">{bb.row_index + 1}</span>
+                                        <span className="w-16 shrink-0 text-gray-500 text-[10px] tabular-nums font-mono">{bb.date.slice(5)}</span>
+                                        <span className={`w-20 shrink-0 text-right tabular-nums font-semibold text-[11px] ${bbAmt!.cls}`}>
+                                          {bbAmt!.sign}{bbAmt!.val}
+                                        </span>
+                                        <span className="truncate text-gray-800 font-medium flex-1 min-w-0" title={bb.particulars}>{bb.particulars}</span>
+                                        {/* Diag badge */}
+                                        {diag && <span className={`text-[9px] border rounded px-1 py-0.5 shrink-0 whitespace-nowrap ${diag.cls}`} title={diag.tip}>{diag.text}</span>}
+                                        {/* Edit actions — always visible */}
+                                        {!isRemovedBb ? (
+                                          <div className="flex gap-1 shrink-0 ml-1">
+                                            <button onClick={() => setBbRowEdits(p => ({ ...p, [bb.row_index]: "sub" }))}
+                                              className="text-gray-400 hover:text-amber-500 text-[13px] leading-none px-0.5 rounded hover:bg-amber-50" title="Mark as sub-row">⤵</button>
+                                            <button onClick={() => setBbRowEdits(p => ({ ...p, [bb.row_index]: "remove" }))}
+                                              className="text-gray-400 hover:text-red-500 text-[13px] leading-none px-0.5 rounded hover:bg-red-50" title="Remove row">✕</button>
+                                          </div>
+                                        ) : (
+                                          <button onClick={() => setBbRowEdits(p => { const n = { ...p }; delete n[bb.row_index]; return n; })}
+                                            className="text-blue-500 text-[11px] px-1 shrink-0 hover:underline" title="Restore">↩ undo</button>
+                                        )}
+                                      </>
+                                    ) : (
+                                      <span className="text-gray-300 italic text-[10px] pl-6">— no bank book row —</span>
+                                    )}
+                                  </div>
+
+                                  {/* Middle connector */}
+                                  <div className="flex items-center justify-center border-x border-gray-100 bg-white/40 shrink-0">
+                                    {middleContent}
+                                  </div>
+
+                                  {/* Stmt side */}
+                                  <div className={`px-2 py-1.5 flex items-center gap-1.5 min-w-0 ${isRemovedStmt ? "opacity-40 line-through" : ""}`}>
+                                    {stmt ? (
+                                      <>
+                                        <span className="w-5 text-center text-gray-400 shrink-0 text-[10px] font-mono">{stmt.row_index + 1}</span>
+                                        <span className="w-16 shrink-0 text-gray-500 text-[10px] tabular-nums font-mono">{stmt.date.slice(5)}</span>
+                                        <span className={`w-20 shrink-0 text-right tabular-nums font-semibold text-[11px] ${stAmt!.cls}`}>
+                                          {stAmt!.sign}{stAmt!.val}
+                                        </span>
+                                        <span className={`truncate flex-1 min-w-0 ${kind === "suggestion" ? "text-blue-700" : "text-gray-700"}`} title={stmt.narration}>{stmt.narration}</span>
+                                        {/* Suggestion confirm/reject buttons */}
+                                        {kind === "suggestion" && (
+                                          <div className="flex gap-1 shrink-0 ml-1">
+                                            <button
+                                              onClick={() => setConfirmedSuggestions(p => ({ ...p, [bb!.row_index]: stmt.row_index }))}
+                                              className="text-[10px] px-1.5 py-0.5 rounded bg-teal-600 text-white hover:bg-teal-700 font-medium"
+                                              title="Use this match">✓ Use</button>
+                                          </div>
+                                        )}
+                                        {/* Undo confirmed suggestion */}
+                                        {kind === "confirmed_suggestion" && (
+                                          <button onClick={() => setConfirmedSuggestions(p => { const n = { ...p }; delete n[bb!.row_index]; return n; })}
+                                            className="text-[10px] text-gray-400 hover:text-gray-600 px-1 shrink-0">↩</button>
+                                        )}
+                                        {/* Remove stmt row (only for matched/standalone) */}
+                                        {(kind === "matched" || kind === "stmt_only") && (!isRemovedStmt ? (
+                                          <button onClick={() => setStmtRowEdits(p => ({ ...p, [stmt.row_index]: "remove" }))}
+                                            className="text-gray-400 hover:text-red-500 text-[13px] px-0.5 shrink-0 rounded hover:bg-red-50" title="Remove row">✕</button>
+                                        ) : (
+                                          <button onClick={() => setStmtRowEdits(p => { const n = { ...p }; delete n[stmt.row_index]; return n; })}
+                                            className="text-blue-500 text-[11px] px-1 shrink-0 hover:underline" title="Restore">↩ undo</button>
+                                        ))}
+                                      </>
+                                    ) : (
+                                      <span className="text-gray-300 italic text-[10px] pl-6">— no statement row —</span>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {/* Sub-rows — always shown when present */}
+                                {hasSubRows && (() => {
+                                  const subRows = bb!.sub_rows ?? [];
+                                  const subTotal = subRows.reduce((s, r) => s + (r.debit ?? r.credit ?? 0), 0);
+                                  const parentAmt = bb!.debit ?? bb!.credit ?? 0;
+                                  const sumMatch = Math.abs(subTotal - parentAmt) < 0.5;
+                                  const activeLedger = bbSubRowLedger[bb!.row_index];
+                                  return (
+                                    <>
+                                      {subRows.map((sr, si) => {
+                                        const isActive = activeLedger === sr.particulars;
+                                        return (
+                                          <div key={`${bb!.row_index}-sr-${si}`}
+                                            className={`grid border-b border-gray-50 text-[10px] ${isActive ? "bg-teal-50" : "bg-purple-50/40"}`}
+                                            style={{ gridTemplateColumns: "1fr 40px 1fr" }}>
+                                            <div className="px-2 py-0.5 flex items-center gap-1.5 min-w-0">
+                                              <span className="w-5 shrink-0" />
+                                              <span className="w-16 shrink-0 text-gray-300 pl-2 shrink-0">↳</span>
+                                              <span className={`w-20 shrink-0 text-right tabular-nums font-mono ${sr.debit != null ? "text-green-500" : "text-red-400"}`}>
+                                                {((sr.debit ?? sr.credit) ?? 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
+                                              </span>
+                                              <span className={`truncate flex-1 min-w-0 ${isActive ? "text-teal-700 font-medium" : "text-gray-500 italic"}`} title={sr.particulars}>{sr.particulars}</span>
+                                              {isActive ? (
+                                                <button onClick={() => setBbSubRowLedger(p => { const n = { ...p }; delete n[bb!.row_index]; return n; })}
+                                                  className="text-[9px] text-teal-600 border border-teal-300 rounded px-1 shrink-0 hover:bg-teal-100">✓ rule ✕</button>
+                                              ) : (
+                                                <button onClick={() => setBbSubRowLedger(p => ({ ...p, [bb!.row_index]: sr.particulars }))}
+                                                  className="text-[9px] text-gray-400 border border-gray-200 rounded px-1 shrink-0 hover:text-teal-600 hover:border-teal-300 hover:bg-teal-50">Use for rule</button>
+                                              )}
+                                            </div>
+                                            <div className="border-x border-gray-50" />
+                                            <div />
+                                          </div>
+                                        );
+                                      })}
+                                      {/* Sum validation row */}
+                                      <div className="grid border-b border-gray-100 text-[9px]" style={{ gridTemplateColumns: "1fr 40px 1fr" }}>
+                                        <div className="px-2 py-0.5 flex items-center gap-1.5">
+                                          <span className="w-5 shrink-0" />
+                                          <span className="w-16 shrink-0" />
+                                          <span className={`w-20 shrink-0 text-right tabular-nums font-mono border-t ${sumMatch ? "text-green-600 border-green-300" : "text-red-500 border-red-300"}`}>
+                                            Σ {subTotal.toLocaleString("en-IN", { maximumFractionDigits: 0 })}
+                                          </span>
+                                          <span className={`text-[9px] ${sumMatch ? "text-green-500" : "text-red-500"}`}>
+                                            {sumMatch ? "✓ matches parent" : `⚠ ≠ parent ${parentAmt.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`}
+                                          </span>
+                                          {activeLedger && (
+                                            <span className="ml-auto text-[9px] text-teal-600 shrink-0">Rule → {activeLedger}</span>
+                                          )}
+                                        </div>
+                                        <div className="border-x border-gray-50" />
+                                        <div />
+                                      </div>
+                                    </>
+                                  );
+                                })()}
+                              </div>
+                            );
+                          })}
+
+                          {filteredPairs.length === 0 && (
+                            <div className="text-center py-8 text-sm text-gray-400">
+                              {bbSplitSearch ? `No rows matching "${bbSplitSearch}"` : "No rows to display"}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Suggestion legend */}
+                        {pairs.some(p => p.kind === "suggestion") && (
+                          <p className="text-[10px] text-blue-500 text-center">
+                            ~ Blue rows are suggested matches (same date) — click <strong>✓ Use</strong> to confirm, then save rules
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {/* ── Rules View ── */}
+                  {bbReviewTab === "rules" && (
+                    <div className="space-y-4 overflow-y-auto" style={{ maxHeight: "45vh" }}>
+                      {/* Auto rules — green */}
+                      {autoRules.length > 0 && (
+                        <div>
+                          <div className="flex items-center gap-2 mb-2">
+                            <span className="text-xs font-semibold text-green-700 bg-green-100 px-2 py-0.5 rounded-full">✓ Auto rules — {autoRules.length}</span>
+                            <span className="text-xs text-gray-400">Created automatically</span>
+                          </div>
+                          <div className="space-y-1">
+                            {autoRules.map(c => (
+                              <div key={c.pattern} className="flex items-center gap-2 text-xs px-3 py-1.5 bg-green-50 rounded border border-green-100">
+                                {/* P2: badge for 3+ occurrences */}
+                                {c.occurrences >= 3 && (
+                                  <span className="text-[10px] bg-green-600 text-white px-1.5 py-0.5 rounded font-medium flex-shrink-0">100%</span>
+                                )}
+                                <span className="text-gray-500 truncate flex-1" title={c.sample_narration}>{c.sample_narration}</span>
+                                <span className="text-gray-300 flex-shrink-0">→</span>
+                                <span className="text-green-700 font-medium flex-shrink-0">{c.ledger_name}</span>
+                                <span className="text-gray-400 flex-shrink-0 ml-1">{c.occurrences}×</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Ambiguous — CA picks the correct statement row */}
+                      {bbResult.ambiguous.length > 0 && (
+                        <div>
+                          <div className="flex items-center gap-2 mb-2">
+                            <span className="text-xs font-semibold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">⚠ Ambiguous — pick one for each</span>
+                          </div>
+                          <div className="space-y-3">
+                            {bbResult.ambiguous.map(amb => {
+                              const key = amb.bb_row.particulars + amb.bb_row.date;
+                              return (
+                                <div key={key} className="border border-amber-200 rounded-lg p-3 bg-amber-50/50">
+                                  <div className="flex items-center gap-2 mb-2">
+                                    <span className="text-xs font-semibold text-gray-800">{amb.bb_row.particulars}</span>
+                                    <span className="text-xs text-gray-400">{amb.bb_row.date} · ₹{((amb.bb_row.debit ?? amb.bb_row.credit) ?? 0).toLocaleString("en-IN")}</span>
+                                  </div>
+                                  <p className="text-[11px] text-amber-700 mb-2">{amb.candidates.length} statement rows match — pick one:</p>
+                                  <div className="space-y-1">
+                                    {amb.candidates.map((cand, ci) => (
+                                      <label key={ci} className="flex items-center gap-2 cursor-pointer text-xs px-2 py-1.5 rounded border border-transparent hover:border-amber-300 hover:bg-white">
+                                        <input type="radio" name={key} value={cand.narration}
+                                          checked={bbAmbiguousSelections[key] === cand.narration}
+                                          onChange={() => setBbAmbiguousSelections(prev => ({ ...prev, [key]: cand.narration }))}
+                                          className="flex-shrink-0" />
+                                        <span className="text-gray-700 truncate">{cand.narration}</span>
+                                        <span className="text-gray-400 flex-shrink-0 ml-auto">{cand.date}</span>
+                                      </label>
+                                    ))}
+                                    <label className="flex items-center gap-2 cursor-pointer text-xs px-2 py-1 rounded text-gray-400 hover:text-gray-600">
+                                      <input type="radio" name={key} value="__skip__"
+                                        checked={bbAmbiguousSelections[key] === "__skip__" || !bbAmbiguousSelections[key]}
+                                        onChange={() => setBbAmbiguousSelections(prev => ({ ...prev, [key]: "__skip__" }))}
+                                        className="flex-shrink-0" />
+                                      Skip
+                                    </label>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Conflicted */}
+                      {conflictedRules.length > 0 && (
+                        <div>
+                          <div className="flex items-center gap-2 mb-2">
+                            <span className="text-xs font-semibold text-red-700 bg-red-100 px-2 py-0.5 rounded-full">⚑ Conflicted — pick one ledger</span>
+                          </div>
+                          <div className="space-y-2">
+                            {conflictedRules.map(c => (
+                              <div key={c.pattern} className="border border-red-200 rounded-lg px-3 py-2 bg-red-50/30">
+                                <p className="text-xs text-gray-600 mb-1.5 truncate" title={c.sample_narration}>{c.sample_narration}</p>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs text-gray-500">Use ledger:</span>
+                                  <select value={bbConflictOverrides[c.pattern] ?? ""}
+                                    onChange={e => setBbConflictOverrides(prev => ({ ...prev, [c.pattern]: e.target.value }))}
+                                    className="text-xs border border-red-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-red-400 flex-1">
+                                    <option value="">— skip —</option>
+                                    {(c.conflict_ledgers ?? []).map(l => <option key={l} value={l}>{l}</option>)}
+                                  </select>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {autoRules.length === 0 && bbResult.ambiguous.length === 0 && conflictedRules.length === 0 && (
+                        <div className="text-center py-6 text-sm text-gray-400">
+                          No matches found. Check that both files are for the same account and period.
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
-              )}
+                );
+              })()}
             </div>
 
             {/* Footer */}
-            {bbStep === "review" && bbResult && (
-              <div className="px-6 py-4 border-t flex-shrink-0 flex items-center justify-between">
-                <p className="text-xs text-gray-400">
-                  {bbResult.rule_candidates.filter(c=>c.status==="auto").length} auto rules
-                  {bbResult.ambiguous.filter(a=>bbAmbiguousSelections[a.bb_row.particulars+a.bb_row.date] && bbAmbiguousSelections[a.bb_row.particulars+a.bb_row.date]!=="__skip__").length > 0 && ` + ${bbResult.ambiguous.filter(a=>bbAmbiguousSelections[a.bb_row.particulars+a.bb_row.date] && bbAmbiguousSelections[a.bb_row.particulars+a.bb_row.date]!=="__skip__").length} confirmed`}
-                </p>
-                <div className="flex gap-3">
-                  <button onClick={() => { setBbImportOpen(false); bbReset(); }} className="text-sm px-4 py-2 rounded border border-gray-200 text-gray-600 hover:bg-gray-50">Cancel</button>
-                  <button onClick={confirmBbRules} disabled={bbConfirming || bbResult.matched_count === 0}
-                    className="text-sm px-4 py-2 rounded bg-purple-600 text-white font-medium hover:bg-purple-700 disabled:opacity-50 inline-flex items-center gap-2">
-                    {bbConfirming ? <><Loader2 size={14} className="animate-spin" /> Creating rules…</> : "Create rules"}
-                  </button>
+            {!bbSessionLoading && bbStep === "review" && bbResult && (() => {
+              const autoCount = bbResult.rule_candidates.filter(c => c.status === "auto").length;
+              const ambigConfirmed = bbResult.ambiguous.filter(a => {
+                const k = a.bb_row.particulars + a.bb_row.date;
+                return bbAmbiguousSelections[k] && bbAmbiguousSelections[k] !== "__skip__";
+              }).length;
+              return (
+                <div className="px-6 py-3 border-t flex-shrink-0 flex items-center justify-between bg-gray-50/50">
+                  <p className="text-xs text-gray-400">
+                    {autoCount} auto rule{autoCount !== 1 ? "s" : ""}
+                    {ambigConfirmed > 0 && ` + ${ambigConfirmed} resolved`}
+                    {" · "}Switch to Rules tab to resolve ambiguous &amp; conflicted
+                  </p>
+                  <div className="flex gap-2 items-center">
+                    {bbConfirmed && (
+                      <span className="inline-flex items-center gap-1 text-xs text-green-700 bg-green-50 border border-green-200 rounded px-2 py-1">
+                        <CheckCircle2 size={12} /> Rules saved
+                      </span>
+                    )}
+                    {bbSavedSession && (
+                      <span className="text-xs text-gray-400">
+                        Last saved {bbSavedSession.updated_at ? new Date(bbSavedSession.updated_at).toLocaleDateString() : ""}
+                      </span>
+                    )}
+                    <button onClick={() => { setBbImportOpen(false); }} className="text-sm px-3 py-1.5 rounded border border-gray-200 text-gray-600 hover:bg-gray-50">Close</button>
+                    <button onClick={() => { setBbImportOpen(false); bbReset(); }} className="text-sm px-3 py-1.5 rounded border border-gray-200 text-gray-600 hover:bg-gray-50">New import</button>
+                    <button onClick={confirmBbRules} disabled={bbConfirming || (bbResult.matched_count === 0 && bbResult.ambiguous_count === 0)}
+                      className="text-sm px-4 py-1.5 rounded bg-purple-600 text-white font-medium hover:bg-purple-700 disabled:opacity-50 inline-flex items-center gap-2">
+                      {bbConfirming ? <><Loader2 size={14} className="animate-spin" /> Saving…</> : bbConfirmed ? "Save more rules" : "Create rules"}
+                    </button>
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
           </div>
         </div>
       )}

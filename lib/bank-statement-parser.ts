@@ -147,12 +147,12 @@ export function parseStatementCsv(
   const ws = wb.Sheets[wb.SheetNames[0]];
   const rawRows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: "" });
 
-  // Find header row (scan first 15 rows)
+  // Find header row (scan first 30 rows)
   let headerRowIndex = -1;
   let detectedMapping: StatementColumnMapping = { date: null, narration: null, debit: null, credit: null };
   let rawHeaders: string[] = [];
 
-  for (let i = 0; i < Math.min(15, rawRows.length); i++) {
+  for (let i = 0; i < Math.min(30, rawRows.length); i++) {
     const row = rawRows[i];
     const stringVals = (row as unknown[]).map((c) => String(c ?? "").trim());
     const mapping = detectStatementColumns(stringVals);

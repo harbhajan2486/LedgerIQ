@@ -15,17 +15,34 @@ export interface MatchedPair {
   bbRow: BankBookRow;
   stmtRow: StatementRow;
   confidence: "exact" | "near";
+  bbRowIdx: number;
+  stmtRowIdx: number;
 }
 
 export interface AmbiguousPair {
   bbRow: BankBookRow;
+  bbRowIdx: number;
   candidates: StatementRow[];  // 2+ candidates
+}
+
+// Why a BB row didn't match — used for diagnostic tooltips in the UI
+export type NoMatchReason = "direction" | "date" | "amount" | "none";
+export interface UnmatchDiag {
+  bbRowIdx: number;
+  reason: NoMatchReason;
+  closestAmtDiff?: number;  // smallest amount diff seen (ignoring date)
+  closestDateDiff?: number; // smallest date diff seen for amount-passing rows
+  dirSwapFound?: boolean;   // true if a match exists when direction constraint is dropped
 }
 
 export interface MatchResult {
   matched: MatchedPair[];
   ambiguous: AmbiguousPair[];
-  unmatchedBb: BankBookRow[];  // bank book rows with no statement match
+  unmatchedBb: BankBookRow[];    // bank book rows with no statement match
+  unmatchedStmt: StatementRow[]; // statement rows not matched to any bank book row
+  unmatchDiags: UnmatchDiag[];   // one per unmatchedBb entry, same order
+  bbStatuses: ("matched" | "ambiguous" | "unmatched")[]; // parallel to bbRows input
+  stmtStatuses: ("matched" | "ambiguous" | "unmatched")[]; // parallel to stmtRows input
 }
 
 export interface RuleCandidate {
@@ -57,43 +74,108 @@ export function matchBankBookToStatement(
   const matched: MatchedPair[] = [];
   const ambiguous: AmbiguousPair[] = [];
   const unmatchedBb: BankBookRow[] = [];
+  const unmatchDiags: UnmatchDiag[] = [];
 
-  for (const bbRow of bbRows) {
-    // Determine direction and amount
+  const bbStatuses: ("matched" | "ambiguous" | "unmatched")[] = new Array(bbRows.length).fill("unmatched");
+  const stmtStatuses: ("matched" | "ambiguous" | "unmatched")[] = new Array(stmtRows.length).fill("unmatched");
+
+  const consumedStmtIdx = new Set<number>();
+
+  // BB debit = money received (asset ↑) → Stmt credit (bank credits customer's account)
+  // BB credit = money paid (asset ↓)   → Stmt debit  (bank debits customer's account)
+  function tryMatch(bi: number, bbRow: BankBookRow, dir: "debit" | "credit", amt: number) {
+    const candidates: { row: StatementRow; idx: number }[] = [];
+    for (let si = 0; si < stmtRows.length; si++) {
+      if (consumedStmtIdx.has(si)) continue;
+      const s = stmtRows[si];
+      const dirOk = dir === "debit" ? s.credit != null : s.debit != null;
+      if (!dirOk) continue;
+      const sAmt = dir === "debit" ? (s.credit ?? 0) : (s.debit ?? 0);
+      if (Math.abs(sAmt - amt) > 1) continue;
+      if (dateDiffDays(s.date, bbRow.date) > 2) continue;
+      candidates.push({ row: s, idx: si });
+    }
+    return candidates;
+  }
+
+  for (let bi = 0; bi < bbRows.length; bi++) {
+    const bbRow = bbRows[bi];
     const dir = bbRow.debit != null ? "debit" : "credit";
     const amt = bbRow.debit ?? bbRow.credit ?? 0;
 
-    // Filter by direction: matching column must be non-null
-    const dirFiltered = stmtRows.filter((s) =>
-      dir === "debit" ? s.debit != null : s.credit != null
-    );
-
-    // Filter by amount: within ±1 rupee
-    const amtFiltered = dirFiltered.filter((s) => {
-      const sAmt = dir === "debit" ? (s.debit ?? 0) : (s.credit ?? 0);
-      return Math.abs(sAmt - amt) <= 1;
-    });
-
-    // Filter by date: within ±2 days
-    const candidates = amtFiltered.filter(
-      (s) => dateDiffDays(s.date, bbRow.date) <= 2
-    );
+    const candidates = tryMatch(bi, bbRow, dir, amt);
 
     if (candidates.length === 0) {
+      // Diagnose why: check amount match ignoring date, date match ignoring amount, direction swap
+      let closestAmtDiff: number | undefined;
+      let closestDateDiff: number | undefined;
+      let dirSwapFound = false;
+      let amtMatchFound = false;
+
+      for (let si = 0; si < stmtRows.length; si++) {
+        const s = stmtRows[si];
+        const dirOk = dir === "debit" ? s.credit != null : s.debit != null;
+        const sAmt = dirOk ? (dir === "debit" ? (s.credit ?? 0) : (s.debit ?? 0)) : 0;
+        const amtDiff = dirOk ? Math.abs(sAmt - amt) : Infinity;
+        if (amtDiff <= 1) {
+          amtMatchFound = true;
+          const dd = dateDiffDays(s.date, bbRow.date);
+          if (closestDateDiff === undefined || dd < closestDateDiff) closestDateDiff = dd;
+        }
+        if (closestAmtDiff === undefined || amtDiff < closestAmtDiff) closestAmtDiff = amtDiff;
+      }
+      // Check direction swap: try opposite direction
+      if (!dirSwapFound) {
+        const swapDir = dir === "debit" ? "credit" : "debit";
+        const swapCandidates = tryMatch(bi, bbRow, swapDir, amt);
+        if (swapCandidates.length > 0) dirSwapFound = true;
+      }
+
+      const reason: NoMatchReason =
+        dirSwapFound ? "direction"
+        : amtMatchFound ? "date"
+        : (closestAmtDiff !== undefined && closestAmtDiff <= 100) ? "amount"
+        : "none";
+
       unmatchedBb.push(bbRow);
+      unmatchDiags.push({ bbRowIdx: bi, reason, closestAmtDiff, closestDateDiff, dirSwapFound });
+      bbStatuses[bi] = "unmatched";
     } else if (candidates.length === 1) {
-      const stmtRow = candidates[0];
-      const sAmt = dir === "debit" ? (stmtRow.debit ?? 0) : (stmtRow.credit ?? 0);
+      const { row: stmtRow, idx: si } = candidates[0];
+      const sAmt = dir === "debit" ? (stmtRow.credit ?? 0) : (stmtRow.debit ?? 0);
       const exactDate = stmtRow.date === bbRow.date;
       const exactAmt = Math.abs(sAmt - amt) < 0.001;
       const confidence: "exact" | "near" = (exactDate && exactAmt) ? "exact" : "near";
-      matched.push({ bbRow, stmtRow, confidence });
+      matched.push({ bbRow, stmtRow, confidence, bbRowIdx: bi, stmtRowIdx: si });
+      bbStatuses[bi] = "matched";
+      stmtStatuses[si] = "matched";
+      if (confidence === "exact") consumedStmtIdx.add(si);
     } else {
-      ambiguous.push({ bbRow, candidates });
+      // P1 tiebreaker: prefer closest by row index
+      candidates.sort((a, b) => Math.abs(a.idx - bi) - Math.abs(b.idx - bi));
+      const best = candidates[0];
+      const second = candidates[1];
+
+      if (Math.abs(best.idx - bi) < Math.abs(second.idx - bi)) {
+        const stmtRow = best.row;
+        const sAmt = dir === "debit" ? (stmtRow.credit ?? 0) : (stmtRow.debit ?? 0);
+        const exactDate = stmtRow.date === bbRow.date;
+        const exactAmt = Math.abs(sAmt - amt) < 0.001;
+        const confidence: "exact" | "near" = (exactDate && exactAmt) ? "exact" : "near";
+        matched.push({ bbRow, stmtRow, confidence, bbRowIdx: bi, stmtRowIdx: best.idx });
+        bbStatuses[bi] = "matched";
+        stmtStatuses[best.idx] = "matched";
+        if (confidence === "exact") consumedStmtIdx.add(best.idx);
+      } else {
+        ambiguous.push({ bbRow, bbRowIdx: bi, candidates: candidates.map(c => c.row) });
+        bbStatuses[bi] = "ambiguous";
+        for (const c of candidates) stmtStatuses[c.idx] = "ambiguous";
+      }
     }
   }
 
-  return { matched, ambiguous, unmatchedBb };
+  const unmatchedStmt = stmtRows.filter((_, i) => stmtStatuses[i] === "unmatched");
+  return { matched, ambiguous, unmatchedBb, unmatchedStmt, unmatchDiags, bbStatuses, stmtStatuses };
 }
 
 // ─── buildRuleCandidates ──────────────────────────────────────────────────────

@@ -7,12 +7,20 @@ import { extractPattern } from "@/lib/ledger-rules";
 
 // ─── Public interfaces ───────────────────────────────────────────────────────
 
+export interface SubRow {
+  particulars: string;    // narration/ledger from accountant explaining the breakup
+  debit: number | null;
+  credit: number | null;
+  voucher_type: string | null;
+}
+
 export interface BankBookRow {
   date: string;           // YYYY-MM-DD
   particulars: string;    // ledger/party name the CA assigned
   voucher_type: string | null;
   debit: number | null;
   credit: number | null;
+  subRows?: SubRow[];     // Tally breakup rows (no date) that follow this entry
 }
 
 export interface ColumnMapping {
@@ -167,12 +175,12 @@ export function parseTallyBankBook(buffer: ArrayBuffer, fileName: string): BankB
   const ws = wb.Sheets[wb.SheetNames[0]];
   const rawRows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: "" });
 
-  // ── Find header row by scanning first 15 rows ───────────────────────────
+  // ── Find header row by scanning first 30 rows ───────────────────────────
   let headerRowIndex = -1;
   let detectedMapping: ColumnMapping = { date: null, particulars: null, debit: null, credit: null, voucher_type: null };
   let rawHeaders: string[] = [];
 
-  for (let i = 0; i < Math.min(15, rawRows.length); i++) {
+  for (let i = 0; i < Math.min(30, rawRows.length); i++) {
     const row = rawRows[i];
     const stringVals = (row as unknown[]).map((c) => String(c ?? "").trim());
     const mapping = detectColumns(stringVals);
@@ -187,7 +195,7 @@ export function parseTallyBankBook(buffer: ArrayBuffer, fileName: string): BankB
 
   // ── Positional fallback ─────────────────────────────────────────────────
   if (headerRowIndex === -1) {
-    for (let i = 0; i < Math.min(15, rawRows.length); i++) {
+    for (let i = 0; i < Math.min(30, rawRows.length); i++) {
       const row = rawRows[i];
       const firstCell = (row as unknown[])[0];
       if (parseDate(firstCell) !== null) {
@@ -279,10 +287,40 @@ export function parseTallyBankBook(buffer: ArrayBuffer, fileName: string): BankB
 
     const dateCell = dateIdx >= 0 ? row[dateIdx] : row[0];
     const parsedDate = parseDate(dateCell);
-    if (!parsedDate) continue;
+
+    // No date = Tally breakup sub-row (accountant explanation for the preceding entry)
+    if (!parsedDate) {
+      if (rows.length === 0) continue;
+      const subPartRaw = particIdx >= 0 ? row[particIdx] : row[1];
+      let subPart = String(subPartRaw ?? "").trim();
+      if (/^(to|by)$/i.test(subPart)) subPart = String(row[particIdx >= 0 ? particIdx + 1 : 2] ?? "").trim();
+      else subPart = subPart.replace(/^(to|by)\s+/i, "").trim();
+      // Tally "By"/"To" | name format: particulars col is empty in sub-rows; name is in the adjacent col
+      if (!subPart && particIdx >= 0) subPart = String(row[particIdx + 1] ?? "").trim();
+      if (!subPart || SKIP_PARTICULARS.test(subPart)) continue;
+      const subDebit = debitIdx >= 0 ? parseAmount(row[debitIdx]) : null;
+      const subCredit = creditIdx >= 0 ? parseAmount(row[creditIdx]) : null;
+      if (subDebit === null && subCredit === null) continue;
+      const subVch = vchTypeIdx >= 0 ? String(row[vchTypeIdx] ?? "").trim() || null : null;
+      const last = rows[rows.length - 1];
+      if (!last.subRows) last.subRows = [];
+      last.subRows.push({ particulars: subPart, debit: subDebit, credit: subCredit, voucher_type: subVch });
+      continue;
+    }
 
     const particularsRaw = particIdx >= 0 ? row[particIdx] : row[1];
-    const particulars = String(particularsRaw ?? "").trim();
+    let particulars = String(particularsRaw ?? "").trim();
+
+    // Tally sometimes exports direction ("To"/"By") and ledger name in adjacent columns.
+    // If this cell is just the direction marker, grab the actual ledger from the next column.
+    if (/^(to|by)$/i.test(particulars)) {
+      const nextIdx = particIdx >= 0 ? particIdx + 1 : 2;
+      particulars = String(row[nextIdx] ?? "").trim();
+    } else {
+      // Strip "To "/"By " prefix when bundled in the same cell ("To HDFC Bank" → "HDFC Bank")
+      particulars = particulars.replace(/^(to|by)\s+/i, "").trim();
+    }
+
     if (!particulars) continue;
     if (SKIP_PARTICULARS.test(particulars)) continue;
 
