@@ -111,25 +111,50 @@ function normDateToIso(raw: string): string | null {
 
 function parseTsvLines(text: string): ParsedTransaction[] {
   const lines = text.trim().split("\n").filter((l) => l.trim());
-  const transactions: ParsedTransaction[] = [];
   const dataLines = lines[0]?.toLowerCase().startsWith("date") ? lines.slice(1) : lines;
 
-  for (const line of dataLines) {
-    const parts = line.split("\t").map((p) => p.trim());
-    if (parts.length < 5) continue;
-    const [rawDate, narration, ref_number, debitStr, creditStr, balanceStr] = parts;
-    if (!rawDate || !/\d/.test(rawDate)) continue;
-    if (!narration) continue;
-    // Normalise date at extraction time so cached data is always ISO format
-    const date = normDateToIso(rawDate);
-    if (!date) continue;
+  interface Pending { date: string; narration: string; ref: string; debitStr: string; creditStr: string; balanceStr: string }
+  let pending: Pending | null = null;
+  const transactions: ParsedTransaction[] = [];
+
+  function commitPending() {
+    if (!pending) return;
+    // If debit slot holds a date string (value-date column), shift right
+    let debitStr = pending.debitStr;
+    let creditStr = pending.creditStr;
+    let balanceStr = pending.balanceStr;
+    if (debitStr && /^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$/.test(debitStr.trim())) {
+      debitStr = creditStr; creditStr = balanceStr; balanceStr = "";
+    }
     let debitNum = debitStr ? parseFloat(debitStr.replace(/[₹,\s]/g, "")) || null : null;
     let creditNum = creditStr ? parseFloat(creditStr.replace(/[₹,\s]/g, "")) || null : null;
     const balanceNum = balanceStr ? parseFloat(balanceStr.replace(/[₹,\s]/g, "")) || null : null;
     if (debitNum !== null && debitNum < 0) { creditNum = Math.abs(debitNum); debitNum = null; }
     if (creditNum !== null && creditNum < 0) { debitNum = Math.abs(creditNum); creditNum = null; }
-    transactions.push({ date, narration, ref_number: ref_number || null, debit: debitNum, credit: creditNum, balance: balanceNum });
+    transactions.push({ date: pending.date, narration: pending.narration, ref_number: pending.ref || null, debit: debitNum, credit: creditNum, balance: balanceNum });
+    pending = null;
   }
+
+  for (const line of dataLines) {
+    const parts = line.split("\t").map((p) => p.trim());
+    const firstField = parts[0] ?? "";
+    const date = normDateToIso(firstField);
+
+    if (date) {
+      commitPending();
+      if (parts.length < 4) continue;
+      const narration = parts[1] ?? "";
+      if (!narration) continue;
+      pending = { date, narration, ref: parts[2] ?? "", debitStr: parts[3] ?? "", creditStr: parts[4] ?? "", balanceStr: parts[5] ?? "" };
+    } else {
+      // Continuation line — append to previous row's narration
+      if (pending) {
+        const continuation = parts.join(" ").trim();
+        if (continuation) pending.narration += " " + continuation;
+      }
+    }
+  }
+  commitPending();
   return transactions;
 }
 
@@ -138,11 +163,12 @@ const TSV_PROMPT = `Extract bank transactions from this statement. Return ONLY t
 Exact header line: date\tnarration\tref_number\tdebit\tcredit\tbalance
 Rules:
 - date: DD/MM/YYYY
-- narration: full text exactly as printed, keep any commas as-is
-- ref_number: UTR/cheque/ref number or leave empty
+- narration: full text of the description/particulars field only — do NOT include value-date or cheque-number columns in the narration. If the narration wraps across multiple printed lines, join all continuation lines with a space into ONE TSV row.
+- ref_number: UTR/cheque/ref number or leave empty. If the statement has a separate "Value Date" column, put it in ref_number or leave empty — never put it in debit or credit.
 - debit: withdrawal amount as positive number or empty
 - credit: deposit amount as positive number or empty
 - balance: closing balance as number or empty
+- Each transaction = exactly ONE TSV row. Never emit a row without a date.
 - Skip opening balance and closing balance summary rows
 - Separate every field with a TAB character, not a comma`;
 
