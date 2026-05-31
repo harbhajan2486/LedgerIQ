@@ -448,7 +448,7 @@ export default function ClientDetailPage() {
           const rawBuf = await singleFile.arrayBuffer();
           const srcPdf = await PDFDocument.load(rawBuf);
           const totalPages = srcPdf.getPageCount();
-          const CHUNK_SIZE = 25;
+          const CHUNK_SIZE = 10;
           const numChunks = Math.ceil(totalPages / CHUNK_SIZE);
 
           type StmtRow = { date: string; narration: string; debit: number | null; credit: number | null };
@@ -743,7 +743,7 @@ export default function ClientDetailPage() {
           const rawBuf = await file.arrayBuffer();
           const srcPdf = await PDFDocument.load(rawBuf);
           const totalPages = srcPdf.getPageCount();
-          const CHUNK_SIZE = 25;
+          const CHUNK_SIZE = 10;
           const numChunks = Math.ceil(totalPages / CHUNK_SIZE);
 
           for (let ci = 0; ci < numChunks; ci++) {
@@ -1231,7 +1231,7 @@ export default function ClientDetailPage() {
         const fileBytes = await file.arrayBuffer();
         const pdf = await PDFDocument.load(fileBytes);
         const totalPages = pdf.getPageCount();
-        const CHUNK = 25;
+        const CHUNK = 10;
         const totalChunks = Math.ceil(totalPages / CHUNK);
         const cachePrefix = `recon_${clientId}_${file.name}_${file.size}`;
 

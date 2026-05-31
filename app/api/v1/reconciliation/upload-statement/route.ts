@@ -10,21 +10,23 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 async function callWithRetry(fn: () => Promise<Anthropic.Message>): Promise<Anthropic.Message> {
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 4; attempt++) {
     try {
       return await fn();
     } catch (err) {
-      if (err instanceof Anthropic.RateLimitError) {
-        const headers = err.headers as unknown as Record<string, string> | undefined;
+      const isRate = err instanceof Anthropic.RateLimitError;
+      const isOverload = err instanceof Anthropic.InternalServerError;
+      if (isRate || isOverload) {
+        const headers = isRate ? (err.headers as unknown as Record<string, string> | undefined) : null;
         const retryAfterHeader = headers?.["retry-after"];
-        const waitSec = retryAfterHeader ? Math.ceil(parseFloat(retryAfterHeader)) : 15 * (attempt + 1);
+        const waitSec = retryAfterHeader ? Math.ceil(parseFloat(retryAfterHeader)) : 20 * (attempt + 1);
         await sleep(waitSec * 1000);
         continue;
       }
       throw err;
     }
   }
-  throw new Error("Rate limit exceeded after retries — try again in a minute.");
+  throw new Error("API unavailable after retries — try again in a minute.");
 }
 
 async function splitPdfIntoChunks(bytes: Uint8Array, pagesPerChunk: number): Promise<Uint8Array[]> {
@@ -193,7 +195,7 @@ async function extractChunkDirect(fileBytes: ArrayBuffer): Promise<{ transaction
 // Full-file PDF extraction (server-side splitting for backwards compat with direct uploads).
 async function parsePDFStatement(fileBytes: ArrayBuffer): Promise<{ transactions: ParsedTransaction[]; tokensIn: number; tokensOut: number; rawSample: string; chunks: number }> {
   const uint8 = new Uint8Array(fileBytes);
-  const chunks = await splitPdfIntoChunks(uint8, 25);
+  const chunks = await splitPdfIntoChunks(uint8, 10);
 
   const allTransactions: ParsedTransaction[] = [];
   let totalTokensIn = 0;
@@ -417,7 +419,7 @@ export async function POST(request: NextRequest) {
   const mode = (formData.get("mode") as string | null) ?? "";
 
   // ── Mode: extract_chunk ───────────────────────────────────────────────────
-  // Client sends one pre-split 25-page PDF blob. Server calls Claude once and
+  // Client sends one pre-split 10-page PDF blob. Server calls Claude once and
   // returns extracted transactions. No saving — client accumulates all chunks,
   // then calls save_rows at the end.
   if (mode === "extract_chunk") {

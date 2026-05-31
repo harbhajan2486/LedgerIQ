@@ -16,20 +16,24 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 async function callWithRetry(fn: () => Promise<Anthropic.Message>): Promise<Anthropic.Message> {
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 4; attempt++) {
     try {
       return await fn();
     } catch (err) {
-      if (err instanceof Anthropic.RateLimitError) {
-        const retryAfterHeader = err.headers?.get?.("retry-after") ?? (err.headers as unknown as Record<string, string>)?.["retry-after"];
-        const waitSec = retryAfterHeader ? Math.ceil(parseFloat(retryAfterHeader)) : 15 * (attempt + 1);
+      const isRate = err instanceof Anthropic.RateLimitError;
+      const isOverload = err instanceof Anthropic.InternalServerError;
+      if (isRate || isOverload) {
+        const retryAfterHeader = isRate
+          ? (err.headers?.get?.("retry-after") ?? (err.headers as unknown as Record<string, string>)?.["retry-after"])
+          : null;
+        const waitSec = retryAfterHeader ? Math.ceil(parseFloat(retryAfterHeader)) : 20 * (attempt + 1);
         await sleep(waitSec * 1000);
         continue;
       }
       throw err;
     }
   }
-  throw new Error("Rate limit exceeded after retries — try again in a minute.");
+  throw new Error("API unavailable after retries — try again in a minute.");
 }
 
 async function splitPdfIntoChunks(bytes: Uint8Array, pagesPerChunk: number): Promise<Uint8Array[]> {
@@ -156,9 +160,10 @@ export async function extractStatementFromPdf(fileBytes: ArrayBuffer): Promise<P
 
   const uint8 = new Uint8Array(fileBytes);
 
-  // Split into 25-page chunks. Each chunk ≈ 7,500 input tokens — well under
-  // the 50k/min org rate limit regardless of how many chunks there are.
-  const chunks = await splitPdfIntoChunks(uint8, 25);
+  // Split into 10-page chunks. Dense statements (~20 txns/page) produce ~200 TSV rows
+  // per chunk ≈ 9,000 output tokens — within Haiku's 8192 limit. 25-page chunks caused
+  // silent truncation and loss of the last ~300 rows per chunk.
+  const chunks = await splitPdfIntoChunks(uint8, 10);
 
   const allRows: StatementRow[] = [];
   let totalIn = 0;
