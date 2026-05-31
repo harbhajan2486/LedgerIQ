@@ -5389,6 +5389,24 @@ export default function ClientDetailPage() {
                     {bbResult.unmatched_count > 0 && !bbAddingStmt && (
                       <span className="text-xs text-gray-400">{bbResult.unmatched_count} unmatched BB rows</span>
                     )}
+                    {/* Clear statement cache */}
+                    {!bbAddingStmt && (
+                      <button
+                        onClick={() => {
+                          let cleared = 0;
+                          const keys = Object.keys(localStorage);
+                          for (const k of keys) {
+                            if (k.startsWith(`bb_chunk_${clientId}_`) || k.startsWith(`bb_extract_${clientId}_`)) {
+                              localStorage.removeItem(k);
+                              cleared++;
+                            }
+                          }
+                          toast.success(cleared > 0 ? `Cleared ${cleared} cached chunk${cleared !== 1 ? "s" : ""} — re-extraction will use AI` : "No cache found for this client");
+                        }}
+                        className="inline-flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg border border-gray-200 text-gray-400 hover:text-red-500 hover:border-red-200">
+                        <Trash2 size={11} /> Clear stmt cache
+                      </button>
+                    )}
                   </div>
 
                   {/* Coverage gap banner */}
