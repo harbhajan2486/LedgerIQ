@@ -9,7 +9,7 @@ import {
   Link2, Link2Off, X, Pencil, BookOpen, Download, Plus, Trash2,
   ShoppingCart, Receipt, Wallet, CreditCard, FolderOpen, ScrollText,
   BarChart3, ChevronDown, ChevronRight, ExternalLink, Search,
-  Filter, ArrowUp, ArrowDown, Info, Play, Pause
+  Filter, ArrowUp, ArrowDown, Info, Play, Pause, History
 } from "lucide-react";
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button-variants";
@@ -324,6 +324,8 @@ export default function ClientDetailPage() {
   const [bbSavedSession, setBbSavedSession] = useState<{ bb_filename?: string; stmt_filenames?: string[]; confirmed_at?: string; updated_at?: string } | null>(null);
   // True while checking DB for a saved session (prevents flash of upload step)
   const [bbSessionLoading, setBbSessionLoading] = useState(false);
+  // Preview card shown on the Mapping History tab (fetched when that tab is opened)
+  const [bbTabSessionPreview, setBbTabSessionPreview] = useState<{ financial_year?: string; bb_filename?: string; confirmed_at?: string; updated_at?: string; matched_count?: number; total_bb_rows?: number } | null | "loading">(null);
 
   function bbReset() {
     setBbStep("upload"); setBbResult(null); setBbColsNeeded(null);
@@ -1767,6 +1769,28 @@ export default function ClientDetailPage() {
   useEffect(() => { if (activeTab === "ledger_view" && !ledgerData) loadLedger(ledgerFromDate || undefined, ledgerToDate || undefined); }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "ledgers") { if (ledgers.length === 0) loadLedgers(); loadMappingRules(); } }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "mapping") { loadMappingRules(); if (ledgers.length === 0) loadLedgers(); } }, [activeTab, clientId]);
+  useEffect(() => {
+    if (activeTab !== "mapping") return;
+    setBbTabSessionPreview("loading");
+    fetch(`/api/v1/clients/${clientId}/import-bank-book`)
+      .then(r => r.json())
+      .then((d: { session: { bb_filename?: string; confirmed_at?: string; updated_at?: string; financial_year?: string; result_json?: { matched_count?: number; total_bb_rows?: number } } | null }) => {
+        if (d.session) {
+          setBbTabSessionPreview({
+            financial_year: d.session.financial_year,
+            bb_filename: d.session.bb_filename,
+            confirmed_at: d.session.confirmed_at,
+            updated_at: d.session.updated_at,
+            matched_count: d.session.result_json?.matched_count,
+            total_bb_rows: d.session.result_json?.total_bb_rows,
+          });
+        } else {
+          setBbTabSessionPreview(null);
+        }
+      })
+      .catch(() => setBbTabSessionPreview(null));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, clientId]);
   useEffect(() => { if (activeTab === "gst") loadGstData(); }, [activeTab, clientId, gstPeriodFrom, gstPeriodTo]);
   useEffect(() => { if (activeTab === "expected") loadExpected(); }, [activeTab, clientId]);
 
@@ -1775,10 +1799,12 @@ export default function ClientDetailPage() {
   useEffect(() => {
     if (!bbImportOpen || bbResult) return; // skip if already has data in memory
     setBbSessionLoading(true);
-    fetch(`/api/v1/clients/${clientId}/import-bank-book?financial_year=${encodeURIComponent(bbFinancialYear)}`)
+    // Fetch without FY — returns latest session regardless of which FY it was saved under
+    fetch(`/api/v1/clients/${clientId}/import-bank-book`)
       .then(r => r.json())
-      .then((d: { session: { result_json: unknown; bb_filename?: string; stmt_filenames?: string[]; confirmed_at?: string; updated_at?: string } | null }) => {
+      .then((d: { session: { result_json: unknown; bb_filename?: string; stmt_filenames?: string[]; confirmed_at?: string; updated_at?: string; financial_year?: string } | null }) => {
         if (d.session?.result_json) {
+          if (d.session.financial_year) setBbFinancialYear(d.session.financial_year);
           setBbResult(d.session.result_json as BbMatchResult);
           setBbStep("review");
           setBbSavedSession({ bb_filename: d.session.bb_filename, stmt_filenames: d.session.stmt_filenames, confirmed_at: d.session.confirmed_at, updated_at: d.session.updated_at });
@@ -4080,13 +4106,43 @@ export default function ClientDetailPage() {
                     );
                   })()}
                 </div>
-                <button
-                  onClick={() => setBbImportOpen(true)}
-                  className="flex-shrink-0 px-4 py-2 rounded-md bg-purple-600 text-white text-sm font-medium hover:bg-purple-700 inline-flex items-center gap-2"
-                >
-                  <Upload size={13} /> Import bank book
-                </button>
+                <div className="flex flex-col gap-2 flex-shrink-0 items-end">
+                  {bbTabSessionPreview && bbTabSessionPreview !== "loading" && (
+                    <button
+                      onClick={() => setBbImportOpen(true)}
+                      className="px-4 py-2 rounded-md bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 inline-flex items-center gap-2"
+                    >
+                      <History size={13} />
+                      View session {bbTabSessionPreview.financial_year ? `FY ${bbTabSessionPreview.financial_year}` : ""}
+                      {bbTabSessionPreview.confirmed_at ? " ✓" : ""}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setBbImportOpen(true)}
+                    className="px-4 py-2 rounded-md bg-purple-600 text-white text-sm font-medium hover:bg-purple-700 inline-flex items-center gap-2"
+                  >
+                    <Upload size={13} /> Import bank book
+                  </button>
+                </div>
               </div>
+              {bbTabSessionPreview && bbTabSessionPreview !== "loading" && (
+                <div className="mt-3 pt-3 border-t border-purple-100 flex items-center gap-3 text-xs text-purple-700">
+                  <CheckCircle2 size={13} className={bbTabSessionPreview.confirmed_at ? "text-green-600" : "text-blue-500"} />
+                  <span>
+                    Saved session: FY {bbTabSessionPreview.financial_year ?? "—"}
+                    {bbTabSessionPreview.bb_filename && ` · ${bbTabSessionPreview.bb_filename}`}
+                    {bbTabSessionPreview.matched_count != null && bbTabSessionPreview.total_bb_rows != null &&
+                      ` · ${bbTabSessionPreview.matched_count}/${bbTabSessionPreview.total_bb_rows} rows matched`}
+                    {bbTabSessionPreview.confirmed_at ? " · Confirmed" : " · Not yet confirmed"}
+                  </span>
+                  <button
+                    onClick={() => setBbImportOpen(true)}
+                    className="ml-auto text-purple-600 hover:text-purple-800 underline underline-offset-2"
+                  >
+                    Open →
+                  </button>
+                </div>
+              )}
             </CardContent>
           </Card>
 
